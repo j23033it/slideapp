@@ -20,6 +20,48 @@ export interface OpenedFile {
   mtime: number
 }
 
+/** 保存に成功したときの結果 */
+export interface SavedFile {
+  hash: string
+  mtime: number
+}
+
+/**
+ * `save_file` / `write_new_file` の結果。
+ * Rust側の失敗値（`{ kind: "conflict" }` / `{ kind: "io" }`）をそのまま表す。
+ */
+export type SaveOutcome =
+  | { ok: true; hash: string; mtime: number }
+  | { ok: false; kind: 'conflict'; diskHash: string }
+  | { ok: false; kind: 'io'; message: string }
+
+/** ファイル監視のイベント。自分の保存では届かない */
+export interface FileChangedEvent {
+  path: string
+  text: string
+  hasBom: boolean
+  hash: string
+  mtime: number
+}
+
+export interface FileRemovedEvent {
+  path: string
+}
+
+export interface FileUnreadableEvent {
+  path: string
+  message: string
+}
+
+export interface FileEventHandlers {
+  changed(event: FileChangedEvent): void
+  removed(event: FileRemovedEvent): void
+  unreadable(event: FileUnreadableEvent): void
+}
+
+/** 未保存のまま閉じようとしたときに呼ばれる */
+export type CloseRequestHandler = () => void
+
 /**
  * Tauri呼び出しの薄い包み。テストや将来の差し替えのため、UIはこの型だけに依存する。
  */
@@ -34,6 +76,22 @@ export interface Platform {
   settingsSet(settings: AppSettings): Promise<void>
   /** ローカル絶対パスをWebViewから読める資産URLに変換する */
   convertFileSrc(absolutePath: string): string
+
+  /** 原子的に保存する。`expectedHash` がディスクと違えば conflict を返す */
+  saveFile(path: string, text: string, hasBom: boolean, expectedHash: string): Promise<SaveOutcome>
+  /** 既存ファイルを上書きせずに新規作成する */
+  writeNewFile(path: string, text: string, hasBom: boolean): Promise<SaveOutcome>
+  /** 監視を止める。`open_file` が監視を開始する */
+  stopWatching(): Promise<void>
+  /** `file-changed` / `file-removed` / `file-unreadable` を購読する */
+  listenFileEvents(handlers: FileEventHandlers): Promise<() => void>
+
+  /** OSのウィンドウタイトルを変える */
+  setWindowTitle(title: string): Promise<void>
+  /** 未保存のまま閉じようとしたときだけ購読する。購読中は閉じるのを保留する */
+  onCloseRequested(handler: CloseRequestHandler): Promise<() => void>
+  /** 保留したクローズを実行する */
+  forceClose(): Promise<void>
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

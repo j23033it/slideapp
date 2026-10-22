@@ -1,7 +1,43 @@
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
-import type { AppSettings, OpenedFile, Platform } from './types'
+import type {
+  AppSettings,
+  CloseRequestHandler,
+  FileChangedEvent,
+  FileEventHandlers,
+  FileRemovedEvent,
+  FileUnreadableEvent,
+  OpenedFile,
+  Platform,
+  SaveOutcome,
+} from './types'
+
+interface SaveValue {
+  hash?: unknown
+  mtime?: unknown
+  kind?: unknown
+  diskHash?: unknown
+  message?: unknown
+}
+
+/** Rust側の保存結果（成功・conflict・io）を判別する */
+export function toSaveOutcome(value: unknown): SaveOutcome {
+  if (typeof value === 'string') return { ok: false, kind: 'io', message: value }
+  const record = (typeof value === 'object' && value !== null ? value : {}) as SaveValue
+  if (typeof record.hash === 'string') {
+    return { ok: true, hash: record.hash, mtime: typeof record.mtime === 'number' ? record.mtime : 0 }
+  }
+  if (record.kind === 'conflict') {
+    return { ok: false, kind: 'conflict', diskHash: typeof record.diskHash === 'string' ? record.diskHash : '' }
+  }
+  if (record.kind === 'io') {
+    return { ok: false, kind: 'io', message: typeof record.message === 'string' ? record.message : '' }
+  }
+  throw new Error('保存結果を解釈できませんでした')
+}
 
 /**
  * Tauri 2 のコマンドを呼ぶ実装。
@@ -39,5 +75,65 @@ export const tauriPlatform: Platform = {
 
   convertFileSrc(absolutePath: string): string {
     return convertFileSrc(absolutePath)
+  },
+
+  async saveFile(path: string, text: string, hasBom: boolean, expectedHash: string): Promise<SaveOutcome> {
+    try {
+      return toSaveOutcome(await invoke<unknown>('save_file', { path, text, hasBom, expectedHash }))
+    } catch (error) {
+      // Tauri は `Err` を例外として返す。保存結果の形ならそのまま解釈する。
+      return toSaveOutcome(error)
+    }
+  },
+
+  async writeNewFile(path: string, text: string, hasBom: boolean): Promise<SaveOutcome> {
+    try {
+      return toSaveOutcome(await invoke<unknown>('write_new_file', { path, text, hasBom }))
+    } catch (error) {
+      return toSaveOutcome(error)
+    }
+  },
+
+  async stopWatching(): Promise<void> {
+    if (!isTauri()) return
+    await invoke<void>('stop_watching')
+  },
+
+  async listenFileEvents(handlers: FileEventHandlers): Promise<() => void> {
+    if (!isTauri()) return () => {}
+    const unlisten = await Promise.all([
+      listen<FileChangedEvent>('file-changed', (event) => handlers.changed(event.payload)),
+      listen<FileRemovedEvent>('file-removed', (event) => handlers.removed(event.payload)),
+      listen<FileUnreadableEvent>('file-unreadable', (event) => handlers.unreadable(event.payload)),
+    ])
+    return () => {
+      for (const stop of unlisten) stop()
+    }
+  },
+
+  async setWindowTitle(title: string): Promise<void> {
+    if (!isTauri()) return
+    await getCurrentWindow().setTitle(title)
+  },
+
+  async onCloseRequested(handler: CloseRequestHandler): Promise<() => void> {
+    if (!isTauri()) return () => {}
+    return getCurrentWindow().onCloseRequested((event) => {
+      // 保留したクローズは forceClose() で実行する。ここでは常に止める。
+      event.preventDefault()
+      handler()
+    })
+  },
+
+  async forceClose(): Promise<void> {
+    if (!isTauri()) return
+    const window = getCurrentWindow()
+    try {
+      await window.destroy()
+      return
+    } catch {
+      // `core:window:allow-destroy` が無い環境では close を試す。
+    }
+    await window.close()
   },
 }
