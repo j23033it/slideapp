@@ -9,6 +9,7 @@ export type {
   AppSettings,
   OpenedFile,
   Platform,
+  ThemeConfig,
   ThemePreference,
   UpdateInfo,
   UpdateProgress,

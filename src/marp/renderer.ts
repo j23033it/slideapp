@@ -1,6 +1,8 @@
 import { Marp } from '@marp-team/marp-core'
 
+import { createEngine, type Analysis, type EditingEngine } from '../editing'
 import { installImagePathRule, rewriteCssUrls, type MarkdownItLike } from './urls'
+import { registerThemes, type ThemeCss, type ThemeRegistrationResult } from './themes'
 
 /** 1デッキ分の描画結果 */
 export interface RenderedDeck {
@@ -11,6 +13,12 @@ export interface RenderedDeck {
   /** スライドの基準サイズ（px） */
   width: number
   height: number
+}
+
+/** 解析結果と、それを表示するためのデッキ */
+export interface RenderedAnalysis {
+  analysis: Analysis
+  deck: RenderedDeck
 }
 
 const DEFAULT_WIDTH = 1280
@@ -83,36 +91,69 @@ export function splitRenderedSlides(html: string): {
 }
 
 /**
- * Marp Coreの描画。インスタンスを再利用し、画像パスだけを描画時に資産URLへ変換する。
+ * Marp Coreの描画。インスタンスを1つだけ作り、画像パス規則を登録してから
+ * 編集エンジンを作る（READMEの手順）。表示HTMLは `engine.analyze()` の結果を使い、
+ * `marp.render()` を二重に呼ばない。
  */
 export class MarpRenderer {
   private readonly marp: Marp
+  private readonly engine: EditingEngine
   private baseDir: string | null = null
   private lastKey: string | null = null
-  private lastDeck: RenderedDeck | null = null
+  private last: RenderedAnalysis | null = null
 
   constructor(private readonly toAssetUrl: (absolutePath: string) => string) {
     this.marp = new Marp({ script: false, math: 'mathjax' })
     installImagePathRule(this.marp.markdown as MarkdownItLike, () => this.baseDir, toAssetUrl)
+    this.engine = createEngine(this.marp)
   }
 
-  /** 同じ入力の再描画は前回の結果を返す */
-  render(text: string, baseDir: string | null): RenderedDeck {
+  /** 編集エンジン（`applyRunEdit` はこのインスタンスの最新解析に対して動く） */
+  get editing(): EditingEngine {
+    return this.engine
+  }
+
+  /** 現在のファイル用のカスタムテーマを登録し、描画キャッシュを無効にする */
+  setThemes(themes: readonly ThemeCss[]): ThemeRegistrationResult {
+    const result = registerThemes(this.marp, themes, this.toAssetUrl)
+    this.lastKey = null
+    this.last = null
+    return result
+  }
+
+  /** 解析と描画を同時に行う。同じ入力・基準フォルダなら前回の結果を返す */
+  analyze(text: string, baseDir: string | null): RenderedAnalysis {
     const key = `${baseDir ?? ''}\u0000${text}`
-    if (key === this.lastKey && this.lastDeck) return this.lastDeck
+    if (key === this.lastKey && this.last) return this.last
 
     this.baseDir = baseDir
-    const { html, css } = this.marp.render(text)
-    const { slides, width, height } = splitRenderedSlides(html)
-    const deck: RenderedDeck = {
+    const analysis = this.engine.analyze(text)
+    const result = { analysis, deck: this.buildDeck(analysis, baseDir) }
+    this.lastKey = key
+    this.last = result
+    return result
+  }
+
+  /** 編集中に採用された解析結果を、次回のキャッシュとして受け入れる */
+  update(analysis: Analysis, baseDir: string | null): RenderedDeck {
+    const deck = this.buildDeck(analysis, baseDir)
+    this.lastKey = `${baseDir ?? ''}\u0000${analysis.text}`
+    this.last = { analysis, deck }
+    return deck
+  }
+
+  /** 表示用のデッキ。既存の呼び出し元との互換用 */
+  render(text: string, baseDir: string | null): RenderedDeck {
+    return this.analyze(text, baseDir).deck
+  }
+
+  private buildDeck(analysis: Analysis, baseDir: string | null): RenderedDeck {
+    const { slides, width, height } = splitRenderedSlides(analysis.html)
+    return {
       slides,
-      css: rewriteCssUrls(css, baseDir, this.toAssetUrl),
+      css: rewriteCssUrls(analysis.css, baseDir, this.toAssetUrl),
       width,
       height,
     }
-
-    this.lastKey = key
-    this.lastDeck = deck
-    return deck
   }
 }

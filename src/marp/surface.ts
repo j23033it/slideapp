@@ -32,6 +32,28 @@ const BASE_CSS = `
 .surface[data-layout='list'] .slot { cursor: pointer; }
 .surface[data-layout='list'] .slot[data-active='true'] { outline: 2px solid var(--sm-accent, #0f6cbd); outline-offset: -2px; }
 .surface[data-layout='list'] .slot:focus-visible { outline: 2px solid var(--sm-accent, #0f6cbd); outline-offset: -2px; }
+/* 編集状態: 編集中のブロックは細い枠、カーソルは文字用にする */
+.surface[data-layout='single'] .frame [data-sm-block][contenteditable='true'] {
+  outline: 1px solid var(--sm-accent, #0f6cbd);
+  outline-offset: 2px;
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.surface[data-layout='single'] .frame [data-sm-block][contenteditable='true'] * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* 読み取り専用: ポインターを重ねたら点線の枠 */
+.surface[data-layout='single'] .frame [data-sm-readonly]:hover,
+.surface[data-layout='single'] .frame section table:hover,
+.surface[data-layout='single'] .frame section pre:hover,
+.surface[data-layout='single'] .frame section code:hover,
+.surface[data-layout='single'] .frame section img:hover,
+.surface[data-layout='single'] .frame section mjx-container:hover {
+  outline: 1px dotted var(--sm-readonly, #b45309);
+  outline-offset: 1px;
+}
 `
 
 function roundScale(value: number): number {
@@ -78,6 +100,11 @@ export class SlideSurface {
     this.resizeObserver = new ResizeObserver(() => this.applySizes())
     this.resizeObserver.observe(host)
     this.resizeObserver.observe(this.surface)
+  }
+
+  /** 編集エンジンがDOMを探索・検証するためのルート */
+  get root(): ShadowRoot {
+    return this.shadow
   }
 
   /** 描画結果を反映する。変わったスライドだけDOMを差し替える */

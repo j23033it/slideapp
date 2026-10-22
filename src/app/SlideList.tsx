@@ -6,20 +6,23 @@ import { strings } from './strings'
 
 export interface SlideListProps {
   deck: RenderedDeck | null
+  version: number
   current: number
   onSelect: (index: number) => void
   onCollapse: () => void
 }
 
 /** 左のスライド一覧。描画はShadow DOM側（SlideSurface）が担当する */
-export function SlideList({ deck, current, onSelect, onCollapse }: SlideListProps) {
+export function SlideList({ deck, version, current, onSelect, onCollapse }: SlideListProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<SlideSurface | null>(null)
   const onSelectRef = useRef(onSelect)
   const totalRef = useRef(0)
+  const deckRef = useRef(deck)
 
   onSelectRef.current = onSelect
   totalRef.current = deck?.slides.length ?? 0
+  deckRef.current = deck
 
   useEffect(() => {
     const host = hostRef.current
@@ -39,8 +42,10 @@ export function SlideList({ deck, current, onSelect, onCollapse }: SlideListProp
   }, [])
 
   useEffect(() => {
-    if (deck) surfaceRef.current?.update(deck, current)
-  }, [deck, current])
+    // 編集中は `deck` が毎回変わるので、確定した `version` のときだけ描き直す。
+    const latest = deckRef.current
+    if (latest) surfaceRef.current?.update(latest, current)
+  }, [version, current])
 
   return (
     <>

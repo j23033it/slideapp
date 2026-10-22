@@ -5,10 +5,17 @@ export interface ToolbarProps {
   theme: ThemePreference
   sidebarCollapsed: boolean
   busy: boolean
+  canSave: boolean
+  canUndo: boolean
+  canRedo: boolean
   onOpen: () => void
+  onSave: () => void
+  onUndo: () => void
+  onRedo: () => void
   onToggleSidebar: () => void
   onCycleTheme: () => void
   onOpenSettings: () => void
+  onCheckUpdates: () => void
 }
 
 const THEME_ICON: Record<ThemePreference, string> = {
@@ -21,10 +28,17 @@ export function Toolbar({
   theme,
   sidebarCollapsed,
   busy,
+  canSave,
+  canUndo,
+  canRedo,
   onOpen,
+  onSave,
+  onUndo,
+  onRedo,
   onToggleSidebar,
   onCycleTheme,
   onOpenSettings,
+  onCheckUpdates,
 }: ToolbarProps) {
   const sidebarTitle = sidebarCollapsed
     ? strings.toolbar.sidebarToggleShow
@@ -52,13 +66,33 @@ export function Toolbar({
       >
         {strings.toolbar.open}
       </button>
-      <button type="button" class="toolbar-button" title={strings.toolbar.saveTitle} disabled>
+      <button
+        type="button"
+        class="toolbar-button"
+        title={strings.toolbar.saveTitle}
+        onClick={onSave}
+        disabled={!canSave || busy}
+      >
         {strings.toolbar.save}
       </button>
-      <button type="button" class="toolbar-button" title={strings.toolbar.undoTitle} disabled>
+      <button
+        type="button"
+        class="toolbar-button"
+        title={strings.toolbar.undoTitle}
+        aria-label={strings.toolbar.undo}
+        onClick={onUndo}
+        disabled={!canUndo || busy}
+      >
         ↶
       </button>
-      <button type="button" class="toolbar-button" title={strings.toolbar.redoTitle} disabled>
+      <button
+        type="button"
+        class="toolbar-button"
+        title={strings.toolbar.redoTitle}
+        aria-label={strings.toolbar.redo}
+        onClick={onRedo}
+        disabled={!canRedo || busy}
+      >
         ↷
       </button>
 
@@ -66,6 +100,14 @@ export function Toolbar({
 
       <button type="button" class="toolbar-button" title={strings.toolbar.exportPptxTitle} disabled>
         {strings.toolbar.exportPptx}
+      </button>
+      <button
+        type="button"
+        class="toolbar-button"
+        title={strings.toolbar.checkUpdatesTitle}
+        onClick={onCheckUpdates}
+      >
+        {strings.toolbar.checkUpdates}
       </button>
 
       <div class="toolbar-spacer" />
