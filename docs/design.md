@@ -250,9 +250,12 @@ Marp CLIの `--pptx` は各スライドを画像にするため編集できな�
 - 段落ごとに、文字ランを計算済みスタイル付きで集める：フォント名（`font-family` の先頭で実際に使えるもの）、サイズ（px→pt）、色、太字、斜体、下線、取り消し線、リンク先、文字間隔
 - 段落の行間（`line-height`）、前後の余白、文字の配置、インデントを反映する
 - 箇条書きは記号の種類（`list-style-type`）と階層を反映する。番号付きリストは開始番号も反映する
+- 入れ子を含むリスト全体を1つのテキストボックスにし、各項目を段落にする。段落の階層・記号・開始番号と、DOMで実測した本文位置・段落間隔を設定する。PptxGenJSが階層数から再計算するインデントは、生成後のOOXMLで実測値に補正する
 - 和文フォントはPPTXの `ea`（東アジア）フォントにも同じ名前を設定する
 - テキストボックスの自動調整はオフにし、DOMの実測の大きさに少し余白を足す（折り返し位置の差による溢れを防ぐ）
+- Marpで自動縮小済みの1行の見出しは、PowerPoint側のフォント幅の差で再び改行されないよう折り返しを無効にする
 - Webフォント（`@import` のGoogle Fontsなど）は、Windowsにあればその名前、なければ近い代替（例：Noto Sans JP → Yu Gothic、Lato → Segoe UI）で書き出し、一覧に記録する
+- 表のセル余白はDOMのpaddingをインチで渡す。列幅は実測した各行の文字幅と余白にフォント差の予備幅を加えた最小幅を確保し、行高は実測値を指定する。PowerPointが折り返しで行高を伸ばし、後続要素と重なることを防ぐ
 
 ### 8.4 画像化
 
@@ -263,6 +266,19 @@ PowerPointの部品で再現できない要素（数式、絵文字、SVG、グ�
 - 透明部分を保ち、高解像度（2倍）で出力する
 
 **技術的な確認事項（実装の最初に検証する）**：WebView2上で `foreignObject` → canvas の画像化が、Tauriの資産URL・Webフォント・Marpのテーマで正しく動くか。動かない場合は、Rust側でWebView2の `CapturePreview` を使い、画面の該当範囲を切り出す方式に切り替える。
+
+2026-10-22の検証結果：実際のTauriアプリをWebView2（Chromium/Edge 155）で起動し、CDPからdefault / gaia / uncover、日本語、表、入れ子リスト、左右の背景分割、MathJax、SVG、独自テーマをPPTXへ出力した。資産URLのPNG・SVGを事前にdata URLへ変換するとcanvas汚染は起きず、数式と透過PNGも描画できた。data URLで埋め込んだWebフォントも画素が出ることを確認したため、`CapturePreview` は使わない。再実行用の入口は `tests/export/webview2.mjs`。
+
+- `html-to-image.toPng()` は非表示ウィンドウで `requestAnimationFrame` 待ちになるため、`toSvg()` の後に `Image.decode()` とcanvasを直接使う。
+- Marpのコード・自動縮小はShadow DOM内のSVGとslotを使う。画像化の直前だけSVG内のslotを計算済みスタイル付きの内容へ展開し、終了時に戻す。展開しない場合にコードの文字だけが欠落する問題を確認し、実画像の構文色の画素を検査する回帰チェックを追加した。編集可能な自動縮小見出しはSVGの実倍率を文字サイズに反映する。
+- 現在のCSPの `connect-src` は外部フォントのfetchを許可しない。取得できないフォントはローカルのフォールバックで計測し、代替名と警告をレポートする。あらかじめ埋め込んだ `fontEmbedCSS` もAPIで受け取れる。Webフォントの外部取得を有効にする場合は、UIへの組み込み時にフォント配信元をCSPへ追加する必要がある。
+- 原画像の取得失敗やcanvas汚染はエラーとして返し、画像が欠落したファイルを保存しない。
+
+- Native conversion is allowed only for structures and styles verified in PowerPoint. DOM-independent classification records why inline images, images in tables, unsupported list blocks, inline decoration, and text-transform require rasterization. Hidden text is excluded from native runs; text alpha is serialized as OOXML run transparency.
+- Section effects and decorated generated boxes require a full-slide raster so that backgrounds and children share the same compositing context. Pseudo-element content/background/mask/border assets are embedded before cloning; an asset failure aborts export with the element and pseudo-element identified.
+- Raster fallback keeps the original Marp DOM/CSS formatting context and isolates other painted branches without removing their layout space. Shadow DOM/slots alone are materialized with computed styles. Generated decoration uses the full slide viewport to retain its original containing block.
+- Raster bounds include descendant overflow and shadow/filter extents, and image placement uses those expanded bounds. The slide viewport remains the final clip.
+- Repeated background-only surfaces use an export-local cache keyed by computed appearance, not slide content or pagination. Identical PNG media are stored once in the PPTX package. Table cells retain their measured top/middle/bottom vertical alignment.
 
 ### 8.5 精度の検証
 

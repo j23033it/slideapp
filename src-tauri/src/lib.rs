@@ -1,4 +1,5 @@
 mod files;
+mod binary;
 mod prefs;
 mod watching;
 
@@ -76,6 +77,7 @@ pub fn run() {
         .manage(FileService::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            binary::write_binary,
             open_file,
             save_file,
             write_new_file,
