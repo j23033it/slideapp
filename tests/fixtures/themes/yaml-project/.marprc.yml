@@ -1,0 +1,4 @@
+# Marp CLI の設定（テスト用）
+themeSet:
+  - ./themes/alpha.css
+  - ./themes # フォルダなら直下の *.css を読み込む

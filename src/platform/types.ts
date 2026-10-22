@@ -44,11 +44,30 @@ export interface OpenedFile {
   mtime: number
 }
 
+/** Rust側の `read_theme_config` が返すテーマCSS1件 */
+export interface ThemeCssFile {
+  /** CSSファイルの絶対パス */
+  path: string
+  css: string
+}
+
+/** Rust側の `read_theme_config` の戻り値 */
+export interface ThemeConfig {
+  themes: ThemeCssFile[]
+  /** 読めなかった設定・CSSの理由（日本語） */
+  warnings: string[]
+}
+
 /**
  * Tauri呼び出しの薄い包み。テストや将来の差し替えのため、UIはこの型だけに依存する。
  */
 export interface Platform {
   openFile(path: string): Promise<OpenedFile>
+  /**
+   * 開いたMarkdownの近くにあるMarpのテーマ設定を読み、CSS本体と警告を返す。
+   * 読み込んだCSSのフォルダはRust側で資産プロトコルの許可範囲に加わる。
+   */
+  readThemeConfig(markdownPath: string): Promise<ThemeConfig>
   /** .md選択ダイアログを開く。キャンセル時は null */
   pickMarkdownFile(filterName: string): Promise<string | null>
   recentFilesGet(): Promise<string[]>
