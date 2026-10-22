@@ -31,7 +31,7 @@ function correctListIndents(xml: string, lists: Map<string, Extract<Part, { kind
         // PptxGenJS emits pPr for each rich run; OOXML permits just one per paragraph.
         if (!first) return ''
         first = false
-        const attrs = ` lvl="${Math.min(8, p.list?.level ?? 0)}" marL="${Math.round((p.rect.x - list.rect.x) * 9525)}" indent="${p.list && p.list.type !== 'none' ? -Math.round(p.list.indent * 9525) : 0}"`
+        const attrs = ` lvl="${p.list?.level ?? 0}" marL="${Math.round((p.rect.x - list.rect.x) * 9525)}" indent="${p.list && p.list.type !== 'none' ? -Math.round(p.list.indent * 9525) : 0}"`
         return properties.replace(/ (?:lvl|marL|indent)="[^"]*"/g, '').replace('<a:pPr', `<a:pPr${attrs}`)
       })
     })

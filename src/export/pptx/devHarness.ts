@@ -73,7 +73,7 @@ export async function showFixtureForCDP(markdown: string, baseDir: string, index
   const handle = browser(root)
   previewCleanup = () => { handle.cleanup(); host.remove() }
   // Keep the visible reference independent of export asset inlining.
-  await Promise.all([...root.querySelectorAll('img')].map(image => image.decode()))
+  await Promise.allSettled([...root.querySelectorAll('img')].map(image => image.decode()))
   await document.fonts.ready
   handle.update()
   await new Promise(resolve => setTimeout(resolve, 300))

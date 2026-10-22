@@ -1,5 +1,13 @@
 import type PptxGenJS from 'pptxgenjs'
 
+// A single source of truth for eligibility and serialization. No default marker.
+export const NUMBER_MARKERS: Readonly<Record<string, string>> = {
+  decimal: 'arabicPeriod', 'lower-alpha': 'alphaLcPeriod', 'upper-alpha': 'alphaUcPeriod',
+  'lower-roman': 'romanLcPeriod', 'upper-roman': 'romanUcPeriod',
+}
+export const BULLET_MARKERS: Readonly<Record<string, string>> = { circle: '25CB', square: '25AA', disc: '2022' }
+export const supportedMarker = (value: string): boolean => value === 'none' || Object.hasOwn(NUMBER_MARKERS, value) || Object.hasOwn(BULLET_MARKERS, value)
+
 export interface Rect { x: number; y: number; width: number; height: number }
 export interface RunStyle {
   transparency?: number
@@ -35,8 +43,16 @@ export interface ExportReport {
   slideCount: number
   rasterizedCount: number
   rasterizedElements: { slide: number; element: string; reason: string }[]
+  approximatedElements?: { slide: number; element: string; property: string; value: string; replacement: string }[]
   substitutedFonts: { requested: string; replacement: string }[]
   warnings: string[]
+  errors?: { slide: number; element: string; reason: string }[]
+}
+
+export function reportElementError(report: ExportReport, slide: number, element: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error)
+  ;(report.errors ??= []).push({ slide, element, reason })
+  report.warnings.push(`Error on slide ${slide}, ${element}: ${reason}`)
 }
 
 /** Geometry uses CSS pixels (96 dpi); no DOM or font metrics are guessed here. */
@@ -66,13 +82,16 @@ export function toTextOptions(p: Paragraph, scale = 1 / 96): PptxGenJS.TextProps
     paraSpaceBefore: p.spaceBefore * pt, paraSpaceAfter: p.spaceAfter * pt,
     fill: p.fill,
   }
-  if (p.list && p.list.type !== 'none') {
+  if (p.list) {
     const list = p.list
-    options.indentLevel = Math.min(8, list.level)
-    const numbers: Record<string, string> = { decimal: 'arabicPeriod', 'decimal-leading-zero': 'arabicPeriod', 'lower-alpha': 'alphaLcPeriod', 'upper-alpha': 'alphaUcPeriod', 'lower-roman': 'romanLcPeriod', 'upper-roman': 'romanUcPeriod' }
-    options.bullet = numbers[list.type]
-      ? { type: 'number', style: numbers[list.type], numberStartAt: list.start, indent: list.indent * pt }
-      : { characterCode: ({ circle: '25CB', square: '25AA', disc: '2022' } as Record<string, string>)[list.type] ?? '2022', indent: list.indent * pt }
+    if (!supportedMarker(list.type)) throw new Error(`Unsupported CSS list-style-type: ${list.type}`)
+    if (!Number.isInteger(list.level) || list.level < 0 || list.level > 8) throw new Error(`Unsupported list level: ${list.level}`)
+    if (!Number.isInteger(list.start) || list.start < 1 || list.start > 32767) throw new Error(`Unsupported list start: ${list.start}`)
+    if (list.type === 'none') return options
+    options.indentLevel = list.level
+    options.bullet = Object.hasOwn(NUMBER_MARKERS, list.type)
+      ? { type: 'number', style: NUMBER_MARKERS[list.type], numberStartAt: list.start, indent: list.indent * pt }
+      : { characterCode: BULLET_MARKERS[list.type]!, indent: list.indent * pt }
     // The DOM rect starts at the text. Move the shape left to accommodate its marker.
     options.x = Number(options.x) - list.indent * scale
     options.w = Number(options.w) + list.indent * scale
@@ -86,5 +105,26 @@ export function cssColor(value: string): { color: string; transparency: number }
   if (hex) return { color: hex[1]!.toUpperCase(), transparency: 0 }
   const rgb = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/i.exec(value)
   if (!rgb) throw new Error(`Unsupported computed color: ${value}`)
+  if (rgb.slice(1, 4).some(n => !Number.isFinite(Number(n)) || Number(n) > 255) || !Number.isFinite(Number(rgb[4] ?? 1)) || Number(rgb[4] ?? 1) > 1) throw new Error(`Unsupported computed color: ${value}`)
   return { color: rgb.slice(1, 4).map(n => Math.round(Number(n)).toString(16).padStart(2, '0')).join('').toUpperCase(), transparency: Math.round((1 - Number(rgb[4] ?? 1)) * 100) }
+}
+
+/** Run the serializer's contracts while the original DOM is still available for fallback. */
+export function validatePart(part: Part): void {
+  const paragraph = (p: Paragraph) => {
+    toTextOptions(p)
+    if (![p.lineHeight, p.spaceBefore, p.spaceAfter, ...p.padding].every(Number.isFinite) || p.lineHeight <= 0) throw new Error('Invalid measured paragraph style')
+    for (const run of p.runs) if (!Number.isFinite(run.style.fontSize) || run.style.fontSize <= 0 || !Number.isFinite(run.style.letterSpacing)) throw new Error('Invalid measured run style')
+  }
+  if (part.kind === 'text') paragraph(part.paragraph)
+  else if (part.kind === 'line') {
+    if (![part.x, part.y, part.width, part.height, part.points].every(Number.isFinite)) throw new Error('Invalid measured line')
+  } else {
+    toPosition(part.rect)
+    if (part.kind === 'list') part.paragraphs.forEach(paragraph)
+    if (part.kind === 'table') {
+      if (!part.rows.length || !part.columnWidths.length || part.rows.some(row => row.length !== part.columnWidths.length) || part.rowHeights.length !== part.rows.length || [...part.columnWidths, ...part.rowHeights].some(n => !Number.isFinite(n) || n <= 0)) throw new Error('Invalid measured table geometry')
+      part.rows.flat().forEach(cell => paragraph(cell.style))
+    }
+  }
 }

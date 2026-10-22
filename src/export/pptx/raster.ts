@@ -1,4 +1,5 @@
 import { toSvg } from 'html-to-image'
+import { isPainted, paintedState } from './visibility'
 
 export async function loadImage(url: string): Promise<HTMLImageElement> {
   const image = new Image()
@@ -21,7 +22,7 @@ export async function imageDataUrl(url: string): Promise<string> {
 }
 
 /** Resolve every image before html-to-image (which otherwise silently ignores failed fetches). */
-export async function inlineImages(root: ParentNode, resolveImage = imageDataUrl): Promise<void> {
+export async function inlineImages(root: ParentNode, resolveImage = imageDataUrl, onError?: (element: HTMLElement, error: unknown) => void): Promise<void> {
   const cache = new Map<string, Promise<string>>()
   const data = (url: string) => {
     if (!cache.has(url)) cache.set(url, resolveImage(url))
@@ -30,31 +31,44 @@ export async function inlineImages(root: ParentNode, resolveImage = imageDataUrl
   let serial = 0
   const rules: string[] = []
   for (const el of root.querySelectorAll<HTMLElement>('*')) {
-    if (el instanceof HTMLImageElement) {
-      if (/\.svg(?:[?#]|$)|^data:image\/svg\+xml/i.test(el.currentSrc || el.src)) el.dataset.pptxRasterReason = 'SVG image'
-      el.src = await data(el.currentSrc || el.src)
-      el.removeAttribute('srcset')
-      await el.decode()
-    }
-    for (const pseudo of ['', '::before', '::after']) {
-      const style = getComputedStyle(el, pseudo || null)
-      if (pseudo && (!style.content || ['none', 'normal'].includes(style.content))) continue
-      const declarations: string[] = []
-      for (const property of ['content', 'background-image', 'mask-image', '-webkit-mask-image', 'border-image-source']) {
-        if (!pseudo && property === 'content') continue
-        const value = style.getPropertyValue(property)
-        let next = value
-        try {
-          for (const match of value.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) next = next.replace(match[0], `url("${await data(match[1]!)}")`)
-        } catch (cause) { throw new Error(`Image asset could not be embedded: ${el.tagName.toLowerCase()}${pseudo} ${property}`, { cause }) }
-        if (next === value) continue
-        if (pseudo) declarations.push(`${property}:${next} !important`)
-        else el.style.setProperty(property, next)
+    try {
+      if (paintedState(el).subtreeHidden) continue
+      if (el instanceof HTMLImageElement && !['hidden', 'collapse'].includes(getComputedStyle(el).visibility)) {
+        // Intrinsic image dimensions may still be zero before decode. Settle them
+        // before applying the same painted-box predicate as every other collector.
+        try { await el.decode() } catch (cause) {
+          const style = getComputedStyle(el)
+          if (isPainted(el) || Number.parseFloat(style.width) > 0 || Number.parseFloat(style.height) > 0 || Number.parseFloat(el.style.width) > 0 || Number.parseFloat(el.style.height) > 0) throw new Error(`Image asset could not be embedded: img ${el.getAttribute('src')}`, { cause })
+        }
+        if (!isPainted(el)) continue
+        if (/\.svg(?:[?#]|$)|^data:image\/svg\+xml/i.test(el.currentSrc || el.src)) el.dataset.pptxRasterReason = 'SVG image'
+        el.src = await data(el.currentSrc || el.src)
+        el.removeAttribute('srcset')
+        await el.decode()
       }
-      if (declarations.length) {
-        const id = el.dataset.pptxAssetId ??= String(++serial)
-        rules.push(`[data-pptx-asset-id="${id}"][data-pptx-asset-id="${id}"]${pseudo}{${declarations.join(';')}}`)
+      for (const pseudo of ['', '::before', '::after']) {
+        const style = getComputedStyle(el, pseudo || null)
+        if (!isPainted(el, pseudo || undefined)) continue
+        const declarations: string[] = []
+        for (const property of ['content', 'background-image', 'mask-image', '-webkit-mask-image', 'border-image-source']) {
+          if (!pseudo && property === 'content') continue
+          const value = style.getPropertyValue(property)
+          let next = value
+          try {
+            for (const match of value.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) next = next.replace(match[0], `url("${await data(match[1]!)}")`)
+          } catch (cause) { throw new Error(`Image asset could not be embedded: ${el.tagName.toLowerCase()}${pseudo} ${property}`, { cause }) }
+          if (next === value) continue
+          if (pseudo) declarations.push(`${property}:${next} !important`)
+          else el.style.setProperty(property, next)
+        }
+        if (declarations.length) {
+          const id = el.dataset.pptxAssetId ??= String(++serial)
+          rules.push(`[data-pptx-asset-id="${id}"][data-pptx-asset-id="${id}"]${pseudo}{${declarations.join(';')}}`)
+        }
       }
+    } catch (error) {
+      if (!onError) throw error
+      onError(el, error)
     }
   }
   if (rules.length) {
@@ -103,7 +117,7 @@ export function rasterBounds(element: HTMLElement): DOMRect {
   let left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom
   for (const node of [element, ...element.querySelectorAll<HTMLElement>('*')]) {
     const style = getComputedStyle(node)
-    if (style.display === 'none' || style.visibility === 'hidden') continue
+    if (!isPainted(node)) continue
     const bounds = node.getBoundingClientRect()
     const sides = effectInsets(style.boxShadow, style.textShadow, style.filter)
     left = Math.min(left, bounds.left - sides.left); top = Math.min(top, bounds.top - sides.top)
@@ -144,7 +158,7 @@ function materializeSvgSlots(element: HTMLElement): () => void {
  * html-to-image deep-clones SVG without styling foreignObject descendants. Snapshot
  * those styles, generated content and assigned shadow slots explicitly instead.
  */
-async function rasterizeInSlide(element: Element, slide: SVGSVGElement, fontCSS: string): Promise<string> {
+async function paintInSlide(element: Element, slide: SVGSVGElement, fontCSS: string, pseudo?: string, hidePseudoText = false): Promise<{ canvas: HTMLCanvasElement; bounds: DOMRect }> {
   const ancestors = new Set<Element>()
   for (let parent: Element | null = element === slide ? null : element.parentElement; parent && parent !== slide; parent = parent.parentElement) ancestors.add(parent)
   if (element !== slide) ancestors.add(slide)
@@ -171,13 +185,25 @@ async function rasterizeInSlide(element: Element, slide: SVGSVGElement, fontCSS:
         rules.push(`[data-pptx-snapshot="${id}"]${pseudo}{${[...generated].map(property => `${property}:${generated.getPropertyValue(property)};`).join('')}}`)
       }
     }
+    if (pseudo && 'style' in copy) {
+      (copy as HTMLElement).style.setProperty('visibility', 'hidden', 'important')
+      copy.setAttribute('data-pptx-pseudo-suppressed', '')
+      if (node === element) {
+        copy.setAttribute('data-pptx-pseudo-target', '')
+        if (pseudo === 'background') {
+          const style = (copy as HTMLElement).style
+          style.setProperty('visibility', 'visible', 'important')
+          for (const property of ['color', '-webkit-text-fill-color', 'text-decoration-color']) style.setProperty(property, 'transparent', 'important')
+        }
+      }
+    }
     const children = node instanceof HTMLSlotElement ? node.assignedNodes({ flatten: true }) : [...(node.shadowRoot ?? node).childNodes]
     for (const child of children) copy.appendChild(clone(child, inShadow || !!node.shadowRoot))
     return copy
   }
   const snapshot = clone(slide) as SVGSVGElement
   snapshot.style.cssText += ';position:static;margin:0;left:auto;top:auto;'
-  const bounds = rasterBounds(element as HTMLElement), origin = slide.getBoundingClientRect()
+  const origin = slide.getBoundingClientRect(), bounds = pseudo ? origin : rasterBounds(element as HTMLElement)
   const surface = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   surface.setAttribute('width', String(origin.width)); surface.setAttribute('height', String(origin.height))
   const foreign = document.createElementNS(surface.namespaceURI, 'foreignObject')
@@ -185,6 +211,15 @@ async function rasterizeInSlide(element: Element, slide: SVGSVGElement, fontCSS:
   const wrapper = document.createElement('div'), marpit = document.createElement('div'), sheet = document.createElement('style')
   marpit.className = 'marpit'
   const root = slide.getRootNode() as Document | ShadowRoot
+  if (pseudo) {
+    const suppressed = '[data-pptx-pseudo-suppressed]'.repeat(4)
+    rules.push(`${suppressed}::before,${suppressed}::after{visibility:hidden!important}`)
+    if (pseudo !== 'background') {
+      const computed = getComputedStyle(element, pseudo)
+      const hiddenText = hidePseudoText ? 'color:transparent!important;-webkit-text-fill-color:transparent!important;text-decoration-color:transparent!important;' : ''
+      rules.push(`${'[data-pptx-pseudo-target]'.repeat(5)}${pseudo}{${[...computed].map(property => `${property}:${computed.getPropertyValue(property)}!important;`).join('')}${hiddenText}}`)
+    }
+  }
   sheet.textContent = `${[...root.querySelectorAll('style')].map(style => style.textContent).join('\n')}\n${fontCSS}\n${rules.join('\n')}\n[data-pptx-ancestor]::before,[data-pptx-ancestor]::after{display:none!important}`
   marpit.append(snapshot); wrapper.append(sheet, marpit); foreign.append(wrapper); surface.append(foreign)
   const image = await loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(surface))}`)
@@ -193,7 +228,36 @@ async function rasterizeInSlide(element: Element, slide: SVGSVGElement, fontCSS:
   const context = canvas.getContext('2d')
   if (!context) throw new Error('Canvas 2D is unavailable')
   context.drawImage(image, (origin.left - bounds.left) * 2, (origin.top - bounds.top) * 2, origin.width * 2, origin.height * 2)
-  return canvas.toDataURL('image/png')
+  return { canvas, bounds }
+}
+
+async function rasterizeInSlide(element: Element, slide: SVGSVGElement, fontCSS: string): Promise<string> {
+  return (await paintInSlide(element, slide, fontCSS)).canvas.toDataURL('image/png')
+}
+
+/** Keep real pseudo layout/counters/containing blocks, hide all other paint, then crop alpha. */
+export async function rasterizePseudo(element: Element, pseudo: string, slide: SVGSVGElement, fontCSS: string, hideText = false): Promise<{ data: string; rect: DOMRect } | undefined> {
+  return rasterizeLayer(element, pseudo, slide, fontCSS, hideText)
+}
+
+export async function rasterizeBackground(element: Element, slide: SVGSVGElement, fontCSS: string): Promise<{ data: string; rect: DOMRect } | undefined> {
+  return rasterizeLayer(element, 'background', slide, fontCSS)
+}
+
+async function rasterizeLayer(element: Element, layer: string, slide: SVGSVGElement, fontCSS: string, hideText = false): Promise<{ data: string; rect: DOMRect } | undefined> {
+  const { canvas, bounds } = await paintInSlide(element, slide, fontCSS, layer, hideText)
+  const context = canvas.getContext('2d')!
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+  let left = canvas.width, top = canvas.height, right = 0, bottom = 0
+  for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+    if (!pixels[(y * canvas.width + x) * 4 + 3]) continue
+    left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x + 1); bottom = Math.max(bottom, y + 1)
+  }
+  if (left >= right || top >= bottom) return undefined
+  const crop = document.createElement('canvas')
+  crop.width = right - left; crop.height = bottom - top
+  crop.getContext('2d')!.drawImage(canvas, left, top, crop.width, crop.height, 0, 0, crop.width, crop.height)
+  return { data: crop.toDataURL('image/png'), rect: new DOMRect(bounds.left + left / 2, bounds.top + top / 2, crop.width / 2, crop.height / 2) }
 }
 
 /** toSvg avoids html-to-image's requestAnimationFrame wait in a background window. */

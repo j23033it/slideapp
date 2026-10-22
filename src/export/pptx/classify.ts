@@ -43,7 +43,7 @@ export interface PseudoFacts {
   background: boolean; border: boolean; effects: boolean; sized: boolean
 }
 export function pseudoIsGenerated(facts: PseudoFacts): boolean {
-  return !!facts.content && !['none', 'normal'].includes(facts.content) && facts.display !== 'none' && facts.visibility !== 'hidden'
+  return !!facts.content && !['none', 'normal'].includes(facts.content) && facts.display !== 'none' && !['hidden', 'collapse'].includes(facts.visibility)
 }
 /** Empty generated boxes still paint. Plain section pagination remains native text. */
 export function pseudoNeedsRaster(facts: PseudoFacts, section = false): boolean {

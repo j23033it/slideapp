@@ -7,8 +7,8 @@ import { splitCssImports } from '../../marp/fonts'
 import { applyUnavailableFontFallbacks, resolveFonts } from './fonts'
 import { generatePptx } from './generate'
 import { measureSlide } from './measure'
-import { inlineImages } from './raster'
-import type { ExportReport, MeasuredSlide } from './model'
+import { inlineImages, rasterize } from './raster'
+import { reportElementError, type ExportReport, type MeasuredSlide } from './model'
 
 export type { ExportReport, MeasuredSlide } from './model'
 export interface ExportSource { markdown: string; marp: Marp; baseDir: string }
@@ -99,11 +99,11 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
     document.body.append(host)
     const { default: browser } = await import('@marp-team/marp-core/browser')
     handle = browser(shadow)
-    await inlineImages(shadow)
+    await inlineImages(shadow, undefined, (element, error) => { element.dataset.pptxAssetError = error instanceof Error ? error.message : String(error) })
     // Explicit loads also cover fonts inside Shadow DOM, which fonts.ready alone can miss.
     const fontLoads = [...shadow.querySelectorAll('h1,h2,h3,h4,h5,h6,marp-h1,marp-h2,marp-h3,marp-h4,marp-h5,marp-h6,p,li,td,th,pre,marp-pre,header,footer')].map(el => {
       const style = getComputedStyle(el)
-      return document.fonts.load(`${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`, el.textContent ?? '')
+      return document.fonts.load(`${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`, el.textContent ?? '').catch(() => { warnings.push(`Font load failed: ${style.fontFamily}`) })
     })
     await Promise.all(fontLoads)
     await document.fonts.ready
@@ -124,7 +124,19 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
     const backgrounds = new Map<string, Promise<string>>()
     for (const [index, svg] of [...shadow.querySelectorAll<SVGSVGElement>('svg[data-marpit-svg]')].entries()) {
       checkAbort(options.signal)
-      slides.push(await measureSlide(svg, rendered.comments[index] ?? [], fonts, fontCSS, report, index, backgrounds))
+      try {
+        slides.push(await measureSlide(svg, rendered.comments[index] ?? [], fonts, fontCSS, report, index, backgrounds))
+      } catch (error) {
+        const slide: MeasuredSlide = { width: split.width, height: split.height, background: 'FFFFFF', parts: [], notes: rendered.comments[index] ?? [] }
+        const reason = `Slide measurement failed: ${error instanceof Error ? error.message : String(error)}`
+        try {
+          const failed = svg.querySelector<HTMLElement>('[data-pptx-asset-error]')
+          if (failed) throw new Error(failed.dataset.pptxAssetError)
+          slide.parts.push({ kind: 'image', rect: { x: 0, y: 0, width: split.width, height: split.height }, data: await rasterize(svg as unknown as HTMLElement, fontCSS) })
+          report.rasterizedElements.push({ slide: index + 1, element: 'svg', reason })
+        } catch (rasterError) { reportElementError(report, index + 1, 'svg', `${reason}; rasterization failed: ${rasterError instanceof Error ? rasterError.message : String(rasterError)}`) }
+        slides.push(slide)
+      }
       options.onProgress?.(index + 1, split.slides.length)
     }
     report.rasterizedCount = report.rasterizedElements.length
