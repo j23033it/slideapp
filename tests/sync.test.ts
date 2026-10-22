@@ -5,7 +5,6 @@ import {
   decideExternalChange,
   diskChangedSinceBanner,
   hasUnsavedChanges,
-  isNameTakenError,
   mineFileName,
   needsOpenReconfirm,
   planConflictBanner,
@@ -139,14 +138,6 @@ describe('mineFileName', () => {
     expect(mineFileName('C:\\deck\\deck.md', 1)).toBe('C:\\deck\\deck.mine-2.md')
     expect(mineFileName('C:\\deck\\deck.md', 2)).toBe('C:\\deck\\deck.mine-3.md')
     expect(mineFileName('deck.markdown', 0)).toBe('deck.mine.md')
-  })
-})
-
-describe('isNameTakenError', () => {
-  it('存在エラーの文言を判別する', () => {
-    expect(isNameTakenError('File exists')).toBe(true)
-    expect(isNameTakenError(new Error('ファイルは既に存在します'))).toBe(true)
-    expect(isNameTakenError('アクセスが拒否されました')).toBe(false)
   })
 })
 

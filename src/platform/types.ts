@@ -33,6 +33,7 @@ export interface SavedFile {
 export type SaveOutcome =
   | { ok: true; hash: string; mtime: number }
   | { ok: false; kind: 'conflict'; diskHash: string }
+  | { ok: false; kind: 'exists' }
   | { ok: false; kind: 'io'; message: string }
 
 /** ファイル監視のイベント。自分の保存では届かない */

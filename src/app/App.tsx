@@ -25,7 +25,6 @@ import {
   decideExternalChange,
   diskChangedSinceBanner,
   hasUnsavedChanges,
-  isNameTakenError,
   mineFileName,
   needsOpenReconfirm,
   planConflictBanner,
@@ -131,6 +130,7 @@ export function App() {
   const editingRef = useRef(false)
   const currentRef = useRef(0)
   const pendingRef = useRef<PendingAction | null>(null)
+  const pendingOperationRef = useRef(0)
   const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
@@ -139,6 +139,12 @@ export function App() {
   currentRef.current = view.current
   pendingRef.current = pending
   bannerRef.current = view.banner
+
+  const replacePending = useCallback((next: PendingAction | null): void => {
+    pendingOperationRef.current += 1
+    pendingRef.current = next
+    setPending(next)
+  }, [])
 
   /** 状態の変更を反映し、ステータスバー・ツールバーを更新する */
   const sync = useCallback((patch: Partial<ViewState> = {}) => {
@@ -180,6 +186,15 @@ export function App() {
   /** IME変換中なら操作を予約する。確定とコミットの後に実行される */
   const deferIfComposing = useCallback((action: () => void): boolean => {
     return stageApi.current?.deferWhileComposing(action) ?? false
+  }, [])
+
+  /** 非同期応答後にモデルを置き換える操作は、IME確定とコミットを待ってから再照合する。 */
+  const waitForComposition = useCallback((): Promise<void> => {
+    const stage = stageApi.current
+    if (!stage?.isComposing()) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      if (!stage.deferWhileComposing(resolve)) resolve()
+    })
   }, [])
 
   const analyzeSession = useCallback((session: EditorSession, analysis: Analysis): void => {
@@ -253,7 +268,7 @@ export function App() {
       if (deferIfComposing(handleClose)) return
       const session = sessionRef.current
       if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
-        setPending({ kind: 'close' })
+        replacePending({ kind: 'close' })
         return
       }
       platform.forceClose().catch((reason: unknown) => {
@@ -274,7 +289,7 @@ export function App() {
       alive = false
       unlisten?.()
     }
-  }, [deferIfComposing, view.path, sync])
+  }, [deferIfComposing, replacePending, view.path, sync])
 
   const openPathNow = useCallback(
     async (path: string, options: { allowDirty?: boolean } = {}) => {
@@ -289,6 +304,7 @@ export function App() {
         // Rust の open_file は成功時に監視を新しいファイルへ切り替える。
         // ここで stopWatching すると、開くのに失敗したとき元の監視が止まったままになる。
         const file = await platform.openFile(path)
+        await waitForComposition()
         const existing = sessionRef.current
         if (existing) {
           // 読み込みを待つ間に元のファイルが編集されていたら、置き換えずに確認をやり直す。
@@ -302,8 +318,9 @@ export function App() {
             if (existing.path !== path) {
               // 監視が新しいファイルへ移っているため、元のファイルへ戻す
               await platform.openFile(existing.path).catch(() => {})
+              await waitForComposition()
             }
-            setPending({ kind: 'open', path })
+            replacePending({ kind: 'open', path })
             setView((previous) => ({ ...previous, busy: false }))
             return
           }
@@ -346,10 +363,18 @@ export function App() {
             sync({ error: strings.errors.recentFailed(errorMessage(reason)) })
           })
       } catch (reason) {
+        // open_file 成功後にフロント側のモデル構築・解析が拒否した場合も、
+        // Rust の監視だけが拒否対象へ残らないよう元のファイルへ戻す。
+        const restoreSession = sessionRef.current ?? startingSession
+        if (restoreSession) {
+          await platform.openFile(restoreSession.path).catch(() => {})
+        } else {
+          await platform.stopWatching().catch(() => {})
+        }
         sync({ busy: false, error: strings.errors.openFailed(errorMessage(reason)) })
       }
     },
-    [deferIfComposing, sync],
+    [deferIfComposing, replacePending, sync, waitForComposition],
   )
 
   const requestOpen = useCallback(
@@ -357,12 +382,12 @@ export function App() {
       if (deferIfComposing(() => requestOpen(path))) return
       const session = sessionRef.current
       if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
-        setPending({ kind: 'open', path })
+        replacePending({ kind: 'open', path })
         return
       }
       void openPathNow(path)
     },
-    [deferIfComposing, openPathNow],
+    [deferIfComposing, openPathNow, replacePending],
   )
 
   const openDialogNow = useCallback(async () => {
@@ -419,6 +444,7 @@ export function App() {
         }
         if (result.kind === 'conflict') {
           session.model.markConflict()
+          session.conflict = true
           const disk = await platform.openFile(session.path).catch(() => null)
           if (sessionRef.current !== session) return false
           const notice = planConflictBanner(disk)
@@ -431,7 +457,10 @@ export function App() {
           })
           return false
         }
-        sync({ busy: false, error: strings.errors.saveFailed(result.message) })
+        sync({
+          busy: false,
+          error: strings.errors.saveFailed(result.kind === 'io' ? result.message : strings.errors.unknown),
+        })
         return false
       } catch (reason) {
         sync({ busy: false, error: strings.errors.saveFailed(errorMessage(reason)) })
@@ -464,11 +493,10 @@ export function App() {
         try {
           const result = await platform.writeNewFile(target, snapshot.text, snapshot.hasBom)
           if (result.ok) return target
-          if (result.kind === 'conflict' || (result.kind === 'io' && isNameTakenError(result.message))) continue
-          sync({ error: strings.errors.copyFailed(result.kind === 'io' ? result.message : strings.errors.unknown) })
+          if (result.kind === 'exists' || result.kind === 'conflict') continue
+          sync({ error: strings.errors.copyFailed(result.message) })
           return null
         } catch (reason) {
-          if (isNameTakenError(reason)) continue
           sync({ error: strings.errors.copyFailed(errorMessage(reason)) })
           return null
         }
@@ -511,6 +539,7 @@ export function App() {
 
       // 同じハッシュの通知を無視していた分も含め、選択時点のディスクを読み直す
       const disk = await platform.openFile(session.path).catch(() => null)
+      await waitForComposition()
       if (sessionRef.current !== session) return
       if (!disk) {
         sync({
@@ -528,6 +557,19 @@ export function App() {
       })
       const plan = planConflictChoice(choice, { hash: disk.hash })
 
+      // 読み込み待ちの間に確定した入力があれば、選択時点の内容を
+      // 別名保存・再読み込みで上書きしない。最新の競合状態を残して選び直してもらう。
+      if (
+        plan.reloadDisk &&
+        !planMineCopyReload(snapshot, {
+          text: session.model.serialize(),
+          hasBom: session.model.hasBom,
+        })
+      ) {
+        sync({ busy: false, banner: conflictBanner() })
+        return
+      }
+
       // 上書きは、帯に出した内容からディスクが変わっていないときだけ行う
       if (plan.save && diskChangedSinceBanner(disk, banner)) {
         sync({ busy: false, banner: conflictBanner() })
@@ -536,6 +578,7 @@ export function App() {
 
       if (plan.writeMineCopy) {
         const saved = await writeMineCopy(session, snapshot)
+        await waitForComposition()
         if (sessionRef.current !== session) return
         if (!saved) {
           setView((previous) => ({ ...previous, busy: false }))
@@ -569,7 +612,7 @@ export function App() {
       }
       setView((previous) => ({ ...previous, busy: false }))
     },
-    [applyReload, runSave, sync, writeMineCopy],
+    [applyReload, runSave, sync, waitForComposition, writeMineCopy],
   )
 
   const chooseConflict = useCallback(
@@ -778,14 +821,28 @@ export function App() {
     async (mode: 'save' | 'discard') => {
       const action = pendingRef.current
       if (!action) return
+      const operationId = ++pendingOperationRef.current
+      const isCurrentOperation = (): boolean =>
+        pendingOperationRef.current === operationId && pendingRef.current === action
       if (mode === 'save') {
         const saved = await runSave()
+        if (!isCurrentOperation()) return
         if (!saved) {
-          setPending(null)
+          replacePending(null)
           return
         }
       }
-      setPending(null)
+      if (!isCurrentOperation()) return
+      if (action.kind === 'close') {
+        const session = sessionRef.current
+        if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
+          // 保存応答中に追加編集があったので、閉じる前にもう一度確認する。
+          replacePending(action)
+          return
+        }
+      }
+      if (!isCurrentOperation()) return
+      replacePending(null)
       if (action.kind === 'open') {
         await openPathNow(action.path, { allowDirty: mode === 'discard' })
         return
@@ -796,7 +853,7 @@ export function App() {
         sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
       }
     },
-    [openPathNow, runSave, sync],
+    [openPathNow, replacePending, runSave, sync],
   )
 
   const continuePending = useCallback(
@@ -1043,7 +1100,7 @@ export function App() {
               <button type="button" onClick={() => void continuePending('discard')}>
                 {strings.confirm.discard}
               </button>
-              <button type="button" onClick={() => setPending(null)}>
+              <button type="button" onClick={() => replacePending(null)}>
                 {strings.confirm.cancel}
               </button>
             </div>

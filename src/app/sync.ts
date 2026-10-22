@@ -187,16 +187,3 @@ export function planConflictBanner(
 export function diskChangedSinceBanner(fresh: DiskSnapshot, banner: DiskSnapshot): boolean {
   return fresh.hash !== banner.hash
 }
-
-/** 別名の作成が「既に存在する」で失敗したか（次の候補へ進む判断） */
-export function isNameTakenError(error: unknown): boolean {
-  const message =
-    typeof error === 'string'
-      ? error
-      : error instanceof Error
-        ? error.message
-        : error && typeof error === 'object' && 'message' in error
-          ? String((error as { message: unknown }).message)
-          : ''
-  return /exists|already|exist|存在|上書きできない/i.test(message)
-}

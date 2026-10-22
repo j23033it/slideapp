@@ -70,16 +70,22 @@ export class StageEditor {
   private pendingBefore: Cursor | undefined
   private lastFocusSeq = -1
   private readonly composition = new CompositionGate()
+  private compositionEndToken: number | null = null
 
   private readonly onCompositionStart = (): void => {
     this.composition.start()
   }
 
   private readonly onCompositionEnd = (): void => {
-    // bindEditing の compositionend（コミット）も同じイベントで走るため、
-    // 予約した操作はすべてのリスナーが終わった後に実行する。
-    const token = this.composition.markEnded()
-    queueMicrotask(() => this.composition.flush(token))
+    // WebView2 では capture 側のマイクロタスクが、アダプタの bubble 側
+    // compositionend より先に実行されることがある。解除はアダプタの後で行う。
+    this.compositionEndToken = this.composition.markEnded()
+  }
+
+  private readonly onCompositionEndSettled = (): void => {
+    const token = this.compositionEndToken
+    this.compositionEndToken = null
+    if (token !== null) this.composition.flush(token)
   }
 
   private readonly onCompositionInput = (raw: Event): void => {
@@ -270,6 +276,9 @@ export class StageEditor {
       },
       onFinish: () => this.handleFinish(),
     })
+    // bindEditing が先に登録した bubble listener の後に実行し、
+    // commit または commit 不要の判定が済んだ compositionend を受け取る。
+    this.root.addEventListener('compositionend', this.onCompositionEndSettled)
   }
 
   /** 編集終了: 最新の解析結果でスライドだけを差し替え、サムネイル更新を依頼する */
@@ -286,6 +295,7 @@ export class StageEditor {
   }
 
   private endEditingSilently(): void {
+    this.root.removeEventListener('compositionend', this.onCompositionEndSettled)
     if (!this.adapter) {
       this.editing = false
       return

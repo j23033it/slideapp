@@ -34,6 +34,7 @@ export function toSaveOutcome(value: unknown): SaveOutcome {
   if (record.kind === 'conflict') {
     return { ok: false, kind: 'conflict', diskHash: typeof record.diskHash === 'string' ? record.diskHash : '' }
   }
+  if (record.kind === 'exists') return { ok: false, kind: 'exists' }
   if (record.kind === 'io') {
     return { ok: false, kind: 'io', message: typeof record.message === 'string' ? record.message : '' }
   }
