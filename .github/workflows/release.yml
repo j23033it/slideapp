@@ -49,7 +49,7 @@ jobs:
           releaseBody: |
             ${{ github.ref_name }} の配布物です。
 
-            インストーラー（SlideApp_${{ github.ref_name }}_x64-setup.exe）をダウンロードして実行してください。
+            インストーラー（SlideApp_*_x64-setup.exe）をダウンロードして実行してください。
             アプリ内の更新機能でも更新できます。
           releaseDraft: true
           prerelease: false
