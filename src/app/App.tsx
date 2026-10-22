@@ -163,7 +163,7 @@ export function App() {
   const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
-  const pendingUpdateExternalRef = useRef<ExternalChange | null>(null)
+  const pendingUpdateExternalRef = useRef<{ change: ExternalChange; observation: DiskObservation } | null>(null)
   const externalChangeRequest = useRef(0)
   const diskObservationRef = useRef<DiskObservation>({ generation: 0, change: null })
   const openingRef = useRef<{ path: string; observation: DiskObservation } | null>(null)
@@ -173,10 +173,17 @@ export function App() {
   pendingRef.current = pending
   bannerRef.current = view.banner
 
-  const replacePending = useCallback((next: PendingAction | null): void => {
+  const replacePending = useCallback((
+    next: PendingAction | null,
+    options: { updateResolution?: boolean } = {},
+  ): void => {
+    const previous = pendingRef.current
     pendingOperationRef.current += 1
     pendingRef.current = next
     setPending(next)
+    if (previous?.kind === 'update' && previous !== next) {
+      previous.resolve(options.updateResolution ?? false)
+    }
   }, [])
 
   /** 状態の変更を反映し、ステータスバー・ツールバーを更新する */
@@ -252,12 +259,22 @@ export function App() {
     return true
   }, [replacePending, view.busy, waitForComposition])
 
+  const bufferUpdateExternal = useCallback((change: ExternalChange, observation: DiskObservation): void => {
+    // テーマ設定の読み込みを終えた古い通知などで、後から届いた観測を失わない。
+    if (!canApplyDiskResult(observation, diskObservationRef.current)) return
+    const pending = pendingUpdateExternalRef.current
+    if (pending && pending.observation.generation > observation.generation) return
+    pendingUpdateExternalRef.current = { change, observation }
+  }, [])
+
   const releaseUpdateInstall = useCallback(() => {
     updateInstallLockedRef.current = false
     setUpdateInstallLocked(false)
-    const pendingChange = pendingUpdateExternalRef.current
+    const pending = pendingUpdateExternalRef.current
     pendingUpdateExternalRef.current = null
-    if (pendingChange) externalRef.current(pendingChange)
+    if (pending && canApplyDiskResult(pending.observation, diskObservationRef.current)) {
+      externalRef.current(pending.change)
+    }
   }, [])
 
   /** 監視先を戻したときの読み込み結果も、外部変更と同じ規則で反映する */
@@ -837,11 +854,14 @@ export function App() {
   )
 
   const handleExternalNow = useCallback(
-    async (change: ExternalChange) => {
-      if (updateInstallLockedRef.current) return
+    async (change: ExternalChange, observation: DiskObservation, requestId: number) => {
+      if (requestId !== externalChangeRequest.current) return
+      if (updateInstallLockedRef.current) {
+        bufferUpdateExternal(change, observation)
+        return
+      }
       const session = sessionRef.current
       if (!session || session.path !== change.path) return
-      const requestId = ++externalChangeRequest.current
       if (change.type === 'changed') {
         // 読み直せたので、削除・読み取り不能の帯は用済み
         setView((previous) =>
@@ -870,10 +890,11 @@ export function App() {
         await waitForComposition()
         if (
           sessionRef.current !== session ||
-          requestId !== externalChangeRequest.current
+          requestId !== externalChangeRequest.current ||
+          !canApplyDiskResult(observation, diskObservationRef.current)
         ) return
         if (updateInstallLockedRef.current) {
-          pendingUpdateExternalRef.current = change
+          bufferUpdateExternal(change, observation)
           return
         }
         if (editingRef.current) stageApi.current?.endEditing()
@@ -910,7 +931,7 @@ export function App() {
           return
       }
     },
-    [applyReload, sync, waitForComposition],
+    [applyReload, bufferUpdateExternal, sync, waitForComposition],
   )
 
   /** IME変換中は確定とコミットの後に外部変更を反映する */
@@ -918,17 +939,23 @@ export function App() {
     (change: ExternalChange) => {
       const opening = openingRef.current
       if (sessionRef.current?.path !== change.path && opening?.path !== change.path) return
+      const observation: DiskObservation = {
+        generation: diskObservationRef.current.generation + 1,
+        change,
+      }
+      diskObservationRef.current = observation
+      if (opening?.path === change.path) opening.observation = observation
       if (updateInstallLockedRef.current) {
-        pendingUpdateExternalRef.current = change
+        if (sessionRef.current?.path === change.path) externalChangeRequest.current += 1
+        bufferUpdateExternal(change, observation)
         return
       }
-      diskObservationRef.current = { generation: diskObservationRef.current.generation + 1, change }
-      if (opening?.path === change.path) opening.observation = diskObservationRef.current
       if (sessionRef.current?.path !== change.path) return
-      if (deferIfComposing(() => handleExternalNow(change))) return
-      void handleExternalNow(change)
+      const requestId = ++externalChangeRequest.current
+      if (deferIfComposing(() => void handleExternalNow(change, observation, requestId))) return
+      void handleExternalNow(change, observation, requestId)
     },
-    [deferIfComposing, handleExternalNow],
+    [bufferUpdateExternal, deferIfComposing, handleExternalNow],
   )
   externalRef.current = handleExternal
 
@@ -1021,7 +1048,6 @@ export function App() {
         if (!isCurrentOperation()) return
         if (!saved) {
           replacePending(null)
-          if (action.kind === 'update') action.resolve(false)
           return
         }
       }
@@ -1040,8 +1066,7 @@ export function App() {
         }
         updateInstallLockedRef.current = true
         setUpdateInstallLocked(true)
-        replacePending(null)
-        action.resolve(true)
+        replacePending(null, { updateResolution: true })
         return
       }
       if (mode === 'save' && action.kind === 'close') {
@@ -1079,7 +1104,6 @@ export function App() {
     const action = pendingRef.current
     if (!action) return
     replacePending(null)
-    if (action.kind === 'update') action.resolve(false)
   }, [replacePending])
 
   // キー操作

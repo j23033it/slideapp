@@ -43,6 +43,7 @@ function deferred<T>() {
 
 let host: HTMLDivElement
 let events: FileEventHandlers
+let requestClose: (() => void) | undefined
 async function flush(action: () => void = () => {}) {
   await act(async () => { action(); await new Promise((resolve) => setTimeout(resolve, 0)) })
 }
@@ -70,13 +71,17 @@ async function offerUpdate() {
 beforeEach(async () => {
   vi.resetAllMocks()
   captured.stage = null
+  requestClose = undefined
   vi.mocked(platform.settingsGet).mockResolvedValue(DEFAULT_SETTINGS)
   vi.mocked(platform.settingsSet).mockResolvedValue()
   vi.mocked(platform.recentFilesGet).mockResolvedValue([])
   vi.mocked(platform.recentFilesAdd).mockResolvedValue([path])
   vi.mocked(platform.setWindowTitle).mockResolvedValue()
   vi.mocked(platform.stopWatching).mockResolvedValue()
-  vi.mocked(platform.onCloseRequested).mockResolvedValue(() => {})
+  vi.mocked(platform.onCloseRequested).mockImplementation((handler) => {
+    requestClose = handler
+    return Promise.resolve(() => {})
+  })
   vi.mocked(platform.checkForUpdate).mockResolvedValue(null)
   vi.mocked(platform.downloadAndInstall).mockResolvedValue()
   vi.mocked(platform.relaunch).mockResolvedValue()
@@ -338,5 +343,57 @@ describe('update installation confirmation', () => {
     expect(host.firstElementChild?.hasAttribute('inert')).toBe(false)
     expect(session().model.serialize()).toBe('external-during-install')
     expect(editorSessionSaveState(session())).toBe('clean')
+  })
+
+  it('keeps the newest external change when an older theme read finishes during installation', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    const themeConfig = deferred<Awaited<ReturnType<typeof platform.readThemeConfig>>>()
+    vi.mocked(platform.readThemeConfig).mockReturnValue(themeConfig.promise)
+    vi.mocked(platform.readThemeConfig).mockClear()
+    const installation = deferred<void>()
+    vi.mocked(platform.downloadAndInstall).mockReturnValue(installation.promise)
+    await offerUpdate()
+
+    await flush(() => events.changed({ path, ...disk('external-v1') }))
+    expect(platform.readThemeConfig).toHaveBeenCalledTimes(1)
+
+    await flush(() => click(strings.update.install))
+    expect(host.firstElementChild?.hasAttribute('inert')).toBe(true)
+    await flush(() => events.changed({ path, ...disk('external-v2') }))
+    await flush(() => themeConfig.resolve({ themes: [], warnings: [] }))
+    expect(session().model.serialize()).toBe('base')
+
+    await flush(() => installation.reject(new Error('download failed')))
+    expect(session().model.serialize()).toBe('external-v2')
+    expect(session().model.diskHash).toBe('external-v2')
+    expect(editorSessionSaveState(session())).toBe('clean')
+  })
+
+  it('cancels a pending update approval when a close request replaces it', async () => {
+    await offerUpdate()
+    const checksBeforeClose = vi.mocked(platform.checkForUpdate).mock.calls.length
+    await flush(() => click(strings.update.install))
+    expect(host.textContent).toContain(strings.confirm.updateAction)
+
+    await flush(() => requestClose!())
+    expect(host.textContent).toContain(strings.confirm.closeAction)
+    await flush(() => click(strings.confirm.cancel))
+    expect(host.textContent).toContain(strings.update.available(updateInfo.version))
+
+    // The replaced beforeInstall promise must settle false so UpdateNotice can retry.
+    await flush(() => click(strings.update.install))
+    expect(host.textContent).toContain(strings.confirm.updateAction)
+    await flush(() => click(strings.confirm.cancel))
+
+    vi.mocked(platform.checkForUpdate).mockResolvedValue(null)
+    await flush(() => window.dispatchEvent(new Event(UPDATE_CHECK_EVENT)))
+    expect(platform.checkForUpdate).toHaveBeenCalledTimes(checksBeforeClose + 1)
+    expect(host.querySelector('.banner')).toBeNull()
+
+    vi.mocked(platform.checkForUpdate).mockResolvedValue(updateInfo)
+    await flush(() => window.dispatchEvent(new Event(UPDATE_CHECK_EVENT)))
+    expect(host.textContent).toContain(strings.update.available(updateInfo.version))
+    await flush(() => click(strings.update.later))
+    expect(host.textContent).not.toContain(strings.update.available(updateInfo.version))
   })
 })
