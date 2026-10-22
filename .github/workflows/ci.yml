@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Windows（MSVC）
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js を準備
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust を準備
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust のビルドキャッシュ
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 依存関係をインストール
+        run: npm ci
+
+      - name: 版の一致を確認
+        run: node scripts/check-version.mjs
+
+      - name: 型検査
+        run: npm run typecheck
+
+      - name: フロントエンドのテスト
+        run: npm test
+
+      - name: Rust のテスト
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Clippy（警告をエラーにする）
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
