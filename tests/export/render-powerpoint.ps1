@@ -51,7 +51,12 @@ try {
           }
         }
         # Check actual COM objects, not only OOXML or the exporter's model.
-        foreach ($part in @($model.slides[$index - 1].parts)) {
+        $partsToCheck = @(foreach ($measuredPart in $model.slides[$index - 1].parts) {
+          if ($measuredPart.kind -eq 'list' -and $measuredPart.positioned) {
+            foreach ($paragraph in $measuredPart.paragraphs) { @{ kind='list'; paragraphs=@($paragraph) } }
+          } else { $measuredPart }
+        })
+        foreach ($part in $partsToCheck) {
           $expectedText = $null
           if ($part.kind -eq 'text') { $expectedText = ($part.paragraph.runs | ForEach-Object text) -join '' }
           if ($part.kind -eq 'list') { $expectedText = ($part.paragraphs | ForEach-Object { ($_.runs | ForEach-Object text) -join '' }) -join "`n" }

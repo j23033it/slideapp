@@ -11,6 +11,8 @@ import { inlineImages, rasterize } from './raster'
 import { reportElementError, type ExportReport, type MeasuredSlide } from './model'
 
 export type { ExportReport, MeasuredSlide } from './model'
+export { svgHtmlAllowlist } from './svgAllowlist'
+export interface ExportInspection { slide: number; model: MeasuredSlide; html: string; png: string }
 export interface ExportSource { markdown: string; marp: Marp; baseDir: string }
 export interface ExportOptions {
   title?: string
@@ -20,6 +22,8 @@ export interface ExportOptions {
   /** Allows cancellable progress UI without coupling the exporter to App. */
   signal?: AbortSignal
   onProgress?: (completed: number, total: number) => void
+  /** Optional diagnostics sink. Callers choose a temporary inspection directory. */
+  onInspect?: (inspection: ExportInspection) => void | Promise<void>
 }
 
 function checkAbort(signal?: AbortSignal): void { signal?.throwIfAborted() }
@@ -53,7 +57,7 @@ async function fontRules(imports: string[], warnings: string[]): Promise<string>
 }
 
 export async function measureDeck(source: ExportSource, options: ExportOptions = {}): Promise<{ slides: MeasuredSlide[]; report: ExportReport }> {
-  if (source.marp.options.html === true || source.marp.options.script !== false) throw new Error('Export requires Marp with script:false and the default HTML allowlist')
+  if (source.marp.options.html === true || source.marp.options.script !== false) throw new Error('Export requires Marp with script:false and an HTML allowlist')
   checkAbort(options.signal)
   const rendered = source.marp.render(source.markdown)
   const split = splitRenderedSlides(rendered.html)
@@ -136,6 +140,12 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
           report.rasterizedElements.push({ slide: index + 1, element: 'svg', reason })
         } catch (rasterError) { reportElementError(report, index + 1, 'svg', `${reason}; rasterization failed: ${rasterError instanceof Error ? rasterError.message : String(rasterError)}`) }
         slides.push(slide)
+      }
+      if (options.onInspect) {
+        await options.onInspect({ slide: index + 1, model: slides.at(-1)!,
+          html: `<!doctype html><meta charset="utf-8"><style>html,body{margin:0}${fontCSS}\n${themeStyle.textContent}\n${geometryStyle.textContent}</style><div class="marpit">${svg.outerHTML}</div>`,
+          png: await rasterize(svg as unknown as HTMLElement, fontCSS),
+        })
       }
       options.onProgress?.(index + 1, split.slides.length)
     }

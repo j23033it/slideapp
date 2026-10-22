@@ -8,6 +8,7 @@ import { splitRenderedSlides } from '../../marp/renderer'
 import { rewriteCssUrls, resolveAssetPath } from '../../marp/urls'
 import { loadImage } from './raster'
 import type { Part } from './model'
+import { svgHtmlAllowlist } from './svgAllowlist'
 
 /** Pixel regression for unsupported content, independent of its measured-model assertions. */
 export async function compareRasterForCDP(reference: string, parts: Part[]) {
@@ -84,8 +85,8 @@ export async function showFixtureForCDP(markdown: string, baseDir: string, index
 export function hideFixtureForCDP() { previewCleanup?.(); previewCleanup = undefined }
 
 const fixtures = import.meta.glob('../../../tests/fixtures/export/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
-export async function exportFixtureForCDP(markdown: string, baseDir: string, fontEmbedCSS?: string) {
-  const marp = new Marp({ script: false, math: 'mathjax' })
+export async function exportFixtureForCDP(markdown: string, baseDir: string, fontEmbedCSS?: string, diagrams = false) {
+  const marp = new Marp({ script: false, math: 'mathjax', ...(diagrams ? { html: svgHtmlAllowlist } : {}) })
   marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
   let scaling: unknown[] = []
   const measured = await measureDeck({ markdown, marp, baseDir }, { fontEmbedCSS, onProgress: () => {
@@ -100,6 +101,20 @@ export async function exportFixtureForCDP(markdown: string, baseDir: string, fon
   let binary = ''
   for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
   return { base64: btoa(binary), ...measured, scaling }
+}
+/** --inspect-dir equivalent: return diagnostics for a caller to persist outside the repo. */
+export async function inspectFixtureForCDP(markdown: string, baseDir: string) {
+  const marp = new Marp({ script: false, math: 'mathjax', html: svgHtmlAllowlist })
+  marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
+  const inspection: import('./index').ExportInspection[] = []
+  const measured = await measureDeck({ markdown, marp, baseDir }, {
+    toAssetUrl: path => `/@fs/${path.replace(/\\/g, '/')}`,
+    onInspect: snapshot => { inspection.push(snapshot) },
+  })
+  const bytes = await generatePptx(measured.slides)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
+  return { base64: btoa(binary), ...measured, inspection }
 }
 export async function exportFixtures() {
   const info = await fetch('/__export_info').then(response => response.json()) as { baseDir: string; outputDir: string }

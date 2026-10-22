@@ -35,6 +35,57 @@ function surface(html: string): SVGSVGElement {
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='
 
 describe('export DOM text collection', () => {
+  it.each(['height:250px', 'min-height:250px'])('keeps ordinary %s paragraphs top aligned inside their content box', async dimension => {
+    const svg = surface(`<p style="${dimension};padding:10px 12px;border:2px solid rgb(255,0,0)">Top aligned paragraph</p>`)
+    const element = svg.querySelector('p')!
+    setRect(element, new DOMRect(40, 80, 600, 250))
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(54,94,180,20)] as unknown as DOMRectList)
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      const part = slide.parts.find(p => p.kind === 'text')!
+      expect(part).toMatchObject({kind:'text',paragraph:{rect:{x:54,y:92,width:572,height:226},valign:'top',padding:[0,0,0,0]}})
+      expect(state.rasterizedElements).toEqual([])
+      const xml = await (await JSZip.loadAsync(await generatePptx([slide]))).file('ppt/slides/slide1.xml')!.async('string')
+      expect(xml).toContain('anchor="t"')
+    } finally { svg.remove() }
+  })
+  it('uses measured font leading only when the line box contains no spare vertical layout', async () => {
+    const svg = surface('<p style="line-height:24px">Ordinary line</p>')
+    setRect(svg.querySelector('p')!, new DOMRect(40,80,600,24))
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(40,82,180,20)] as unknown as DOMRectList)
+    try {
+      const slide = await measureSlide(svg, [], fonts(), '', report(), 0)
+      expect(slide.parts.find(p => p.kind === 'text')).toMatchObject({paragraph:{rect:{y:80,height:24},valign:'middle'}})
+    } finally { svg.remove() }
+  })
+  it('measures padded/bordered list text from the content box without consuming its decoration', () => {
+    const svg = surface('<ul><li style="padding:20px 10px 20px 60px;border:2px solid rgb(255,0,0)">First item</li></ul>')
+    setRect(svg.querySelector('li')!, new DOMRect(40, 80, 600, 90))
+    try {
+      const list = measureList(svg.querySelector('ul')!, new DOMRect(0,0,1280,720), fonts())
+      expect(list.paragraphs[0]).toMatchObject({rect:{x:102,y:102,width:526,height:46},padding:[0,0,0,0],valign:'top'})
+    } finally { svg.remove() }
+  })
+  it('rasterizes mixed whitespace within a cell while retaining adjacent native text', async () => {
+    const svg = surface('<table><tbody><tr><td>Alpha<span style="white-space:pre-wrap">Beta\nGamma</span></td><td>42</td></tr></tbody></table><p>Neighbor</p>')
+    vi.spyOn(raster, 'rasterize').mockResolvedValue(png)
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      expect(state.rasterizedElements).toContainEqual({slide:1,element:'table',reason:'Mixed CSS white-space: pre-wrap'})
+      expect(slide.parts.some(p => p.kind === 'table')).toBe(false)
+      expect(slide.parts.some(p => p.kind === 'text' && p.paragraph.runs.some(r => r.text === 'Neighbor'))).toBe(true)
+      expect(state.errors).toBeUndefined()
+    } finally { svg.remove() }
+  })
+  it('keeps separate cell whitespace modes native when each cell is internally consistent', async () => {
+    const svg = surface('<table><tbody><tr><td style="white-space:pre-wrap">Alpha<span>Beta\nGamma</span></td><td style="white-space:nowrap">42</td></tr></tbody></table>')
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      const table = slide.parts.find(p => p.kind === 'table')
+      expect(table?.kind === 'table' && table.rows[0]![0]!.runs.map(r => r.text).join('')).toBe('AlphaBeta\nGamma')
+      expect(state.rasterizedElements).toEqual([])
+    } finally { svg.remove() }
+  })
   it.each(['display:none', 'content-visibility:hidden', 'visibility:collapse', 'visibility:hidden', 'opacity:0'])('uses the common painted check for every descendant of %s', css => {
     const host = document.createElement('div')
     host.style.cssText = css

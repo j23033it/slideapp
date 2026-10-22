@@ -2,10 +2,13 @@ import PptxGenJS from 'pptxgenjs'
 import JSZip from 'jszip'
 import { toPosition, toRun, toTextOptions, type MeasuredSlide, type Paragraph, type Part } from './model'
 
+// Use DrawingML soft breaks for BRs and preserved newlines, including empty lines.
+const textRuns = (runs: Paragraph['runs']) => runs.flatMap(run => run.text.split('\n').map((text, i) => ({ ...toRun({ ...run, text }), options: { ...toRun(run).options, softBreakBefore: i > 0 } })))
+
 function listRuns(paragraphs: Paragraph[]): PptxGenJS.TextProps[] {
   return paragraphs.flatMap((p, index) => p.runs.flatMap((run, runIndex) => run.text.split('\n').map((text, lineIndex, lines) => ({
     ...toRun({ ...run, text }),
-    options: { ...toRun(run).options, ...toTextOptions(p),
+    options: { ...toTextOptions(p), ...toRun(run).options,
       softBreakBefore: lineIndex > 0,
       breakLine: index < paragraphs.length - 1 && runIndex === p.runs.length - 1 && lineIndex === lines.length - 1,
     },
@@ -61,7 +64,9 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
   pptx.title = title
   pptx.author = 'SlideApp'
   pptx.subject = 'Editable Marp export'
-  pptx.theme = { headFontFace: 'Yu Gothic', bodyFontFace: 'Yu Gothic' }
+  const firstText = slides.flatMap(slide => slide.parts).find(part => part.kind === 'text')
+  const defaultFont = firstText?.kind === 'text' ? firstText.paragraph.runs[0]?.style.fontFace ?? 'Yu Gothic' : 'Yu Gothic'
+  pptx.theme = { headFontFace: defaultFont, bodyFontFace: defaultFont }
   const slideLists: Map<string, Extract<Part, { kind: 'list' }>>[] = []
   slides.forEach((model, index) => {
     const name = `MARP_${index}`
@@ -74,21 +79,31 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
     slideLists.push(lists)
     slide.background = { color: model.background }
     for (const part of model.parts) {
-      if (part.kind === 'text') slide.addText(part.paragraph.runs.map(r => toRun(r)), toTextOptions(part.paragraph))
+      if (part.kind === 'text') slide.addText(textRuns(part.paragraph.runs), toTextOptions(part.paragraph))
       else if (part.kind === 'list') {
+        if (part.positioned) {
+          for (const p of part.paragraphs) {
+            const objectName = `SlideApp list ${lists.size + 1}`, indent = p.list && (p.list.type !== 'none' || p.list.marker?.character) ? p.list.indent : 0
+            lists.set(objectName, { kind: 'list', rect: { ...p.rect, x: p.rect.x - indent, width: p.rect.width + indent }, paragraphs: [p] })
+            slide.addText(listRuns([p]), { ...toTextOptions(p), objectName })
+          }
+          continue
+        }
         const objectName = `SlideApp list ${lists.size + 1}`
         lists.set(objectName, part)
         slide.addText(listRuns(part.paragraphs), {
-          ...toPosition({ ...part.rect, width: part.rect.width + 3, height: part.rect.height + 2 }),
-          objectName, margin: 0, valign: 'top', fit: 'none', wrap: true,
+          ...toPosition({ ...part.rect, width: part.rect.width + (part.paragraphs[0]?.sizeTolerance?.[0] ?? 3), height: part.rect.height + (part.paragraphs[0]?.sizeTolerance?.[1] ?? 2) }),
+          objectName, margin: 0, valign: part.paragraphs[0]?.valign ?? 'top', fit: 'none', wrap: true,
         })
       }
       else if (part.kind === 'image') slide.addImage({ data: part.data, ...toPosition(part.rect) })
-      else if (part.kind === 'line') slide.addShape(pptx.ShapeType.line, { x: part.x / 96, y: part.y / 96, w: part.width / 96, h: part.height / 96, line: { color: part.color, width: part.points } })
-      else if (part.kind === 'box') slide.addShape(pptx.ShapeType.rect, { ...toPosition(part.rect), fill: part.fill, line: { transparency: 100 } })
+      else if (part.kind === 'line') slide.addShape(pptx.ShapeType.line, { x: part.x / 96, y: part.y / 96, w: part.width / 96, h: part.height / 96, flipH: part.flipH, flipV: part.flipV, line: { color: part.color, width: part.points, transparency: part.transparency, dashType: part.dash ? 'dash' : undefined } })
+      else if (part.kind === 'box') slide.addShape(part.radius ? pptx.ShapeType.roundRect : pptx.ShapeType.rect, { ...toPosition(part.rect), rectRadius: (part.radius ?? 0) / 96, fill: part.fill, line: part.line ?? { transparency: 100 } })
+      // 4.0.1 supports custGeom at runtime but omits it from the ShapeType enum.
+      else if (part.kind === 'polygon') slide.addShape('custGeom' as PptxGenJS.ShapeType, { ...toPosition(part.rect), points: [...part.points.map(p => ({ x: (p.x - part.rect.x) / 96, y: (p.y - part.rect.y) / 96 })), { close: true }], fill: part.fill, line: { transparency: 100 } })
       else {
         slide.addTable(part.rows.map(row => row.map(cell => ({
-          text: cell.runs.map(r => toRun(r)),
+          text: textRuns(cell.runs),
           options: { ...toTextOptions(cell.style),
             // Table margins use inches, unlike addText's point-valued margins.
             margin: cell.style.padding.map(px => px / 96) as [number, number, number, number],
@@ -104,14 +119,18 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
     if (model.notes.length) slide.addNotes(model.notes.join('\n\n'))
   })
   const needsMediaPass = slides.reduce((count, slide) => count + slide.parts.filter(part => part.kind === 'image').length, 0) > 1
-  const needsZip = needsMediaPass || slideLists.some(lists => lists.size)
-  const bytes = await pptx.write({ outputType: 'arraybuffer', compression: !needsZip }) as ArrayBuffer
-  if (!needsZip) return new Uint8Array(bytes)
+  const bytes = await pptx.write({ outputType: 'arraybuffer', compression: false }) as ArrayBuffer
   const zip = await JSZip.loadAsync(bytes)
   for (const [index, lists] of slideLists.entries()) {
-    if (!lists.size) continue
     const path = `ppt/slides/slide${index + 1}.xml`
-    zip.file(path, correctListIndents(await zip.file(path)!.async('string'), lists))
+    let xml = correctListIndents(await zip.file(path)!.async('string'), lists)
+    // PptxGenJS 4.0.1 repeats pPr for rich runs in every text/table paragraph.
+    // DrawingML permits exactly one. Also make no-stroke independent of themes.
+    xml = xml.replace(/<a:ln>\s*<\/a:ln>/g, '<a:ln><a:noFill/></a:ln>').replace(/<a:p>.*?<\/a:p>/gs, paragraph => {
+      let seen = false
+      return paragraph.replace(/<a:pPr\b[^>]*>.*?<\/a:pPr>/gs, properties => { if (seen) return ''; seen = true; return properties })
+    })
+    zip.file(path, xml)
   }
   if (needsMediaPass) {
     const canonical = new Map<string, string>(), replacements = new Map<string, string>()

@@ -8,6 +8,7 @@ import { nativeStyleReason, pixels, styleApproximations, nativeLetterSpacing, bo
 import { separateBox as separateBackground, rasterBox, nativeBox } from './paint'
 import { layoutPaintReason, clipsContent, textPseudoReason } from './cssAudit'
 import { measureMarker } from './markers'
+import { measureSvg } from './svg'
 
 const px = pixels
 const BLOCKS = 'h1,h2,h3,h4,h5,h6,marp-h1,marp-h2,marp-h3,marp-h4,marp-h5,marp-h6,p,li,pre,marp-pre,blockquote,header,footer'
@@ -94,7 +95,7 @@ function richStyle(element: Element, fonts: Map<string, string>): RunStyle {
 }
 
 /** Excludes child lists so a parent's text and nested bullets are emitted exactly once. */
-export function collectRuns(element: Element, fonts: Map<string, string>, ownListItem = false): TextRun[] {
+export function collectRuns(element: Element, fonts: Map<string, string>, ownListItem = false, nodes?: Node[]): TextRun[] {
   const runs: TextRun[] = []
   const preserve = getComputedStyle(element).whiteSpace.startsWith('pre')
   const walk = (node: Node) => {
@@ -111,10 +112,20 @@ export function collectRuns(element: Element, fonts: Map<string, string>, ownLis
       for (const child of node.childNodes) walk(child)
     }
   }
-  walk(element)
+  if (nodes) nodes.forEach(walk)
+  else walk(element)
   if (!preserve) {
-    while (runs[0] && !(runs[0].text = runs[0].text.trimStart())) runs.shift()
-    while (runs.at(-1) && !(runs.at(-1)!.text = runs.at(-1)!.text.trimEnd())) runs.pop()
+    let lineStart = true
+    for (const [index, run] of runs.entries()) {
+      if (run.text === '\n') {
+        if (index) runs[index - 1]!.text = runs[index - 1]!.text.replace(/ +$/, '')
+        lineStart = true
+      } else {
+        if (lineStart) run.text = run.text.replace(/^ +/, '')
+        if (run.text) lineStart = false
+      }
+    }
+    if (runs.at(-1)) runs.at(-1)!.text = runs.at(-1)!.text.replace(/ +$/, '')
   }
   return runs.filter(r => r.text !== '')
 }
@@ -141,7 +152,7 @@ function listInfo(element: HTMLElement, fonts: Map<string, string>): Paragraph['
   // glyph advance instead of a fixed .8em, which made Office's marker touch text.
   const marker = measured.marker?.character ? measured.text! : type === 'decimal' ? `${number}. ` : ''
   if (context && measured.marker) context.font = `${measured.marker.fontSize}px ${measured.marker.fontFace}`
-  const indent = marker && context ? context.measureText(marker).width : (measured.marker?.fontSize ?? px(style.fontSize)) * .8
+  const indent = marker && context ? context.measureText(marker).width : type === 'disc' ? px(style.fontSize) * 1.075 : (measured.marker?.fontSize ?? px(style.fontSize)) * .8
   return { level, type, start: number, indent, marker: measured.marker }
 }
 
@@ -151,7 +162,7 @@ function paragraph(element: HTMLElement, origin: DOMRect, fonts: Map<string, str
   const lineHeight = (style.lineHeight === 'normal' ? px(style.fontSize) * 1.2 : px(style.lineHeight)) * textScale(element)
   return {
     rect: relativeRect(rect, origin), runs: collectRuns(element, fonts, element.tagName === 'LI'),
-    align, wrap: style.whiteSpace === 'pre' ? false : undefined,
+    align, valign: 'top', sizeTolerance: [2, 0], wrap: ['pre', 'nowrap'].includes(style.whiteSpace) ? false : undefined,
     lineHeight, spaceBefore: 0, spaceAfter: 0,
     // External margins are already present in the absolute DOM coordinates.
     padding: [px(style.paddingTop), px(style.paddingRight), px(style.paddingBottom), px(style.paddingLeft)],
@@ -175,11 +186,11 @@ function pseudoFacts(element: Element, pseudo: string): PseudoFacts {
     border: ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`border-${side}-width`)) > 0),
     effects: hasEffects(style), sized: Number.parseFloat(style.width) > 0 || Number.parseFloat(style.height) > 0 }
 }
-function complexReason(element: Element): string | undefined {
+function complexReason(element: Element, collectedNodes?: Element[]): string | undefined {
   const kind = element.matches('section') ? 'section' : element.matches('table') ? 'table' : element.matches('ul,ol') ? 'list' : 'text'
   if (kind === 'table') { const reason = tableShapeReason(element as HTMLTableElement); if (reason) return reason }
   const facts: ElementFacts = { kind }
-  const nodes = kind === 'section' ? [element] : [element, ...element.querySelectorAll('*')]
+  const nodes = collectedNodes ?? (kind === 'section' ? [element] : [element, ...element.querySelectorAll('*')])
   for (const el of nodes) {
     const style = getComputedStyle(el)
     if (!isPainted(el)) {
@@ -218,7 +229,10 @@ function complexReason(element: Element): string | undefined {
     facts.inlineDecoration ||= inline && ((!separate && cssColor(style.backgroundColor).transparency < 100) ||
       ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`padding-${side}`)) > 0 || (!separate && px(style.getPropertyValue(`border-${side}-width`)) > 0)))
     if (['flex', 'inline-flex', 'grid', 'inline-grid'].includes(style.display)) return `CSS text layout display: ${style.display}`
-    if (el !== element && style.whiteSpace !== getComputedStyle(element).whiteSpace) return `Mixed CSS white-space: ${style.whiteSpace}`
+    // Cells may differ from one another, but collectRuns uses one whitespace
+    // mode within each cell. Never flatten a preserved inline newline to a space.
+    const whitespaceRoot = kind === 'table' ? el.closest('td,th') : element
+    if (whitespaceRoot && el !== whitespaceRoot && style.whiteSpace !== getComputedStyle(whitespaceRoot).whiteSpace) return `Mixed CSS white-space: ${style.whiteSpace}`
     const hasText = [...el.childNodes].some(node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())
     facts.textTransform ||= hasText && !!style.textTransform && style.textTransform !== 'none'
     facts.image ||= el.matches('img')
@@ -232,15 +246,25 @@ function complexReason(element: Element): string | undefined {
   return rasterReason(facts)
 }
 
-function ownTextRect(element: HTMLElement): DOMRect {
+function ownTextBounds(element: HTMLElement): DOMRect | undefined {
   const nodes = [...element.childNodes].filter(node => !(node instanceof Element && node.matches('ul,ol')))
   const rectangles = nodes.flatMap(node => {
     const range = document.createRange(); range.selectNodeContents(node)
     return [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0)
   })
-  if (!rectangles.length) return element.getBoundingClientRect()
+  if (!rectangles.length) return undefined
   const left = Math.min(...rectangles.map(r => r.left)), top = Math.min(...rectangles.map(r => r.top))
   return new DOMRect(left, top, Math.max(...rectangles.map(r => r.right)) - left, Math.max(...rectangles.map(r => r.bottom)) - top)
+}
+function ownTextRect(element: HTMLElement): DOMRect { return ownTextBounds(element) ?? element.getBoundingClientRect() }
+
+/** Center only the font leading of a measured, fully occupied line box. Extra
+ * height from height/min-height must remain above-aligned instead of centering
+ * the text in that spare space. Range/glyph-only boxes are handled explicitly. */
+function measuredLineAlignment(element: HTMLElement, paragraph: Paragraph): void {
+  const bounds = ownTextBounds(element)
+  const leading = Math.max(0, paragraph.lineHeight - px(getComputedStyle(element).fontSize) * textScale(element))
+  if (bounds && paragraph.rect.height <= bounds.height + leading + .5) paragraph.valign = 'middle'
 }
 
 /** Collapsed tables can put visible borders on rows/groups instead of cells. */
@@ -299,8 +323,16 @@ export function measureList(list: HTMLElement, origin: DOMRect, fonts: Map<strin
     const blocks = [...li.querySelectorAll<HTMLElement>(':scope > p')]
     for (const [index, block] of (blocks.length ? blocks : [li]).entries()) {
       if (!isPainted(block)) continue
-      const p = paragraph(block, origin, fonts, ownTextRect(block))
+      const nested = !!block.querySelector('ul,ol')
+      const p = paragraph(block, origin, fonts, nested ? ownTextRect(block) : block.getBoundingClientRect())
+      if (nested) p.valign = 'middle' // Range bounds enclose glyphs rather than the CSS line box.
+      else {
+        const style = getComputedStyle(block)
+        const [top, right, bottom, left] = p.padding.map((n, i) => n + px(style.getPropertyValue(`border-${['top', 'right', 'bottom', 'left'][i]}-width`)))
+        p.rect = { x: p.rect.x + left!, y: p.rect.y + top!, width: p.rect.width - left! - right!, height: p.rect.height - top! - bottom! }
+      }
       p.padding = [0, 0, 0, 0]
+      if (!nested) measuredLineAlignment(block, p)
       if (index > 0) p.list = undefined
       if (p.runs.length) { validatePart({ kind: 'text', paragraph: p }); paragraphs.push(p) }
     }
@@ -320,7 +352,7 @@ export function measureList(list: HTMLElement, origin: DOMRect, fonts: Map<strin
     rect.y = first.rect.y
     rect.height = last.rect.y + Math.max(last.rect.height, last.lineHeight) - first.rect.y
   }
-  return { kind: 'list', rect, paragraphs }
+  return { kind: 'list', rect, paragraphs, positioned: !list.querySelector('li ul,li ol') }
 }
 
 function pseudoText(section: HTMLElement, pseudo: string): HTMLElement | null {
@@ -411,6 +443,10 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
     for (const node of [element, ...element.querySelectorAll('*')]) {
       if (approximationSeen.has(node) || rasterized.has(node) || !isPainted(node)) continue
       approximationSeen.add(node)
+      if (node.matches('li')) {
+        const approximation = measureMarker(node, fonts, textScale(node)).approximation
+        if (approximation) (report.approximatedElements ??= []).push({slide:slideIndex + 1,element:'li::marker',...approximation})
+      }
       const styles = [[node.tagName.toLowerCase(), getComputedStyle(node)], ...(node.matches('li') ? [[`${node.tagName.toLowerCase()}::marker`, getComputedStyle(node, '::marker')]] : [])] as [string, CSSStyleDeclaration][]
       for (const [elementName, style] of styles) for (const approximation of styleApproximations(style)) {
         if (approximation.property.startsWith('border-') && separateBackground(node) && rasterBox(style, node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup'))) continue
@@ -427,6 +463,7 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       span.style.background = 'none'; span.style.border = '0'; span.style.borderRadius = '0'; span.style.boxShadow = 'none'; span.style.textShadow = 'none'
       if (complexReason(span)) return undefined
       const p = paragraph(span, origin, fonts, ownTextRect(span))
+      p.valign = 'middle'
       p.padding = [0, 0, 0, 0]; p.fill = undefined; p.wrap = false
       if (!p.runs.length) return undefined
       const part: Part = { kind: 'text', paragraph: p }
@@ -462,6 +499,15 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
     if (state.subtreeHidden) return
     const failedAsset = element.dataset.pptxAssetError
     if (failedAsset) throw new Error(failedAsset)
+    if (element.localName === 'svg') {
+      try {
+        const approximations: import('./styles').StyleApproximation[] = []
+        parts.push(...measureSvg(element as unknown as SVGSVGElement, origin, fonts, approximations))
+        for (const approximation of approximations) (report.approximatedElements ??= []).push({slide:slideIndex+1,element:'svg',...approximation})
+      }
+      catch (error) { await fallback(element, error instanceof Error ? error.message : String(error)) }
+      return
+    }
     if (!state.painted) {
       if (element.matches(`${BLOCKS},ul,ol,table`) && [...element.querySelectorAll('*')].some(el => isPainted(el))) {
         await fallback(element, 'Visible descendants of an unpainted container')
@@ -496,7 +542,41 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       if (element.dataset.pptxRasterReason) report.rasterizedElements.push({ slide: slideIndex + 1, element: 'img', reason: element.dataset.pptxRasterReason })
       return
     }
-    if (element.matches(BLOCKS) || element.dataset.pptxPseudo === 'true' || (!element.querySelector(`${BLOCKS},ul,ol,table,figure`) && [...element.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim()))) {
+    // Direct wrapper text around block children or spaced inline fragments must
+    // keep its own measured box. Flattening display:block strong loses newlines.
+    const fragmentChild = (el: Element) => !['inline', 'contents'].includes(getComputedStyle(el).display) || ['left', 'right'].some(side => Number.parseFloat(getComputedStyle(el).getPropertyValue(`margin-${side}`)) !== 0)
+    const fragmentBoundary = (el: Element) => el.tagName !== 'BR' && (fragmentChild(el) || el.matches('img,svg,mjx-container') || !!el.querySelector('img,svg,mjx-container'))
+    if (element.matches('div') && [...element.children].some(fragmentBoundary)) {
+      let nodes: Node[] = []
+      const flush = () => {
+        if (!nodes.length) return
+        // Audit only the descendants collected into this paragraph. Block/asset
+        // boundaries are measured independently, so their positioning is valid.
+        const descendants = nodes.flatMap(node => node instanceof Element ? [node, ...node.querySelectorAll('*')] : [])
+        const reason = nativeStyleReason(ownStyle, 'text', true) ?? textPseudoReason(element) ?? complexReason(element, descendants)
+        if (reason) throw new Error(reason)
+        const runs = collectRuns(element, fonts, false, nodes)
+        if (runs.some(run => run.text.trim())) {
+          const range = document.createRange(); range.setStartBefore(nodes[0]!); range.setEndAfter(nodes.at(-1)!)
+          const p = paragraph(element, origin, fonts, range.getBoundingClientRect())
+          p.valign = 'middle'
+          p.runs = runs; p.padding = [0, 0, 0, 0]; p.fill = undefined
+          parts.push({ kind: 'text', paragraph: p })
+        }
+        nodes = []
+      }
+      for (const node of element.childNodes) {
+        if (node instanceof Element && fragmentBoundary(node)) { flush(); await walk(node as HTMLElement) }
+        else nodes.push(node)
+      }
+      flush(); return
+    }
+    // A Markdown paragraph can consist solely of an inline SVG. Keep its diagram
+    // boundary, rather than rejecting the enclosing text block as math.
+    if (element.matches('p') && element.children.length === 1 && element.firstElementChild?.localName === 'svg' && ![...element.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim())) {
+      await walk(element.firstElementChild as HTMLElement); return
+    }
+    if (element.matches(BLOCKS) || element.dataset.pptxPseudo === 'true' || (!element.querySelector(`${BLOCKS},ul,ol,table,figure,svg`) && [...element.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim()))) {
       const reason = complexReason(element)
       if (reason) { await fallback(element, reason); return }
       const children = [...element.children] as HTMLElement[]
@@ -508,7 +588,16 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       const generated = ['::before', '::after'].some(pseudo => pseudoNeedsRaster(pseudoFacts(element, pseudo)))
       const textRect = element.matches('li') || scaled || generated ? ownTextRect(element) : element.getBoundingClientRect()
       const p = paragraph(element, origin, fonts, textRect)
+      if (scaled || generated || element.matches('li')) p.valign = 'middle'
+      if (!scaled && !generated && !element.matches('li')) {
+        const [top, right, bottom, left] = p.padding.map((n, i) => n + px(ownStyle.getPropertyValue(`border-${['top', 'right', 'bottom', 'left'][i]}-width`)))
+        p.rect = { x: p.rect.x + left!, y: p.rect.y + top!, width: p.rect.width - left! - right!, height: p.rect.height - top! - bottom! }
+        p.padding = [0, 0, 0, 0]
+      }
+      if (element.matches('h1,h2,h3,h4,h5,h6')) p.rect.y += px(ownStyle.fontSize) * .075
+      if (ownStyle.fontWeight === '300' && p.lineHeight <= px(ownStyle.fontSize)) p.rect.y += px(ownStyle.fontSize) * .17
       if (scaled || generated || element.matches('li')) p.padding = [0, 0, 0, 0]
+      else measuredLineAlignment(element, p)
       // Marp has already fitted a single line. Office's slightly wider glyphs
       // must not introduce another line after that fit was measured.
       if (scaled && p.rect.height < p.lineHeight * 1.5 && !p.runs.some(run => run.text.includes('\n'))) p.wrap = false

@@ -2,7 +2,10 @@
 
 This module does not touch Markdown, the supplied Marp instance, or application UI.
 Use the current in-memory Markdown and a Marp instance configured with the same
-themes as the preview (`script: false`, default HTML allowlist).
+themes and HTML allowlist as the preview (`script: false`, never `html: true`).
+For inline SVG diagrams, configure **both** preview and export Marp instances with
+`html: svgHtmlAllowlist` (exported from this module). Marp's default allowlist
+escapes inline SVG; this change does not wire a different renderer into `src/app/**`.
 
 ```ts
 import { exportPptx, defaultPptxPath } from '../export/pptx'
@@ -39,17 +42,44 @@ Web fonts in raster parts without relaxing CSP, pass `fontEmbedCSS` with data UR
 `@font-face` rules. Native text uses an installed Windows font, also in OOXML `ea`.
 PowerPoint has one presentation size, so mixed slide sizes are rejected.
 
-Unsupported math/SVG/emoji, transformed blocks and merged tables are rasterized.
-Solid block backgrounds and straight solid borders become native shapes behind content. Complex separable backgrounds and generated decoration become independent image layers. Code highlighting that can be represented as runs remains text.
+Unsupported math/SVG primitives/emoji, transformed blocks and merged tables are rasterized.
+Supported inline SVG `g`, `rect`/circular `rx`, single text nodes, absolute
+`M/L/H/V` paths and triangular arrow markers become editable shapes. The collector
+is atomic: unsupported curves/primitives, rotation/skew/nonuniform scale, complex
+paint or text reject only that SVG, roll back its native parts, and record the
+reason before raster fallback. It never stops the rest of the deck.
+The reference's text-bearing overflow outside an SVG viewport is allowed only up
+to 3 CSS pixels and recorded in `approximatedElements`; larger clips or clipped
+non-text geometry rasterize the diagram. External marker references are rejected.
+Stroke and arrow paint also participate in viewport checks. Clipped opaque square
+hairlines (at most 1 CSS pixel outside) retain their exact visible area as a fill
+and clipped rectangular border strips; other clipped strokes/markers rasterize.
+Computed CSS path overrides, hidden/transformed marker content and nondefault
+path line caps/joins reject only the SVG and appear in the raster report.
+Solid block backgrounds and straight solid borders become native shapes behind content.
+Equal circular CSS corners with uniform borders use a native `roundRect`, with
+the measured radius and the CSS border inset. Elliptical/asymmetric corners and
+complex decoration remain images behind editable content. Complex separable backgrounds and generated decoration become independent image layers. Code highlighting that can be represented as runs remains text.
 Native tables use measured columns and rows with auto-paging disabled.
 Cell padding is passed in inches (text-box padding uses points). Columns reserve
 space beyond the measured text lines for Office's font metrics, preventing row
-growth over the next block. A nested list uses one text box with a paragraph per
+growth over the next block. Flat lists place each item at its measured position. A nested list uses one text box with a paragraph per
 item; an OOXML pass sets exact measured text/marker indents independently of its
 `lvl`. The existing JSZip dependency is used at runtime for that correction.
-Single-line Marp-fitted headings disable Office wrapping.
+Single-line Marp-fitted headings and CSS `nowrap` disable Office wrapping.
+Every native paragraph uses its measured base font for paragraph metrics and
+selects the deck theme from its first native font. Explicit BRs (including
+consecutive/trailing BRs) and preserved newlines use DrawingML soft breaks.
+Collapsed spaces after BRs are removed without trimming nonbreaking spaces.
+The OOXML pass removes duplicate paragraph properties from all rich text and
+table cells and writes explicit no-stroke values, independent of theme defaults.
 Margins between paragraphs are represented by their measured positions, so they
 are not applied a second time inside each text box.
+Text with spare height from `height`/`min-height` stays top aligned. Middle
+alignment is limited to measured glyph bounds or fully occupied line boxes, so
+font leading does not shift ordinary lines. List text excludes padding/borders
+from its content box. Each table cell may use its own whitespace mode, while
+mixed whitespace modes inside a cell rasterize the table.
 
 ## Conservative conversion
 
@@ -61,10 +91,13 @@ shared by text, lists, tables, images, decoration, assets and raster bounds; it
 follows shadow hosts and distinguishes suppressed subtrees from unpainted wrappers
 with visible descendants. Hidden/merged/ragged table grids rasterize as a unit.
 Native decisions have three outcomes: exact serialization, an explicitly listed
-approximation, or rasterization. `APPROXIMATION_RULES` in `styles.ts` is the single
-source for bounds and report descriptions: underline offset/thickness, tabular
-numeric metrics and selected font features, kerning/rendering/smoothing, small
+approximation, or rasterization. `APPROXIMATION_RULES` in `styles.ts` defines CSS
+typography bounds and report descriptions; `markers.ts` defines the default disc
+mapping and `svg.ts` defines the SVG dash preset mapping and bounded text-bearing overflow. CSS rules cover
+weight 300, underline offset/thickness, tabular
+numeric metrics and selected font features, kerning/rendering/smoothing, small positive
 letter spacing, and translucent borders composited over ancestor solid fills.
+Small negative letter spacing (at most 0.05em and 1px) is serialized exactly.
 Large underline changes, negative spacing outside the small bound, stylistic
 font features and unsupported values still rasterize. Positive spacing outside
 the approximation bound uses native character spacing. Built-in theme tables
@@ -150,7 +183,7 @@ regression case; it must not remove a fallback merely because a value parses.
 | Classification | Contract | Representative automated case |
 | --- | --- | --- |
 | ネイティブ | Measured native text/list/table, image or independent solid rectangle/lines; retain alpha where supported | `audit.test.ts`: solid `ul`/`li` backgrounds and custom marker OOXML; `audit-solid-list`, `audit-marker` in WebView2/COM |
-| 近似 | Only `APPROXIMATION_RULES`; record property/value/replacement in `approximatedElements`, or font substitution in `substitutedFonts` | `styles.test.ts` bounds; `audit-approximation`; native built-in theme tables |
+| 近似 | Explicit typography, marker and SVG bounds described above; record property/value/replacement in `approximatedElements`, or font substitution in `substitutedFonts` | `styles.test.ts` bounds; `audit-approximation`; native built-in theme tables; `parity.test.ts` SVG overflow |
 | 画像化 | Record element and reason. Separable decoration alone is an image; changed text flow/partial-run styling rasterizes its containing native unit. Cross-unit compositing uses the slide | `audit-decorations`, `audit-marker-complex`, `audit-first-line`, `audit-stacking` |
 | 該当なし | No paint to serialize: suppressed subtrees, empty pseudos, default effects; browser-inapplicable CSS retains its computed default | `audit.test.ts`: default/empty paint; `measure.test.ts` painted-state tests; `audit-hidden` |
 
@@ -165,7 +198,7 @@ children; direct wrapper text is collected or explicitly rasterized, never skipp
 | --- | --- | --- | --- |
 | `section` | Solid slide/alpha background; measured layout of children | Inherited typography is reported at native children | Complex box decoration alone; transform/opacity/filter/clip/mask or cross-unit stacking/blending captures the slide; empty decoration: 該当なし |
 | `h1`–`h6`, Marp heading hosts, `p` | Native rich text, measured padding/margins; own box behind text | Bounded typography/font rules | Unsupported typography/partial-run pseudos/changed text flow captures block |
-| `ul`, `ol`, `li` | One native list box, paragraph level/start/indent/glyph; each list/item/continuation paragraph has independent box paint | Typography and marker typography rules, with `li::marker` attribution | Unsupported marker/content, reversed/inside list, overlapping items, nested positioned content or complex list structure captures whole list |
+| `ul`, `ol`, `li` | Nested lists use one native list box; flat lists position each item separately. Paragraph level/start/indent/glyph and independent list/item/continuation box paint are retained | Typography and marker typography rules, with `li::marker` attribution | Unsupported marker/content, reversed/inside list, overlapping items, nested positioned content or complex list structure captures whole list |
 | `blockquote` | Own box; native child blocks | Native child rules | Inseparable block effects/layout captures quote; child images/unsupported units stay local |
 | `table`, `thead`, `tbody`, `tfoot`, `tr` | Table grid; separate column/group/row/table fills; collapsed solid borders resolved at cells | Numeric features and alpha cell/row borders | Hidden/merged/ragged grid, visible caption, nonzero separate border spacing, changed table flow captures table |
 | `th`, `td` | Native cell runs, measured padding/width/height, vertical alignment, transparent native cell over separated fill | Numeric features/border compositing | Cell gradient/rounding/outline is decoration only; unsupported text/inline images captures table |
@@ -174,6 +207,7 @@ children; direct wrapper text is collected or explicitly rasterized, never skipp
 | `a`, `strong`, `em`, `s`, `mark`, inline `code`, `span` | Rich runs including link/alpha/size/weight/italic/underline/strike; independent inline decoration raster | Bounded typography/font rules | Padding/margins/inline-block/float/position or in-flow generated content that changes internal run positions captures containing block/list/table |
 | `header`, `footer` | Native text at measured coordinates with independent box | Typography/font rules | Unsupported text/effects captures respective block |
 | `::before`, `::after` | Plain positioned section pagination can remain native text | Native text/font rules | Generated decoration paints alone in original containing block; unsupported text content stays in decoration image; in-flow nested pseudo layout captures containing unit; reordered stacking/blending captures slide |
+| Inline `svg` | `g`, `rect` (circular `rx`), simple `text`, absolute `M/L/H/V` lines and triangular end markers; uniform positive screen scale/translation applied | Reference-compatible `6 4` → DrawingML `dash` mapping and text-bearing viewport overflow up to 3px are reported; text has a 2px width reserve | Any unsupported painted child/style rolls back and rasterizes only the diagram, including CSS rectangle geometry that differs from its SVG attributes; definition/title/description nodes do not paint |
 | `::marker` | Default allowlisted bullets/numbering or one character with independent font/size/color/alpha; empty/hidden marker has no bullet | Bounded marker typography, explicitly reported | Multiple characters, image/counter content, unsupported font styling or marker type captures list; non-list-item: 該当なし |
 | `::first-letter`, `::first-line` | Unchanged computed text appearance: 該当なし | None silently applied to partial runs | Changed color/font/decoration/spacing/direction/box/float/vertical alignment captures containing native unit |
 
@@ -182,17 +216,17 @@ children; direct wrapper text is collected or explicitly rasterized, never skipp
 | CSS concern | ネイティブ | 近似 | 画像化 / 該当なし |
 | --- | --- | --- | --- |
 | Background color / alpha | Independent solid block/group/row/cell rectangles, section background, exact alpha | None | Inline fragmented paint, gradients, images, background-clip/origin/size/repeat/position/attachment/blend are painted as decoration; transparent/no background: 該当なし |
-| Borders / radius / outline | Straight opaque solid edges, native cell borders | Cell/row alpha border over solid ancestors, reported | Dashed/double/image borders, translucent standalone edges, asymmetric/elliptical corners, outline/offset and box shadows paint decoration only. Radius without visible paint or clipping: 該当なし |
+| Borders / radius / outline | Straight opaque solid edges, native cell borders; uniform circular block corners use `roundRect` | Cell/row alpha border over solid ancestors, reported | Dashed/double/image borders, translucent standalone edges, asymmetric/elliptical corners, outline/offset and box shadows paint decoration only. Radius without visible paint or clipping: 該当なし |
 | Margin / padding / dimensions / gaps | DOM positions, textbox/cell padding and list indentation; external margins are not reapplied | Existing font metric reserve for Office line wrapping | Inline margins/padding/inline-block and unrepresentable mixed layout capture containing unit; zero/default spacing: 該当なし |
 | Color / transparency | Run, fill and bullet alpha in DrawingML | Only allowlisted border compositing | Unsupported CSS color spaces in text capture native unit; box colors browser-paint as decoration; opacity 0 / invisible subtree: 該当なし |
-| Font family / size / weight / style | Resolved font, run size/bold/italic and marker font/size; Marp fit scale | Local font substitution reported | Unsupported weight/stretch/caps/variants/features/variable settings/ligatures/language overrides capture unit |
-| Decoration / transform / spacing | Underline, strike, positive character spacing, super/subscript | Bounded underline offset/thickness, small spacing, numeric metrics, selected features/kerning/rendering/smoothing | Unsupported decoration color/style/overline/emphasis/stroke/fill, text-transform, word-spacing, indentation or spacing beyond bounds capture unit; none/default: 該当なし |
+| Font family / size / weight / style | Resolved font, run size/bold/italic and marker font/size; Marp fit scale | Local font substitution and weight 300 → regular reported | Unsupported weight/stretch/caps/variants/features/variable settings/ligatures/language overrides capture unit |
+| Decoration / transform / spacing | Underline, strike, positive and bounded small negative character spacing, super/subscript | Bounded underline offset/thickness, small positive spacing, numeric metrics, selected features/kerning/rendering/smoothing | Unsupported decoration color/style/overline/emphasis/stroke/fill, text-transform, word-spacing, indentation or spacing beyond bounds capture unit; none/default: 該当なし |
 | Direction / writing mode | Horizontal LTR, supported bidi defaults | None | RTL/vertical writing, unsupported orientation/combine/bidi capture text unit; browser-inapplicable pseudo properties: 該当なし |
-| White-space / wrapping | Uniform normal/pre/pre-wrap without preserved tabs; measured line-height; fit-heading nowrap | Native fonts have documented metric reserve | Mixed whitespace, nowrap/break-spaces/pre-line, preserved tabs, word-break/line-break/hyphens/text-wrap-style outside allowlist capture unit |
-| Overflow / ellipsis / clamp | Overflow visible, or nonvisible overflow with no clipped content | None | Actual overflow clipping (scroll extent and painted descendant bounds), legacy clip, ellipsis, line-clamp capture containing unit; no clipping: 該当なし |
-| List symbols / counters | Allowlisted list types, numbering start/level, single character marker and measured glyph/space advance | Marker typography uses same bounded rules | Custom list-style-image, arbitrary counters/content, reversed/inside numbering or unknown type captures list; marker none/display other than list-item: 該当なし |
+| White-space / wrapping | Uniform normal/pre/pre-wrap/nowrap without preserved tabs; measured line-height; soft BR/newline breaks | Native fonts have documented metric reserve | Mixed whitespace, break-spaces/pre-line, preserved tabs, word-break/line-break/hyphens/text-wrap-style outside allowlist capture unit |
+| Overflow / ellipsis / clamp | Overflow visible, or nonvisible overflow with no clipped content | SVG text bearings up to 3 CSS px outside the viewport, reported | Other actual overflow clipping (scroll extent and painted descendant bounds), legacy clip, ellipsis, line-clamp capture containing unit; no clipping: 該当なし |
+| List symbols / counters | Allowlisted list types, numbering start/level, single character marker and measured glyph/space advance | Marker typography uses same bounded rules; default disc uses Verdana U+2022 at 110%, reported | Custom list-style-image, arbitrary counters/content, reversed/inside numbering or unknown type captures list; marker none/display other than list-item: 該当なし |
 | Display / visibility | Block coordinates; table/list structural validation; visible descendants of unpainted wrappers handled explicitly | None | Hidden inline layout or nonrectangular hidden table captures unit; display:none/content-visibility:hidden/opacity:0 skip subtree; inherited visibility is checked on each descendant |
-| Transform / opacity / filter | None/default: 該当なし | None | Transform including individual translate/rotate/scale/perspective, partial opacity, filter, clip-path/mask and related compositing capture affected unit; section context captures slide |
+| Transform / opacity / filter | SVG geometry supports uniform positive screen scale/translation; none/default: 該当なし | None | Other transforms including individual translate/rotate/scale/perspective, partial opacity, filter, clip-path/mask and related compositing capture affected unit; section context captures slide |
 | mix-blend-mode / backdrop-filter | normal/none: 該当なし | None | Any active cross-element blending/backdrop effect captures slide, preserving original backdrop |
 | Columns | auto/one column with automatic width: 該当なし | None | Multi-column count or explicit column-width captures affected text/list/wrapper (column gaps/rules retained by browser image) |
 | float / position | Standalone block/figure/header/footer coordinates measured after layout | None | Nested inline/list/table positioning or floats capture enclosing unit; mixed wrapper text captures wrapper. Offsets on CSS-inapplicable properties: 該当なし |
@@ -229,3 +263,54 @@ blocks are whole images. Code that now passes native text gates has only its
 background rasterized (`marp-pre background`); the new audit runner covers the
 current behavior without that obsolete expectation. No files outside this module
 were modified to update that legacy runner.
+
+
+## Reference-converter parity (2026-10-22)
+
+`inspect-chrome.mjs` launches its own headless Chrome/profile, uses the production
+measurement/generation pipeline, and closes Chrome and Vite in `finally`. It adds
+no npm dependency. Outputs stay in a temporary inspection directory: PPTX,
+model/report JSON, standalone measured HTML and 2x Marp DOM PNGs. `onInspect` is
+also available on `ExportOptions` for a caller-provided diagnostics sink; sink
+failures propagate. These artifacts contain document content and are not committed.
+
+```powershell
+node src/export/pptx/inspect-chrome.mjs input.md --inspect-dir "$env:TEMP/slideapp-parity"
+node src/export/pptx/inspect-chrome.mjs --fixtures
+powershell -NoProfile -File src/export/pptx/audit-powerpoint.ps1 -InputDir <fixture-output> -All
+```
+
+`parity.md` is a synthetic fixture, not a copy of private presentation material.
+It covers rounded HTML boxes with block children, SVG groups/boxes/text/elbow
+paths/arrowheads, dashed borders, nowrap tables, explicit BRs and local fallback
+for an unsupported circle. `parity.test.ts` additionally checks transactional
+fallback, malformed paths, reverse line directions, OOXML and SVG allowlist safety.
+
+Comparison with the supplied reference converter's existing 8-slide PPTX used
+installed PowerPoint COM (2560×1440 PNG) and the reference converter's Marp DOM
+screenshots. All outputs are under the private temporary inspection directory.
+The reference project, input and existing PPTX were only read.
+
+| Whole-deck measurement | Reference | SlideApp |
+| --- | ---: | ---: |
+| Shapes | 139 | 181 |
+| `HasTextFrame` shapes (including empty native boxes/lines) | 136 | 178 |
+| Shapes containing editable text | 93 | 93 |
+| Native tables | 2 | 2 |
+| Pictures | 1 | 1 |
+| Mean absolute RGB difference from Marp (0–255, lower is better) | 6.6623 | 6.6092 |
+
+The cover and SVG slide are pixel-identical to reference PowerPoint output.
+Slides 2 and 8 have small pixel-score increases (0.027 and 0.003 respectively),
+while the whole-deck mean improves. The total-shape increase comes mainly from
+independently editable table paint; it is not an increase in text content.
+No whole-slide or diagram images are used in this acceptance deck. The existing
+image's CSS border/radius/shadow stays browser-painted in the image surface,
+which preserves its appearance without increasing the picture count.
+
+Reference differences deliberately retained: preserved tabs are rasterized rather
+than expanded using character counts, since proportional/mixed-font tab advances
+cannot be reconstructed by counting characters. Image shadows stay browser-painted
+rather than using PowerPoint's different blur model. Merged/hidden/irregular tables
+retain conservative per-table fallback. The installed-font/generic font mapping,
+measured table padding, notes and local image embedding were already supported.

@@ -21,7 +21,12 @@ try {
         $tableShapes = @($slide.Shapes | Where-Object HasTable -EQ -1)
         $markerMetrics = @()
         $tableIndex = 0
-        foreach ($part in @($model.slides[$index - 1].parts)) {
+        $partsToCheck = @(foreach ($measuredPart in $model.slides[$index - 1].parts) {
+          if ($measuredPart.kind -eq 'list' -and $measuredPart.positioned) {
+            foreach ($paragraph in $measuredPart.paragraphs) { @{ kind='list'; paragraphs=@($paragraph) } }
+          } else { $measuredPart }
+        })
+        foreach ($part in $partsToCheck) {
           if ($part.kind -eq 'table') {
             if ($tableShapes.Count -eq 0) { throw 'Native table missing' }
             $table = $tableShapes[$tableIndex++].Table
