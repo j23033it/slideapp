@@ -1,0 +1,68 @@
+/* ライト・ダークのトークン。スライド自体の色はMarpのテーマに任せる */
+:root {
+  color-scheme: light;
+
+  --sm-font-ui: 'Segoe UI', 'Yu Gothic UI', system-ui, sans-serif;
+
+  --sm-bg: #f3f3f3;
+  --sm-toolbar: #fafafa;
+  --sm-status: #f0f0f0;
+  --sm-surface: #ffffff;
+  --sm-surface-alt: #ebebeb;
+  --sm-stage: #d4d4d4;
+  --sm-hover: rgba(0, 0, 0, 0.07);
+
+  --sm-text: #1f1f1f;
+  --sm-text-muted: #5f5f5f;
+  --sm-border: #d2d2d2;
+  --sm-accent: #0f6cbd;
+  --sm-accent-contrast: #ffffff;
+  --sm-danger: #b42318;
+  --sm-warning-bg: #fff4ce;
+  --sm-warning-border: #e8c75a;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --sm-bg: #1b1b1b;
+  --sm-toolbar: #242424;
+  --sm-status: #202020;
+  --sm-surface: #2b2b2b;
+  --sm-surface-alt: #202020;
+  --sm-stage: #111111;
+  --sm-hover: rgba(255, 255, 255, 0.1);
+
+  --sm-text: #f0f0f0;
+  --sm-text-muted: #b0b0b0;
+  --sm-border: #3d3d3d;
+  --sm-accent: #4aa3f0;
+  --sm-accent-contrast: #0b1a26;
+  --sm-danger: #ff8a80;
+  --sm-warning-bg: #3a3524;
+  --sm-warning-border: #6b5f2e;
+}
+
+/* OS設定に従う（手動で light / dark を選んだときは上の指定を優先する） */
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] {
+    color-scheme: dark;
+
+    --sm-bg: #1b1b1b;
+    --sm-toolbar: #242424;
+    --sm-status: #202020;
+    --sm-surface: #2b2b2b;
+    --sm-surface-alt: #202020;
+    --sm-stage: #111111;
+    --sm-hover: rgba(255, 255, 255, 0.1);
+
+    --sm-text: #f0f0f0;
+    --sm-text-muted: #b0b0b0;
+    --sm-border: #3d3d3d;
+    --sm-accent: #4aa3f0;
+    --sm-accent-contrast: #0b1a26;
+    --sm-danger: #ff8a80;
+    --sm-warning-bg: #3a3524;
+    --sm-warning-border: #6b5f2e;
+  }
+}

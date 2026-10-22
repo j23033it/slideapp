@@ -1,0 +1,33 @@
+[package]
+name = "slideapp"
+version = "0.1.0"
+description = "Marp形式のMarkdownをスライド上で直接編集するデスクトップアプリ"
+authors = ["SlideApp"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "slideapp_lib"
+# Windows専用のデスクトップアプリなので、モバイル向けの staticlib / cdylib は作らない
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+embed-resource = "3"
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
