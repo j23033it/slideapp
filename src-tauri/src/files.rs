@@ -125,25 +125,114 @@ fn encoded_markdown(text: &str, has_bom: bool) -> Vec<u8> {
     bytes
 }
 
-fn temporary_path(path: &Path) -> io::Result<PathBuf> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing file name"))?;
-    let mut temporary_name = std::ffi::OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(".slideapp.tmp");
-    Ok(path.with_file_name(temporary_name))
+// Reserve names independently of the destination's length. tempfile uses
+// create_new and retries random-name collisions without touching existing files.
+fn create_sibling(path: &Path, suffix: &str) -> io::Result<(File, RemoveOnDrop)> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::Builder::new()
+        .prefix(".slideapp-")
+        .rand_bytes(8)
+        .suffix(suffix)
+        .tempfile_in(parent)?;
+    let (file, path) = temporary.keep().map_err(|error| error.error)?;
+    Ok((file, RemoveOnDrop(Some(path))))
 }
 
-// Only remove files created by this operation, never a pre-existing temporary file.
+// Only remove files created by this operation, never a pre-existing file.
 struct RemoveOnDrop(Option<PathBuf>);
+
+impl RemoveOnDrop {
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("owned temporary path")
+    }
+
+    fn retain(&mut self, reason: &str) {
+        if let Some(path) = self.0.take() {
+            eprintln!("SlideApp: {reason}; retained at {}", path.display());
+        }
+    }
+}
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
         if let Some(path) = &self.0 {
-            let _ = fs::remove_file(path);
+            if let Err(error) = remove_with_retry(path) {
+                eprintln!(
+                    "SlideApp: temporary cleanup failed: {error}; retained at {}",
+                    path.display()
+                );
+            }
         }
     }
+}
+
+fn remove_with_retry(path: &Path) -> io::Result<()> {
+    for attempt in 0..4 {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt == 3 => return Err(error),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20 << attempt)),
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    // Canonicalize only the parent to support long paths even for a missing name.
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing file name"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let absolute = parent.canonicalize()?.join(name);
+    let mut wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NUL in file path",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(windows)]
+fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let source = wide_path(source)?;
+    let destination = wide_path(destination)?;
+    // SAFETY: Both NUL-terminated paths live for the call. No REPLACE_EXISTING.
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::hard_link(source, destination)?;
+    fs::remove_file(source)
+}
+
+fn move_to_missing(source: &Path, destination: &Path) -> Result<(), SaveError> {
+    move_no_replace(source, destination).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            if let Ok(bytes) = fs::read(destination) {
+                return SaveError::Conflict {
+                    disk_hash: sha256_hex(&bytes),
+                };
+            }
+        }
+        error.into()
+    })
 }
 
 fn check_expected_hash(path: &Path, expected_hash: &str) -> Result<bool, SaveError> {
@@ -172,12 +261,7 @@ pub(crate) fn save_markdown(
     let existed = check_expected_hash(path, expected_hash)?;
     let bytes = encoded_markdown(text, has_bom);
     let hash = sha256_hex(&bytes);
-    let temporary = temporary_path(path)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    let _cleanup = RemoveOnDrop(Some(temporary.clone()));
+    let (mut file, temporary) = create_sibling(path, ".tmp")?;
     file.write_all(&bytes)?;
     file.flush()?;
     file.sync_all()?;
@@ -192,10 +276,9 @@ pub(crate) fn save_markdown(
     }
     before_replace(&hash);
     if still_exists {
-        replace_existing(path, &temporary)?;
+        replace_existing(path, temporary.path(), expected_hash, &hash)?;
     } else {
-        // Windows rename fails if a competing writer created the destination.
-        fs::rename(&temporary, path)?;
+        move_to_missing(temporary.path(), path)?;
     }
     Ok(SavedFile {
         hash,
@@ -204,40 +287,16 @@ pub(crate) fn save_markdown(
 }
 
 #[cfg(windows)]
-fn replace_existing(path: &Path, temporary: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+fn replace_with_backup(path: &Path, replacement: &Path, backup: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-
-    // A backup is needed for ERROR_UNABLE_TO_MOVE_REPLACEMENT[_2]: without it,
-    // ReplaceFileW may remove the original name even though it reports failure.
-    let mut backup_name = temporary.as_os_str().to_os_string();
-    backup_name.push(".bak");
-    let backup = PathBuf::from(backup_name);
-    let reservation = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&backup)?;
-    let mut cleanup = RemoveOnDrop(Some(backup.clone()));
-    drop(reservation);
-    let wide = |value: &Path| -> io::Result<Vec<u16>> {
-        let mut value: Vec<u16> = value.as_os_str().encode_wide().collect();
-        if value.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "NUL in file path",
-            ));
-        }
-        value.push(0);
-        Ok(value)
-    };
-    let original_wide = wide(path)?;
-    let temporary_wide = wide(temporary)?;
-    let backup_wide = wide(&backup)?;
-    // SAFETY: All paths are NUL-terminated, live for this call; reserved args are null.
+    let original_wide = wide_path(path)?;
+    let replacement_wide = wide_path(replacement)?;
+    let backup_wide = wide_path(backup)?;
+    // SAFETY: Paths are NUL-terminated and live for the call; reserved args are null.
     let replaced = unsafe {
         ReplaceFileW(
             original_wide.as_ptr(),
-            temporary_wide.as_ptr(),
+            replacement_wide.as_ptr(),
             backup_wide.as_ptr(),
             0,
             std::ptr::null(),
@@ -245,38 +304,109 @@ fn replace_existing(path: &Path, temporary: &Path) -> io::Result<()> {
         )
     };
     if replaced == 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(1177) {
-            // With this error, the original has moved to the backup name. A
-            // concurrent creator must not be overwritten during recovery.
-            let restore = if path.exists() {
-                Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "Destination appeared during recovery",
-                ))
-            } else {
-                fs::rename(&backup, path)
-            };
-            if let Err(restore) = restore {
-                // Keep the only copy of the original if the OS also refuses recovery.
-                cleanup.0 = None;
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{error}; recovery failed: {restore}; original retained at {}",
-                        backup.display()
-                    ),
-                ));
-            }
-        }
-        return Err(error);
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
+// ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 leaves the original under the backup name.
+// A single no-replace move avoids a check-then-rename race during recovery.
+#[cfg(windows)]
+fn recover_failed_replace(path: &Path, backup: &mut RemoveOnDrop, error: io::Error) -> SaveError {
+    if error.raw_os_error() == Some(1177) {
+        if let Err(restore) = move_to_missing(backup.path(), path) {
+            let location = backup.path().display().to_string();
+            backup.retain("replacement recovery failed");
+            return match restore {
+                conflict @ SaveError::Conflict { .. } => conflict,
+                SaveError::Io { message } => SaveError::Io {
+                    message: format!(
+                        "{error}; recovery failed: {message}; original retained at {location}"
+                    ),
+                },
+            };
+        }
+    }
+    error.into()
+}
+
+#[cfg(windows)]
+fn replace_existing(
+    path: &Path,
+    temporary: &Path,
+    expected_hash: &str,
+    saved_hash: &str,
+) -> Result<(), SaveError> {
+    let (reservation, mut backup) = create_sibling(path, ".bak")?;
+    drop(reservation);
+    if let Err(error) = replace_with_backup(path, temporary, backup.path()) {
+        return Err(recover_failed_replace(path, &mut backup, error));
+    }
+    let disk_hash = match fs::read(backup.path()) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(error) => {
+            let location = backup.path().display().to_string();
+            backup.retain("cannot verify replaced contents");
+            return Err(SaveError::Io {
+                message: format!("{error}; unverified original retained at {location}"),
+            });
+        }
+    };
+    if disk_hash != expected_hash {
+        restore_conflicting_backup(path, &mut backup, saved_hash);
+        return Err(SaveError::Conflict {
+            disk_hash: fs::read(path)
+                .map(|bytes| sha256_hex(&bytes))
+                .unwrap_or(disk_hash),
+        });
+    }
+    Ok(())
+}
+
+// Roll back the save, keeping a second backup so a later external writer is
+// preserved too. Never delete an unverified copy on a recovery error.
+#[cfg(windows)]
+fn restore_conflicting_backup(path: &Path, backup: &mut RemoveOnDrop, saved_hash: &str) {
+    let rollback = (|| -> io::Result<()> {
+        let (reservation, mut displaced) = create_sibling(path, ".bak")?;
+        drop(reservation);
+        match replace_with_backup(path, backup.path(), displaced.path()) {
+            Ok(()) => {
+                if fs::read(displaced.path())
+                    .map(|bytes| sha256_hex(&bytes))
+                    .ok()
+                    .as_deref()
+                    != Some(saved_hash)
+                {
+                    displaced.retain("additional external contents found during rollback");
+                }
+            }
+            Err(error) => {
+                if error.raw_os_error() == Some(1177) {
+                    // The second replacement moved the current disk file aside.
+                    // Prefer restoring the external backup, without overwriting
+                    // any destination created in the meantime.
+                    let _ = move_to_missing(backup.path(), path);
+                    displaced.retain("rollback replacement failed after moving disk contents");
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = rollback {
+        backup.retain(&format!("conflict rollback failed: {error}"));
+    }
+}
+
 #[cfg(not(windows))]
-fn replace_existing(path: &Path, temporary: &Path) -> io::Result<()> {
-    fs::rename(temporary, path)
+fn replace_existing(
+    path: &Path,
+    temporary: &Path,
+    _expected_hash: &str,
+    _saved_hash: &str,
+) -> Result<(), SaveError> {
+    fs::rename(temporary, path).map_err(Into::into)
 }
 
 pub(crate) fn write_new_markdown(
@@ -293,7 +423,7 @@ pub(crate) fn write_new_markdown(
     })();
     drop(file);
     if let Err(error) = result {
-        let _ = fs::remove_file(path);
+        drop(RemoveOnDrop(Some(path.to_owned())));
         return Err(error.into());
     }
     Ok(SavedFile {
@@ -454,18 +584,236 @@ mod tests {
     }
 
     #[test]
-    fn does_not_remove_or_overwrite_a_preexisting_temporary_file() {
+    fn leftover_temporary_file_does_not_block_the_next_save() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("deck.md");
         fs::write(&path, b"original").unwrap();
-        let temporary = temporary_path(&path).unwrap();
+        let (file, mut leftover) = create_sibling(&path, ".tmp").unwrap();
+        let temporary = leftover.path().to_owned();
+        drop(file);
         fs::write(&temporary, b"someone else's data").unwrap();
-        assert!(matches!(
-            save_markdown(&path, "mine", false, &sha256_hex(b"original"), |_| {}),
-            Err(SaveError::Io { .. })
-        ));
-        assert_eq!(fs::read(&path).unwrap(), b"original");
+        leftover.0 = None;
+        save_markdown(&path, "mine", false, &sha256_hex(b"original"), |_| {}).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"mine");
         assert_eq!(fs::read(&temporary).unwrap(), b"someone else's data");
+    }
+
+    #[test]
+    fn competing_creation_of_missing_destination_returns_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        let error = save_markdown(&path, "mine", false, "old", |_| {
+            fs::write(&path, b"external").unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            SaveError::Conflict {
+                disk_hash: sha256_hex(b"external")
+            }
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"external");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_write_after_final_hash_check_is_restored_and_returns_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        fs::write(&path, b"old").unwrap();
+        let error = save_markdown(&path, "mine", false, &sha256_hex(b"old"), |_| {
+            fs::write(&path, b"external\r\n").unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            SaveError::Conflict {
+                disk_hash: sha256_hex(b"external\r\n")
+            }
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"external\r\n");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn saves_long_basename_with_short_temporary_and_backup_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("{}.md", "a".repeat(240)));
+        fs::write(&path, b"old").unwrap();
+        save_markdown(&path, "mine", false, &sha256_hex(b"old"), |_| {
+            let temporary = fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+                .unwrap();
+            assert_eq!(temporary.file_name().unwrap().len(), 22);
+        })
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"mine");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_temporary_cleanup_does_not_poison_subsequent_saves() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        fs::write(&path, b"old").unwrap();
+        let mut held = None;
+        let mut leftover = PathBuf::new();
+        let error = save_markdown(&path, "mine", false, &sha256_hex(b"old"), |_| {
+            leftover = fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+                .unwrap();
+            held = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(&leftover)
+                    .unwrap(),
+            );
+        })
+        .unwrap_err();
+        assert!(matches!(error, SaveError::Io { .. }));
+        assert!(leftover.exists());
+        // Keep the stale file locked even during the next operation.
+        save_markdown(&path, "retry", false, &sha256_hex(b"old"), |_| {}).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"retry");
+        assert!(leftover.exists());
+        drop(held);
+        fs::remove_file(leftover).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temporary_cleanup_retries_until_a_short_lock_is_released() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        let (file, cleanup) = create_sibling(&path, ".tmp").unwrap();
+        let temporary = cleanup.path().to_owned();
+        drop(file);
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&temporary)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(45));
+            drop(held);
+        });
+        drop(cleanup);
+        release.join().unwrap();
+        assert!(!temporary.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn error_1177_restores_original_from_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        let (file, mut backup) = create_sibling(&path, ".bak").unwrap();
+        drop(file);
+        fs::write(backup.path(), b"original").unwrap();
+        let error = recover_failed_replace(&path, &mut backup, io::Error::from_raw_os_error(1177));
+        assert!(matches!(error, SaveError::Io { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        drop(backup);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn error_1177_never_overwrites_a_destination_created_during_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        let (file, mut backup) = create_sibling(&path, ".bak").unwrap();
+        drop(file);
+        let original_backup = backup.path().to_owned();
+        fs::write(&original_backup, b"original").unwrap();
+        fs::write(&path, b"new external").unwrap();
+        let error = recover_failed_replace(&path, &mut backup, io::Error::from_raw_os_error(1177));
+        assert_eq!(
+            error,
+            SaveError::Conflict {
+                disk_hash: sha256_hex(b"new external")
+            }
+        );
+        drop(backup);
+        assert_eq!(fs::read(&path).unwrap(), b"new external");
+        assert_eq!(fs::read(&original_backup).unwrap(), b"original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn error_1177_reports_backup_path_when_restore_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        let (file, mut backup) = create_sibling(&path, ".bak").unwrap();
+        drop(file);
+        let original_backup = backup.path().to_owned();
+        fs::write(&original_backup, b"original").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&original_backup)
+            .unwrap();
+        let error = recover_failed_replace(&path, &mut backup, io::Error::from_raw_os_error(1177));
+        assert!(
+            matches!(error, SaveError::Io { message } if message.contains(&original_backup.display().to_string()))
+        );
+        drop(backup);
+        assert!(!path.exists());
+        assert_eq!(fs::read(&original_backup).unwrap(), b"original");
+        drop(held);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conflict_rollback_preserves_an_additional_external_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        fs::write(&path, b"later external").unwrap();
+        let (file, mut backup) = create_sibling(&path, ".bak").unwrap();
+        drop(file);
+        fs::write(backup.path(), b"first external").unwrap();
+        restore_conflicting_backup(&path, &mut backup, &sha256_hex(b"mine"));
+        drop(backup);
+        assert_eq!(fs::read(&path).unwrap(), b"first external");
+        let retained = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|file| file != &path)
+            .unwrap();
+        assert_eq!(fs::read(retained).unwrap(), b"later external");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conflict_rollback_failure_preserves_external_backup() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deck.md");
+        fs::write(&path, b"mine").unwrap();
+        let (file, mut backup) = create_sibling(&path, ".bak").unwrap();
+        drop(file);
+        let original_backup = backup.path().to_owned();
+        fs::write(&original_backup, b"external").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        restore_conflicting_backup(&path, &mut backup, &sha256_hex(b"mine"));
+        drop(backup);
+        assert_eq!(fs::read(&path).unwrap(), b"mine");
+        assert_eq!(fs::read(original_backup).unwrap(), b"external");
+        drop(held);
     }
 
     #[cfg(windows)]

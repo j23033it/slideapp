@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
 const RETRY_DELAY: Duration = Duration::from_millis(35);
-const READ_ATTEMPTS: usize = 5;
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +222,9 @@ fn watch_loop(
     emit: EventSink,
 ) {
     let mut deadline: Option<Instant> = None;
+    let mut retry_delay = RETRY_DELAY;
+    let mut retrying = false;
+    let mut unreadable_reported = false;
     loop {
         let message = match deadline {
             Some(at) => receiver.recv_timeout(at.saturating_duration_since(Instant::now())),
@@ -235,7 +238,14 @@ fn watch_loop(
                 if !matches!(event.kind, EventKind::Access(_))
                     && event.paths.iter().any(|path| same_name(path, &target))
                 {
-                    deadline = Some(Instant::now() + DEBOUNCE);
+                    let debounce = Instant::now() + DEBOUNCE;
+                    // Notifications while retrying must not restart the backoff
+                    // or postpone a retry indefinitely.
+                    deadline = Some(if retrying {
+                        deadline.map_or(debounce, |pending| pending.min(debounce))
+                    } else {
+                        debounce
+                    });
                 }
             }
             Ok(WatchMessage::Event(Err(error))) => {
@@ -249,27 +259,40 @@ fn watch_loop(
                 let mut known = lock(&known);
                 // Read and emit under the same lock used by save; a pre-save read
                 // must not be emitted after the save has advanced the known hash.
-                observe_file(&target, &event_path, &mut known, &emit);
+                // Keep short sharing violations silent, then report once while
+                // continuing to retry. The wait happens in recv_timeout, outside
+                // this lock, so Stop/open/save never wait for an entire retry loop.
+                let report_unreadable = retry_delay >= RETRY_DELAY * 16 && !unreadable_reported;
+                retrying = observe_file(&target, &event_path, &mut known, &emit, report_unreadable);
+                if retrying {
+                    unreadable_reported |= report_unreadable;
+                    deadline = Some(Instant::now() + retry_delay);
+                    retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+                } else {
+                    retry_delay = RETRY_DELAY;
+                    unreadable_reported = false;
+                }
             }
         }
     }
 }
 
-fn observe_file(target: &Path, event_path: &str, known: &mut KnownFile, emit: &EventSink) {
-    let mut result = files::read_bytes(target);
-    for _ in 1..READ_ATTEMPTS {
-        if result.is_ok() {
-            break;
-        }
-        thread::sleep(RETRY_DELAY);
-        result = files::read_bytes(target);
-    }
+// Return true when an OS read failure needs another interruptible retry.
+fn observe_file(
+    target: &Path,
+    event_path: &str,
+    known: &mut KnownFile,
+    emit: &EventSink,
+    report_unreadable: bool,
+) -> bool {
+    let result = files::read_bytes(target);
+    let retry = result.is_err();
     match result {
         Ok((bytes, mtime)) => {
             let hash = files::sha256_hex(&bytes);
             known.removed = false;
             if known.hash.as_ref() == Some(&hash) {
-                return;
+                return false;
             }
             known.hash = Some(hash.clone());
             match files::decode_markdown(&bytes) {
@@ -297,11 +320,13 @@ fn observe_file(target: &Path, event_path: &str, known: &mut KnownFile, emit: &E
                 }));
             }
         }
-        Err(error) => emit(FileEvent::Unreadable(UnreadableFile {
+        Err(error) if report_unreadable => emit(FileEvent::Unreadable(UnreadableFile {
             path: event_path.into(),
             message: error.to_string(),
         })),
+        Err(_) => {}
     }
+    retry
 }
 
 #[cfg(test)]
@@ -466,6 +491,87 @@ mod tests {
         drop(held);
         assert_eq!(changed(&receiver).file.text, "after lock");
         no_event(&receiver);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lock_longer_than_the_old_retry_limit_still_emits_after_unlock() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_directory, path, _service, _opened, receiver) = watching();
+        fs::write(&path, b"external after long lock").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(EVENT_TIMEOUT).unwrap(),
+            FileEvent::Unreadable(_)
+        ));
+        // Keep it locked beyond the first error notification and several retries.
+        // Releasing a read handle generates no new content-change event.
+        no_event(&receiver);
+        no_event(&receiver);
+        drop(held);
+        assert_eq!(changed(&receiver).file.text, "external after long lock");
+        no_event(&receiver);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retry_waits_do_not_block_save_or_stop() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_directory, path, service, opened, receiver) = watching();
+        fs::write(&path, b"locked").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(EVENT_TIMEOUT).unwrap(),
+            FileEvent::Unreadable(_)
+        ));
+        let started = Instant::now();
+        assert!(matches!(
+            service.save(&path, "mine", false, &opened.hash),
+            Err(SaveError::Io { .. })
+        ));
+        service.stop();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(held);
+        assert!(receiver.recv_timeout(QUIET_PERIOD).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opening_another_target_cancels_a_pending_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (directory, path, service, _opened, old_receiver) = watching();
+        fs::write(&path, b"locked").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(matches!(
+            old_receiver.recv_timeout(EVENT_TIMEOUT).unwrap(),
+            FileEvent::Unreadable(_)
+        ));
+        let next = directory.path().join("next.md");
+        fs::write(&next, b"next").unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let started = Instant::now();
+        service
+            .open(&next, move |event| {
+                sender.send(event).unwrap();
+            })
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(held);
+        assert!(old_receiver.recv_timeout(QUIET_PERIOD).is_err());
+        fs::write(&next, b"next external").unwrap();
+        assert_eq!(changed(&receiver).file.text, "next external");
     }
 
     #[cfg(windows)]
