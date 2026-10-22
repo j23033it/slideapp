@@ -83,7 +83,7 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
       else if (part.kind === 'list') {
         if (part.positioned) {
           for (const p of part.paragraphs) {
-            const objectName = `SlideApp list ${lists.size + 1}`, indent = p.list && p.list.type !== 'none' ? p.list.indent : 0
+            const objectName = `SlideApp list ${lists.size + 1}`, indent = p.list && (p.list.type !== 'none' || p.list.marker?.character) ? p.list.indent : 0
             lists.set(objectName, { kind: 'list', rect: { ...p.rect, x: p.rect.x - indent, width: p.rect.width + indent }, paragraphs: [p] })
             slide.addText(listRuns([p]), { ...toTextOptions(p), objectName })
           }

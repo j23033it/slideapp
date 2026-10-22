@@ -37,6 +37,17 @@ describe('measured DOM → PowerPoint options', () => {
     expect(options).toMatchObject({ indentLevel: 2, bullet: { type: 'number', style: 'arabicPeriod', numberStartAt: 3, indent: 18 }, x: .75 })
     expect(toTextOptions({ ...paragraph, list: { level: 1, type: 'square', start: 1, indent: 24 } }).bullet).toMatchObject({ characterCode: '25AA' })
   })
+  it('keeps the measured text position for positioned lists with only a custom ::marker', async () => {
+    const marker = { character: '✓', fontFace: 'Yu Gothic', fontSize: 32, color: '164A8A', transparency: 0 }
+    const item: Paragraph = { ...paragraph, rect: { x: 100, y: 240, width: 300, height: 40 }, padding: [0, 0, 0, 0],
+      align: 'left', runs: [{ ...run, text: 'checked' }], list: { level: 0, type: 'none', start: 1, indent: 20, marker } }
+    const bytes = await generatePptx([{ ...slide, parts: [{ kind: 'list', positioned: true,
+      rect: { x: 100, y: 240, width: 300, height: 40 }, paragraphs: [item] }] }])
+    const xml = await (await JSZip.loadAsync(bytes)).file('ppt/slides/slide1.xml')!.async('string')
+    // The shape moves 20px left for the marker, so the text must start 20px inside it.
+    expect(xml).toContain(`marL="${20 * 9525}"`)
+    expect(xml).toContain(`indent="-${20 * 9525}"`)
+  })
   it('converts transparent and computed rgba colors', () => {
     expect(cssColor('rgb(22, 74, 138)')).toEqual({ color: '164A8A', transparency: 0 })
     expect(cssColor('rgba(10, 20, 30, 0.25)')).toEqual({ color: '0A141E', transparency: 75 })
