@@ -3,18 +3,20 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
-import type {
-  AppSettings,
-  CloseRequestHandler,
-  FileChangedEvent,
-  FileEventHandlers,
-  FileRemovedEvent,
-  FileUnreadableEvent,
-  OpenedFile,
-  Platform,
-  SaveOutcome,
-  ThemeConfig,
+import {
+  DEFAULT_SETTINGS,
+  type AppSettings,
+  type CloseRequestHandler,
+  type FileChangedEvent,
+  type FileEventHandlers,
+  type FileRemovedEvent,
+  type FileUnreadableEvent,
+  type OpenedFile,
+  type Platform,
+  type SaveOutcome,
+  type ThemeConfig,
 } from './types'
+import { checkForUpdate, downloadAndInstall, relaunch } from './update'
 
 interface SaveValue {
   hash?: unknown
@@ -72,12 +74,22 @@ export const tauriPlatform: Platform = {
   },
 
   settingsGet(): Promise<AppSettings> {
-    return invoke<AppSettings>('settings_get')
+    // Rust側がまだ知らない設定項目があっても既定値で埋める
+    return invoke<Partial<AppSettings>>('settings_get').then((loaded) => ({
+      ...DEFAULT_SETTINGS,
+      ...loaded,
+    }))
   },
 
   settingsSet(settings: AppSettings): Promise<void> {
     return invoke<void>('settings_set', { settings })
   },
+
+  checkForUpdate,
+
+  downloadAndInstall,
+
+  relaunch,
 
   convertFileSrc(absolutePath: string): string {
     return convertFileSrc(absolutePath)
