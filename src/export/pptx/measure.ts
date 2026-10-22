@@ -186,11 +186,11 @@ function pseudoFacts(element: Element, pseudo: string): PseudoFacts {
     border: ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`border-${side}-width`)) > 0),
     effects: hasEffects(style), sized: Number.parseFloat(style.width) > 0 || Number.parseFloat(style.height) > 0 }
 }
-function complexReason(element: Element): string | undefined {
+function complexReason(element: Element, collectedNodes?: Element[]): string | undefined {
   const kind = element.matches('section') ? 'section' : element.matches('table') ? 'table' : element.matches('ul,ol') ? 'list' : 'text'
   if (kind === 'table') { const reason = tableShapeReason(element as HTMLTableElement); if (reason) return reason }
   const facts: ElementFacts = { kind }
-  const nodes = kind === 'section' ? [element] : [element, ...element.querySelectorAll('*')]
+  const nodes = collectedNodes ?? (kind === 'section' ? [element] : [element, ...element.querySelectorAll('*')])
   for (const el of nodes) {
     const style = getComputedStyle(el)
     if (!isPainted(el)) {
@@ -550,10 +550,13 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       let nodes: Node[] = []
       const flush = () => {
         if (!nodes.length) return
+        // Audit only the descendants collected into this paragraph. Block/asset
+        // boundaries are measured independently, so their positioning is valid.
+        const descendants = nodes.flatMap(node => node instanceof Element ? [node, ...node.querySelectorAll('*')] : [])
+        const reason = nativeStyleReason(ownStyle, 'text', true) ?? textPseudoReason(element) ?? complexReason(element, descendants)
+        if (reason) throw new Error(reason)
         const runs = collectRuns(element, fonts, false, nodes)
         if (runs.some(run => run.text.trim())) {
-          const reason = nativeStyleReason(ownStyle, 'text', true) ?? textPseudoReason(element)
-          if (reason) throw new Error(reason)
           const range = document.createRange(); range.setStartBefore(nodes[0]!); range.setEndAfter(nodes.at(-1)!)
           const p = paragraph(element, origin, fonts, range.getBoundingClientRect())
           p.valign = 'middle'

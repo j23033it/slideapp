@@ -35,6 +35,52 @@ function graphic(html: string): SVGSVGElement {
 }
 describe('editable diagram parity', () => {
   it.each([
+    ['position:relative;left:40px', 'CSS inline/nested positioning'],
+    ['position:absolute;left:40px', 'CSS inline/nested positioning'],
+    ['position:fixed;top:40px', 'CSS inline/nested positioning'],
+    ['float:right', 'CSS inline/nested positioning'],
+    ['transform:translateX(40px)', 'CSS transform'],
+    ['translate:40px', 'Unsupported CSS translate'],
+    ['margin-top:20px', 'CSS inline margin layout'],
+  ])('rasterizes mixed wrapper fragments with nested %s and reports the reason', async (css, reason) => {
+    const outer = graphic(`<svg><foreignObject><section><div><p>Earlier block</p>before <span style="display:inline;margin:0"><span style="display:inline;margin:0;${css}">moved</span></span><p>Later block</p></div><p>Editable neighbor</p></section></foreignObject></svg>`)
+    Object.defineProperty(outer, 'viewBox', {value:{baseVal:{width:1280,height:720}}})
+    vi.spyOn(outer, 'getBoundingClientRect').mockReturnValue(origin)
+    vi.spyOn(Range.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(20,30,200,20))
+    // happy-dom exposes float through getPropertyValue, but lacks cssFloat.
+    if (css === 'float:right') {
+      const original = getComputedStyle
+      vi.spyOn(window, 'getComputedStyle').mockImplementation((element, pseudo) => {
+        const style = original(element, pseudo)
+        return new Proxy(style, {get: (target, property) => {
+          if (property === 'cssFloat') return target.getPropertyValue('float')
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        }})
+      })
+    }
+    const paint = vi.spyOn(raster, 'rasterize').mockResolvedValue('data:image/png;base64,AA==')
+    const state = report(), slide = await measureSlide(outer, [], fonts, '', state, 0)
+    expect(slide.parts.map(p => p.kind)).toEqual(['image', 'text'])
+    expect(slide.parts[1]).toMatchObject({paragraph:{runs:[{text:'Editable neighbor'}]}})
+    expect(paint).toHaveBeenCalledOnce()
+    expect(paint.mock.calls[0]![0]).toBe(outer.querySelector('div'))
+    expect(state.rasterizedElements).toEqual([{slide:1,element:'div',reason:expect.stringContaining(reason)}])
+    expect(state.errors).toBeUndefined()
+  })
+  it.each(['block', 'flex', 'grid'])('keeps ordinary %s wrapper fragments native and measures positioned block children independently', async display => {
+    const outer = graphic(`<svg><foreignObject><section><div style="display:${display}">before <span style="display:inline;margin:0;font-weight:bold">emphasis</span><p style="position:relative;left:40px">Block</p>after <span style="display:inline;margin:0">tail</span></div></section></foreignObject></svg>`)
+    Object.defineProperty(outer, 'viewBox', {value:{baseVal:{width:1280,height:720}}})
+    vi.spyOn(outer, 'getBoundingClientRect').mockReturnValue(origin)
+    vi.spyOn(Range.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(20,30,200,20))
+    const state = report(), slide = await measureSlide(outer, [], fonts, '', state, 0)
+    expect(slide.parts.map(p => p.kind)).toEqual(['text', 'text', 'text'])
+    expect(slide.parts.flatMap(p => p.kind === 'text' ? [p.paragraph.runs.map(r => r.text).join('')] : [])).toEqual(['before emphasis', 'Block', 'after tail'])
+    expect(slide.parts[0]).toMatchObject({paragraph:{runs:[{text:'before '},{text:'emphasis',style:{bold:true}}]}})
+    expect(state.rasterizedElements).toEqual([])
+    expect(state.errors).toBeUndefined()
+  })
+  it.each([
     ['CSS d', '<path d="M10 10 H100" style="d:path(\'M10 10 V100\');fill:none;stroke:rgb(255,0,0)"/>', 'CSS path geometry'],
     ['hidden marker', '<defs><marker id="arrow" viewBox="0 0 10 10" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="display:none"/></marker></defs><path d="M10 10 H100" style="fill:none;stroke:rgb(255,0,0);marker-end:url(#arrow)"/>', 'hidden marker content'],
     ['attribute marker transform', '<defs><marker id="arrow" viewBox="0 0 10 10" orient="auto"><path d="M0,0 L10,5 L0,10 z" transform="scale(.3)"/></marker></defs><path d="M10 10 H100" style="fill:none;stroke:rgb(255,0,0);marker-end:url(#arrow)"/>', 'marker transform'],
