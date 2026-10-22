@@ -285,6 +285,8 @@ PowerPointの部品で再現できない要素（数式、絵文字、未対応�
 - Raster fallback keeps the original Marp DOM/CSS formatting context and isolates other painted branches without removing their layout space. Shadow DOM/slots alone are materialized with computed styles. Generated decoration retains the full slide viewport while painting, then crops the transparent canvas to the decoration bounds.
 - Raster bounds include descendant overflow and shadow/filter extents, and image placement uses those expanded bounds. The slide viewport remains the final clip.
 - Repeated background-only surfaces use an export-local cache keyed by computed appearance, not slide content or pagination. Identical PNG media are stored once in the PPTX package. Table cells retain their measured top/middle/bottom vertical alignment.
+- SVG viewport eligibility includes stroke and marker paint, not just DOM geometry. A solid, opaque, square rectangle whose stroke crosses the viewport by at most 1 CSS pixel can retain exact visible paint as a native fill plus clipped rectangular border strips. Rounded/dashed/translucent or larger clipped strokes, clipped paths and markers rasterize the SVG. CSS path geometry overrides, transformed/hidden marker content and nondefault path caps/joins also rasterize the SVG.
+- Text and list content boxes default to top alignment, preserving spare height from height/min-height. Measured glyph/range bounds and fully occupied line boxes can use middle alignment for font leading; list padding and borders are excluded from the text content box. Table cells may have different whitespace modes, but mixed modes within one cell rasterize the table.
 
 ### 8.5 精度の検証
 

@@ -51,6 +51,11 @@ reason before raster fallback. It never stops the rest of the deck.
 The reference's text-bearing overflow outside an SVG viewport is allowed only up
 to 3 CSS pixels and recorded in `approximatedElements`; larger clips or clipped
 non-text geometry rasterize the diagram. External marker references are rejected.
+Stroke and arrow paint also participate in viewport checks. Clipped opaque square
+hairlines (at most 1 CSS pixel outside) retain their exact visible area as a fill
+and clipped rectangular border strips; other clipped strokes/markers rasterize.
+Computed CSS path overrides, hidden/transformed marker content and nondefault
+path line caps/joins reject only the SVG and appear in the raster report.
 Solid block backgrounds and straight solid borders become native shapes behind content.
 Equal circular CSS corners with uniform borders use a native `roundRect`, with
 the measured radius and the CSS border inset. Elliptical/asymmetric corners and
@@ -70,6 +75,11 @@ The OOXML pass removes duplicate paragraph properties from all rich text and
 table cells and writes explicit no-stroke values, independent of theme defaults.
 Margins between paragraphs are represented by their measured positions, so they
 are not applied a second time inside each text box.
+Text with spare height from `height`/`min-height` stays top aligned. Middle
+alignment is limited to measured glyph bounds or fully occupied line boxes, so
+font leading does not shift ordinary lines. List text excludes padding/borders
+from its content box. Each table cell may use its own whitespace mode, while
+mixed whitespace modes inside a cell rasterize the table.
 
 ## Conservative conversion
 

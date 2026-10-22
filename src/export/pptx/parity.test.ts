@@ -34,6 +34,65 @@ function graphic(html: string): SVGSVGElement {
   return svg
 }
 describe('editable diagram parity', () => {
+  it.each([
+    ['CSS d', '<path d="M10 10 H100" style="d:path(\'M10 10 V100\');fill:none;stroke:rgb(255,0,0)"/>', 'CSS path geometry'],
+    ['hidden marker', '<defs><marker id="arrow" viewBox="0 0 10 10" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="display:none"/></marker></defs><path d="M10 10 H100" style="fill:none;stroke:rgb(255,0,0);marker-end:url(#arrow)"/>', 'hidden marker content'],
+    ['attribute marker transform', '<defs><marker id="arrow" viewBox="0 0 10 10" orient="auto"><path d="M0,0 L10,5 L0,10 z" transform="scale(.3)"/></marker></defs><path d="M10 10 H100" style="fill:none;stroke:rgb(255,0,0);marker-end:url(#arrow)"/>', 'marker transform'],
+    ['CSS marker transform', '<defs><marker id="arrow" viewBox="0 0 10 10" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="transform:scale(.3)"/></marker></defs><path d="M10 10 H100" style="fill:none;stroke:rgb(255,0,0);marker-end:url(#arrow)"/>', 'marker transform'],
+    ['round caps', '<path d="M10 10 H100 V50" style="fill:none;stroke:rgb(255,0,0);stroke-width:40px;stroke-linecap:round"/>', 'stroke-linecap/linejoin'],
+    ['round joins', '<path d="M10 10 H100 V50" style="fill:none;stroke:rgb(255,0,0);stroke-width:40px;stroke-linejoin:round"/>', 'stroke-linecap/linejoin'],
+  ])('atomically rasterizes %s and keeps neighboring text editable', async (_name, children, reason) => {
+    const inner = graphic(`<svg>${children}</svg>`)
+    const outer = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), foreign = document.createElementNS(outer.namespaceURI, 'foreignObject'), section = document.createElement('section')
+    section.innerHTML = '<p>Editable neighbor</p>'; section.append(inner); foreign.append(section); outer.append(foreign); document.body.append(outer)
+    Object.defineProperty(outer, 'viewBox', {value:{baseVal:{width:1280,height:720}}}); vi.spyOn(outer, 'getBoundingClientRect').mockReturnValue(origin)
+    vi.spyOn(raster, 'rasterize').mockResolvedValue('data:image/png;base64,AA==')
+    const state = report(), slide = await measureSlide(outer, [], fonts, '', state, 0)
+    expect(slide.parts.map(p => p.kind)).toEqual(['text', 'image'])
+    expect(state.rasterizedElements).toEqual([{slide:1,element:'svg',reason:expect.stringContaining(reason)}])
+    expect(state.errors).toBeUndefined()
+  })
+  it('accepts a computed path matching its attribute after CSS serialization', () => {
+    const svg = graphic('<svg><path d="M10,10 H100" style="d:path(\'M 10 10 H 100\');fill:none;stroke:rgb(255,0,0)"/></svg>')
+    expect(measureSvg(svg, origin, fonts)).toHaveLength(1)
+  })
+  it('detects clipping from a stroke even when its geometry fits the viewport', () => {
+    const svg = graphic('<svg style="overflow-x:hidden;overflow-y:hidden"><rect x="0" y="0" width="300" height="200" style="fill:none;stroke:rgb(255,0,0);stroke-width:40px"/></svg>')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue(new DOMRect(10,20,600,400))
+    expect(() => measureSvg(svg, origin, fonts)).toThrow('stroke/marker paint clips content')
+    svg.querySelector('rect')!.style.stroke = 'none'
+    expect(measureSvg(svg, origin, fonts)).toHaveLength(1)
+  })
+  it('retains exact visible border strips for a clipped opaque square hairline', () => {
+    const svg = graphic('<svg style="overflow-x:hidden;overflow-y:hidden"><rect width="100" height="50" style="fill:rgb(255,255,255);stroke:rgb(68,68,68);stroke-width:1px"/></svg>')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue(new DOMRect(10,20,200,100))
+    const parts = measureSvg(svg, origin, fonts)
+    expect(parts).toHaveLength(5)
+    expect(parts).toEqual([
+      {kind:'box',rect:{x:10,y:20,width:200,height:100},fill:{color:'FFFFFF',transparency:0}},
+      {kind:'line',x:10,y:20.5,width:200,height:0,color:'444444',transparency:0,points:.75},
+      {kind:'line',x:10,y:119.5,width:200,height:0,color:'444444',transparency:0,points:.75},
+      {kind:'line',x:10.5,y:20,width:0,height:100,color:'444444',transparency:0,points:.75},
+      {kind:'line',x:209.5,y:20,width:0,height:100,color:'444444',transparency:0,points:.75},
+    ])
+    svg.querySelector('rect')!.style.strokeOpacity = '.5'
+    expect(() => measureSvg(svg, origin, fonts)).toThrow('paint clips content')
+  })
+  it.each(['round','bevel'])('rejects clipped %s rectangle joins instead of treating them as miter strips', join => {
+    const svg = graphic(`<svg style="overflow-x:hidden;overflow-y:hidden"><rect width="100" height="50" style="stroke:rgb(68,68,68);stroke-width:1px;stroke-linejoin:${join}"/></svg>`)
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue(new DOMRect(10,20,200,100))
+    expect(() => measureSvg(svg, origin, fonts)).toThrow('paint clips content')
+  })
+  it('detects a clipped arrow even when its stroked line fits the viewport', () => {
+    const svg = graphic('<svg style="overflow-x:hidden;overflow-y:hidden"><defs><marker id="arrow" viewBox="0 0 10 10" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs><path d="M20 40 H90" style="fill:none;stroke:rgb(255,0,0);stroke-width:3px;marker-end:url(#arrow)"/></svg>')
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue(new DOMRect(10,20,200,160))
+    const marker = svg.querySelector('marker')!
+    marker.querySelector('path')!.style.setProperty('d', 'path("M 0 0 L 10 5 L 0 10 Z")')
+    for (const [name,value] of [['markerWidth',20],['markerHeight',20],['refX',0],['refY',5]] as const) Object.defineProperty(marker, name, {value:{baseVal:{value}}})
+    expect(() => measureSvg(svg, origin, fonts)).toThrow('stroke/marker paint clips content')
+    svg.querySelector<SVGPathElement>(':scope > path')!.style.markerEnd = 'none'
+    expect(measureSvg(svg, origin, fonts)).toHaveLength(1)
+  })
   it('tokenizes repeated absolute straight segments and exponents', () => {
     expect(straightPath('M1e1,20 30,40 H50 V10 L20 0')).toEqual([
       {from:{x:10,y:20},to:{x:30,y:40}}, {from:{x:30,y:40},to:{x:50,y:40}},

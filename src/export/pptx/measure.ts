@@ -162,7 +162,7 @@ function paragraph(element: HTMLElement, origin: DOMRect, fonts: Map<string, str
   const lineHeight = (style.lineHeight === 'normal' ? px(style.fontSize) * 1.2 : px(style.lineHeight)) * textScale(element)
   return {
     rect: relativeRect(rect, origin), runs: collectRuns(element, fonts, element.tagName === 'LI'),
-    align, valign: 'middle', sizeTolerance: [2, 0], wrap: ['pre', 'nowrap'].includes(style.whiteSpace) ? false : undefined,
+    align, valign: 'top', sizeTolerance: [2, 0], wrap: ['pre', 'nowrap'].includes(style.whiteSpace) ? false : undefined,
     lineHeight, spaceBefore: 0, spaceAfter: 0,
     // External margins are already present in the absolute DOM coordinates.
     padding: [px(style.paddingTop), px(style.paddingRight), px(style.paddingBottom), px(style.paddingLeft)],
@@ -229,8 +229,10 @@ function complexReason(element: Element): string | undefined {
     facts.inlineDecoration ||= inline && ((!separate && cssColor(style.backgroundColor).transparency < 100) ||
       ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`padding-${side}`)) > 0 || (!separate && px(style.getPropertyValue(`border-${side}-width`)) > 0)))
     if (['flex', 'inline-flex', 'grid', 'inline-grid'].includes(style.display)) return `CSS text layout display: ${style.display}`
-    // Each table cell is an independent paragraph and can disable wrapping.
-    if (kind !== 'table' && el !== element && style.whiteSpace !== getComputedStyle(element).whiteSpace) return `Mixed CSS white-space: ${style.whiteSpace}`
+    // Cells may differ from one another, but collectRuns uses one whitespace
+    // mode within each cell. Never flatten a preserved inline newline to a space.
+    const whitespaceRoot = kind === 'table' ? el.closest('td,th') : element
+    if (whitespaceRoot && el !== whitespaceRoot && style.whiteSpace !== getComputedStyle(whitespaceRoot).whiteSpace) return `Mixed CSS white-space: ${style.whiteSpace}`
     const hasText = [...el.childNodes].some(node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())
     facts.textTransform ||= hasText && !!style.textTransform && style.textTransform !== 'none'
     facts.image ||= el.matches('img')
@@ -244,15 +246,25 @@ function complexReason(element: Element): string | undefined {
   return rasterReason(facts)
 }
 
-function ownTextRect(element: HTMLElement): DOMRect {
+function ownTextBounds(element: HTMLElement): DOMRect | undefined {
   const nodes = [...element.childNodes].filter(node => !(node instanceof Element && node.matches('ul,ol')))
   const rectangles = nodes.flatMap(node => {
     const range = document.createRange(); range.selectNodeContents(node)
     return [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0)
   })
-  if (!rectangles.length) return element.getBoundingClientRect()
+  if (!rectangles.length) return undefined
   const left = Math.min(...rectangles.map(r => r.left)), top = Math.min(...rectangles.map(r => r.top))
   return new DOMRect(left, top, Math.max(...rectangles.map(r => r.right)) - left, Math.max(...rectangles.map(r => r.bottom)) - top)
+}
+function ownTextRect(element: HTMLElement): DOMRect { return ownTextBounds(element) ?? element.getBoundingClientRect() }
+
+/** Center only the font leading of a measured, fully occupied line box. Extra
+ * height from height/min-height must remain above-aligned instead of centering
+ * the text in that spare space. Range/glyph-only boxes are handled explicitly. */
+function measuredLineAlignment(element: HTMLElement, paragraph: Paragraph): void {
+  const bounds = ownTextBounds(element)
+  const leading = Math.max(0, paragraph.lineHeight - px(getComputedStyle(element).fontSize) * textScale(element))
+  if (bounds && paragraph.rect.height <= bounds.height + leading + .5) paragraph.valign = 'middle'
 }
 
 /** Collapsed tables can put visible borders on rows/groups instead of cells. */
@@ -311,8 +323,16 @@ export function measureList(list: HTMLElement, origin: DOMRect, fonts: Map<strin
     const blocks = [...li.querySelectorAll<HTMLElement>(':scope > p')]
     for (const [index, block] of (blocks.length ? blocks : [li]).entries()) {
       if (!isPainted(block)) continue
-      const p = paragraph(block, origin, fonts, block.querySelector('ul,ol') ? ownTextRect(block) : block.getBoundingClientRect())
+      const nested = !!block.querySelector('ul,ol')
+      const p = paragraph(block, origin, fonts, nested ? ownTextRect(block) : block.getBoundingClientRect())
+      if (nested) p.valign = 'middle' // Range bounds enclose glyphs rather than the CSS line box.
+      else {
+        const style = getComputedStyle(block)
+        const [top, right, bottom, left] = p.padding.map((n, i) => n + px(style.getPropertyValue(`border-${['top', 'right', 'bottom', 'left'][i]}-width`)))
+        p.rect = { x: p.rect.x + left!, y: p.rect.y + top!, width: p.rect.width - left! - right!, height: p.rect.height - top! - bottom! }
+      }
       p.padding = [0, 0, 0, 0]
+      if (!nested) measuredLineAlignment(block, p)
       if (index > 0) p.list = undefined
       if (p.runs.length) { validatePart({ kind: 'text', paragraph: p }); paragraphs.push(p) }
     }
@@ -443,6 +463,7 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       span.style.background = 'none'; span.style.border = '0'; span.style.borderRadius = '0'; span.style.boxShadow = 'none'; span.style.textShadow = 'none'
       if (complexReason(span)) return undefined
       const p = paragraph(span, origin, fonts, ownTextRect(span))
+      p.valign = 'middle'
       p.padding = [0, 0, 0, 0]; p.fill = undefined; p.wrap = false
       if (!p.runs.length) return undefined
       const part: Part = { kind: 'text', paragraph: p }
@@ -535,6 +556,7 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
           if (reason) throw new Error(reason)
           const range = document.createRange(); range.setStartBefore(nodes[0]!); range.setEndAfter(nodes.at(-1)!)
           const p = paragraph(element, origin, fonts, range.getBoundingClientRect())
+          p.valign = 'middle'
           p.runs = runs; p.padding = [0, 0, 0, 0]; p.fill = undefined
           parts.push({ kind: 'text', paragraph: p })
         }
@@ -563,6 +585,7 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       const generated = ['::before', '::after'].some(pseudo => pseudoNeedsRaster(pseudoFacts(element, pseudo)))
       const textRect = element.matches('li') || scaled || generated ? ownTextRect(element) : element.getBoundingClientRect()
       const p = paragraph(element, origin, fonts, textRect)
+      if (scaled || generated || element.matches('li')) p.valign = 'middle'
       if (!scaled && !generated && !element.matches('li')) {
         const [top, right, bottom, left] = p.padding.map((n, i) => n + px(ownStyle.getPropertyValue(`border-${['top', 'right', 'bottom', 'left'][i]}-width`)))
         p.rect = { x: p.rect.x + left!, y: p.rect.y + top!, width: p.rect.width - left! - right!, height: p.rect.height - top! - bottom! }
@@ -571,6 +594,7 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       if (element.matches('h1,h2,h3,h4,h5,h6')) p.rect.y += px(ownStyle.fontSize) * .075
       if (ownStyle.fontWeight === '300' && p.lineHeight <= px(ownStyle.fontSize)) p.rect.y += px(ownStyle.fontSize) * .17
       if (scaled || generated || element.matches('li')) p.padding = [0, 0, 0, 0]
+      else measuredLineAlignment(element, p)
       // Marp has already fitted a single line. Office's slightly wider glyphs
       // must not introduce another line after that fit was measured.
       if (scaled && p.rect.height < p.lineHeight * 1.5 && !p.runs.some(run => run.text.includes('\n'))) p.wrap = false

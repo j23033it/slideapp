@@ -30,6 +30,16 @@ export function straightPath(d: string): Segment[] {
 }
 
 const paint = (value: string) => value === 'none' ? { color: 'FFFFFF', transparency: 100 } : cssColor(value)
+function pathData(element: Element): string {
+  const attribute = element.getAttribute('d') ?? ''
+  const computed = getComputedStyle(element).getPropertyValue('d')
+  if (computed) {
+    const data = /^path\(["'](.*)["']\)$/.exec(computed)?.[1]
+    const tokens = (value: string) => value.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?/g)?.map(token => Number.isFinite(Number(token)) ? String(Number(token)) : token === 'z' ? 'Z' : token)
+    if (data === undefined || JSON.stringify(tokens(data)) !== JSON.stringify(tokens(attribute))) throw new Error('Unsupported SVG CSS path geometry')
+  }
+  return attribute
+}
 function effects(element: Element): void {
   const s = getComputedStyle(element)
   if (element.localName === 'svg' && (paint(s.backgroundColor).transparency < 100 || (s.backgroundImage && s.backgroundImage !== 'none') || ['top','right','bottom','left'].some(side => Number.parseFloat(s.getPropertyValue(`border-${side}-width`)) > 0))) throw new Error('Unsupported SVG CSS box decoration')
@@ -43,6 +53,13 @@ function effects(element: Element): void {
 
 /** Atomic SVG collector. Any unsupported painted child rejects this diagram only. */
 export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<string, string>, approximations: StyleApproximation[] = []): Part[] {
+  const viewport = svg.getBoundingClientRect(), viewportStyle = getComputedStyle(svg)
+  // DOM geometry bounds omit stroke and markers. Test the paint we will emit as
+  // well, including zero-height lines and the actual transformed arrow polygon.
+  const checkPaintBounds = (x: number, y: number, width: number, height: number, outset = 0) => {
+    if ((viewportStyle.overflowX && viewportStyle.overflowX !== 'visible' && (x - outset < viewport.left - origin.left - .01 || x + width + outset > viewport.right - origin.left + .01)) ||
+      (viewportStyle.overflowY && viewportStyle.overflowY !== 'visible' && (y - outset < viewport.top - origin.top - .01 || y + height + outset > viewport.bottom - origin.top + .01))) throw new Error('SVG stroke/marker paint clips content')
+  }
   const clipping = clipsContent(svg)
   if (clipping) {
     const viewport = svg.getBoundingClientRect(), style = getComputedStyle(svg)
@@ -56,6 +73,7 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
     approximations.push({property:'overflow',value:`${style.overflowX} ${style.overflowY}`,replacement:'Native SVG text bearings outside the viewport by at most 3 CSS pixels (reference-compatible)'})
   }
   const parts: Part[] = []
+  const squareMiterBoxes = new Set<Part>()
   const matrixFor = (el: SVGGraphicsElement) => {
     const m = el.getScreenCTM()
     if (!m || ![m.a, m.b, m.c, m.d, m.e, m.f].every(Number.isFinite) || m.a <= 0 || m.d <= 0 || Math.abs(m.b) > .00001 || Math.abs(m.c) > .00001 || Math.abs(m.a - m.d) > .00001) throw new Error('Unsupported SVG rotation, skew or nonuniform scale')
@@ -99,6 +117,7 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
       if (width <= 0 || height <= 0) return
       parts.push({ kind: 'box', rect: { ...point({ x, y }), width: width * scale, height: height * scale }, fill,
         radius: Math.min(radius, width / 2, height / 2) * scale, line })
+      if ((!s.strokeLinejoin || s.strokeLinejoin === 'miter') && Number(s.strokeMiterlimit || 4) >= Math.SQRT2) squareMiterBoxes.add(parts.at(-1)!)
     } else if (el.localName === 'text') {
       if (el.children.length || ['rotate', 'textLength', 'lengthAdjust', 'dx', 'dy'].some(attr => el.hasAttribute(attr)) || (el as SVGTextElement).x.baseVal.numberOfItems > 1 || (el as SVGTextElement).y.baseVal.numberOfItems > 1) throw new Error('Unsupported SVG positioned text runs')
       if (line) throw new Error('Unsupported SVG text stroke')
@@ -117,7 +136,15 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
     } else if (el.localName === 'path') {
       if (fill.transparency < 100) throw new Error('Unsupported SVG filled path')
       if (s.markerStart !== 'none' || s.markerMid !== 'none') throw new Error('Unsupported SVG start/mid marker')
-      const segments = straightPath(el.getAttribute('d') ?? '').map(segment => ({ from: point(segment.from), to: point(segment.to) }))
+      const segments = straightPath(pathData(el)).map(segment => ({ from: point(segment.from), to: point(segment.to) }))
+      if (line && ((s.strokeLinecap && s.strokeLinecap !== 'butt') || (s.strokeLinejoin && s.strokeLinejoin !== 'miter'))) throw new Error(`Unsupported SVG stroke-linecap/linejoin: ${s.strokeLinecap} / ${s.strokeLinejoin}`)
+      if (line && segments.length > 1) {
+        // A miter may extend farther than half the stroke. A conservative bound
+        // is preferable to silently exporting paint that the viewport clips.
+        const points = segments.flatMap(segment => [segment.from, segment.to])
+        const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y))
+        checkPaintBounds(x, y, Math.max(...points.map(p => p.x)) - x, Math.max(...points.map(p => p.y)) - y, strokeWidth / 2 * Number(s.strokeMiterlimit || 4))
+      }
       if (line) for (const { from, to } of segments) {
         if (from.x === to.x && from.y === to.y) continue
         parts.push({ kind: 'line', x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x - from.x), height: Math.abs(to.y - from.y),
@@ -132,8 +159,13 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
         const id = /#([^"')]+)["']?\)$/.exec(s.markerEnd)?.[1]
         const marker = [...(svg.getRootNode() as ParentNode).querySelectorAll('marker')].find(node => node.id === id) as SVGMarkerElement | undefined
         const path = marker?.firstElementChild
-        if (!marker || marker.children.length !== 1 || path?.localName !== 'path' || !/^M\s*0[, ]0\s*L\s*10[, ]5\s*L\s*0[, ]10\s*z$/i.test(path.getAttribute('d') ?? '') || !['auto', 'auto-start-reverse'].includes(marker.getAttribute('orient') ?? '') || marker.getAttribute('viewBox') !== '0 0 10 10' || marker.hasAttribute('preserveAspectRatio') || (marker.hasAttribute('markerUnits') && !['strokeWidth','userSpaceOnUse'].includes(marker.getAttribute('markerUnits')!))) throw new Error('Unsupported SVG arrow marker')
+        if (!marker || marker.children.length !== 1 || path?.localName !== 'path' || !/^M\s*0[, ]0\s*L\s*10[, ]5\s*L\s*0[, ]10\s*z$/i.test(pathData(path)) || !['auto', 'auto-start-reverse'].includes(marker.getAttribute('orient') ?? '') || marker.getAttribute('viewBox') !== '0 0 10 10' || marker.hasAttribute('preserveAspectRatio') || (marker.hasAttribute('markerUnits') && !['strokeWidth','userSpaceOnUse'].includes(marker.getAttribute('markerUnits')!))) throw new Error('Unsupported SVG arrow marker')
         effects(marker); effects(path)
+        for (const node of [marker, path]) {
+          const style = getComputedStyle(node)
+          if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) || style.contentVisibility === 'hidden') throw new Error('Unsupported SVG hidden marker content')
+          if (node.hasAttribute('transform') || (style.transform && style.transform !== 'none')) throw new Error('Unsupported SVG marker transform')
+        }
         if (getComputedStyle(path).stroke !== 'none' || getComputedStyle(path).opacity !== '1') throw new Error('Unsupported SVG marker stroke/opacity')
         const last = segments.at(-1)!, dx = last.to.x - last.from.x, dy = last.to.y - last.from.y
         if (!dx && !dy) throw new Error('SVG marker has no direction')
@@ -149,6 +181,48 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
     } else throw new Error(`Unsupported SVG element: ${el.localName}`)
   }
   walk(svg)
-  parts.forEach(validatePart)
-  return parts
+  const visibleParts = parts.flatMap((part): Part[] => {
+    if (part.kind !== 'box' || !part.line) return [part]
+    if (typeof part.line.width !== 'number' || typeof part.line.color !== 'string') throw new Error('Invalid SVG rectangle stroke')
+    const { x, y, width, height } = part.rect, half = part.line.width / .75 / 2
+    const left = viewportStyle.overflowX && viewportStyle.overflowX !== 'visible' ? viewport.left - origin.left : -Infinity
+    const right = viewportStyle.overflowX && viewportStyle.overflowX !== 'visible' ? viewport.right - origin.left : Infinity
+    const top = viewportStyle.overflowY && viewportStyle.overflowY !== 'visible' ? viewport.top - origin.top : -Infinity
+    const bottom = viewportStyle.overflowY && viewportStyle.overflowY !== 'visible' ? viewport.bottom - origin.top : Infinity
+    const clipped = Math.max(left - x + half, x + width + half - right, top - y + half, y + height + half - bottom)
+    if (clipped <= .01) return [part]
+    // Preserve the poster's boundary hairlines exactly instead of dropping the
+    // clipped half of a centered stroke. Opaque square miter borders are a union
+    // of four rectangles; intersect those with the viewport before serialization.
+    if (clipped > 1 || !squareMiterBoxes.has(part) || part.radius || part.line.dashType || part.line.transparency || width < half * 2 || height < half * 2) throw new Error('SVG stroke/marker paint clips content')
+    const clipBox = (x: number, y: number, width: number, height: number, fill: Extract<Part, {kind:'box'}>['fill']): Part[] => {
+      const x1 = Math.max(left, x), y1 = Math.max(top, y), x2 = Math.min(right, x + width), y2 = Math.min(bottom, y + height)
+      return x2 > x1 && y2 > y1 ? [{kind:'box',rect:{x:x1,y:y1,width:x2-x1,height:y2-y1},fill}] : []
+    }
+    const fill = {color:part.line.color,transparency:0}
+    const border = (x: number, y: number, width: number, height: number, horizontal: boolean): Part[] => clipBox(x,y,width,height,fill).map(part => {
+      if (part.kind !== 'box') throw new Error('Invalid SVG border strip')
+      const r = part.rect
+      return {kind:'line',x:r.x+(horizontal?0:r.width/2),y:r.y+(horizontal?r.height/2:0),width:horizontal?r.width:0,height:horizontal?0:r.height,
+        color:fill.color,transparency:0,points:(horizontal?r.height:r.width)*.75}
+    })
+    return [
+      ...clipBox(x,y,width,height,part.fill),
+      ...border(x-half,y-half,width+2*half,2*half,true),
+      ...border(x-half,y+height-half,width+2*half,2*half,true),
+      ...border(x-half,y-half,2*half,height+2*half,false),
+      ...border(x+width-half,y-half,2*half,height+2*half,false),
+    ]
+  })
+  for (const part of visibleParts) {
+    if (part.kind === 'box') checkPaintBounds(part.rect.x, part.rect.y, part.rect.width, part.rect.height, (part.line?.width ?? 0) / .75 / 2)
+    else if (part.kind === 'line') {
+      const length = Math.hypot(part.width, part.height), half = part.points / .75 / 2
+      const dx = half * part.height / length, dy = half * part.width / length
+      checkPaintBounds(part.x-dx, part.y-dy, part.width+2*dx, part.height+2*dy)
+    }
+    else if (part.kind === 'polygon') checkPaintBounds(part.rect.x, part.rect.y, part.rect.width, part.rect.height)
+  }
+  visibleParts.forEach(validatePart)
+  return visibleParts
 }
