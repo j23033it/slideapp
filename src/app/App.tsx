@@ -197,6 +197,18 @@ export function App() {
     })
   }, [])
 
+  /** 監視先を戻したときの読み込み結果も、外部変更と同じ規則で反映する */
+  const restoreSessionWatch = useCallback(
+    async (session: EditorSession): Promise<void> => {
+      const restored = await platform.openFile(session.path).catch(() => null)
+      await waitForComposition()
+      if (restored) {
+        externalRef.current({ type: 'changed', path: session.path, ...restored })
+      }
+    },
+    [waitForComposition],
+  )
+
   const analyzeSession = useCallback((session: EditorSession, analysis: Analysis): void => {
     session.analysis = analysis
     session.deck = session.renderer.update(analysis, session.baseDir)
@@ -317,8 +329,7 @@ export function App() {
           if (reconfirm) {
             if (existing.path !== path) {
               // 監視が新しいファイルへ移っているため、元のファイルへ戻す
-              await platform.openFile(existing.path).catch(() => {})
-              await waitForComposition()
+              await restoreSessionWatch(existing)
             }
             replacePending({ kind: 'open', path })
             setView((previous) => ({ ...previous, busy: false }))
@@ -367,14 +378,14 @@ export function App() {
         // Rust の監視だけが拒否対象へ残らないよう元のファイルへ戻す。
         const restoreSession = sessionRef.current ?? startingSession
         if (restoreSession) {
-          await platform.openFile(restoreSession.path).catch(() => {})
+          await restoreSessionWatch(restoreSession)
         } else {
           await platform.stopWatching().catch(() => {})
         }
         sync({ busy: false, error: strings.errors.openFailed(errorMessage(reason)) })
       }
     },
-    [deferIfComposing, replacePending, sync, waitForComposition],
+    [deferIfComposing, replacePending, restoreSessionWatch, sync, waitForComposition],
   )
 
   const requestOpen = useCallback(
@@ -833,7 +844,7 @@ export function App() {
         }
       }
       if (!isCurrentOperation()) return
-      if (action.kind === 'close') {
+      if (mode === 'save' && action.kind === 'close') {
         const session = sessionRef.current
         if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
           // 保存応答中に追加編集があったので、閉じる前にもう一度確認する。

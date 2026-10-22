@@ -36,8 +36,25 @@ describe('openPathNow', () => {
 
   it('フロント側が読み込み内容を拒否したとき監視先を復旧する', () => {
     const body = callbackBody('openPathNow')
-    expect(body).toContain('await platform.openFile(restoreSession.path).catch(() => {})')
+    expect(body).toContain('await restoreSessionWatch(restoreSession)')
     expect(body).toContain('await platform.stopWatching().catch(() => {})')
+  })
+
+  it('監視先の復旧結果をIME確定後に外部変更として反映する', () => {
+    const restoreBody = callbackBody('restoreSessionWatch')
+    const read = restoreBody.indexOf('const restored = await platform.openFile(session.path)')
+    const wait = restoreBody.indexOf('await waitForComposition()', read)
+    const apply = restoreBody.indexOf(
+      "externalRef.current({ type: 'changed', path: session.path, ...restored })",
+      wait,
+    )
+    const openBody = callbackBody('openPathNow')
+
+    expect(read).toBeGreaterThanOrEqual(0)
+    expect(wait).toBeGreaterThan(read)
+    expect(apply).toBeGreaterThan(wait)
+    expect(openBody).toContain('await restoreSessionWatch(existing)')
+    expect(openBody).toContain('await restoreSessionWatch(restoreSession)')
   })
 })
 
@@ -53,6 +70,7 @@ describe('continuePendingNow', () => {
     expect(responseCheck).toBeGreaterThan(save)
     expect(closeCheck).toBeGreaterThan(responseCheck)
     expect(closeCheck).toBeLessThan(closeCall)
+    expect(body.indexOf("if (mode === 'save' && action.kind === 'close')")).toBeLessThan(closeCheck)
     expect(body).toContain('replacePending(action)')
     expect(appSource).toContain('onClick={() => replacePending(null)}')
     expect(appSource).toContain('pendingOperationRef.current += 1')
