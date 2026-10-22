@@ -57,7 +57,11 @@ export function SlideStage({
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
     })
     editorRef.current = editor
-    apiRef.current = { endEditing: () => editor.endEditing() }
+    apiRef.current = {
+      endEditing: () => editor.endEditing(),
+      isComposing: () => editor.isComposing(),
+      deferWhileComposing: (action) => editor.deferWhileComposing(action),
+    }
 
     return () => {
       apiRef.current = null

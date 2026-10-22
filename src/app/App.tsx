@@ -14,6 +14,7 @@ import {
 import { basename, dirname } from '../platform/paths'
 import { EmptyState } from './EmptyState'
 import type { EditorSession, StageApi } from './session'
+import { editorSessionSaveState, planHistoryRestore } from './session'
 import { SettingsPanel } from './SettingsPanel'
 import { SlideList } from './SlideList'
 import { SlideStage, type SlideStageCallbacks } from './SlideStage'
@@ -22,10 +23,17 @@ import { StatusBar } from './StatusBar'
 import { strings } from './strings'
 import {
   decideExternalChange,
+  diskChangedSinceBanner,
+  hasUnsavedChanges,
   isNameTakenError,
   mineFileName,
+  needsOpenReconfirm,
+  planConflictBanner,
   planConflictChoice,
+  planMineCopyReload,
+  planSaveCompletion,
   slideAfterReload,
+  type ContentSnapshot,
   type ConflictChoice,
   type ExternalChange,
 } from './sync'
@@ -123,12 +131,14 @@ export function App() {
   const editingRef = useRef(false)
   const currentRef = useRef(0)
   const pendingRef = useRef<PendingAction | null>(null)
+  const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
 
   rendererRef.current = renderer
   currentRef.current = view.current
   pendingRef.current = pending
+  bannerRef.current = view.banner
 
   /** 状態の変更を反映し、ステータスバー・ツールバーを更新する */
   const sync = useCallback((patch: Partial<ViewState> = {}) => {
@@ -137,7 +147,7 @@ export function App() {
       ...previous,
       tick: previous.tick + 1,
       path: session?.path ?? null,
-      saveState: session?.model.state ?? 'clean',
+      saveState: session ? editorSessionSaveState(session) : 'clean',
       total: session?.deck.slides.length ?? 0,
       canUndo: session?.model.canUndo ?? false,
       canRedo: session?.model.canRedo ?? false,
@@ -152,7 +162,7 @@ export function App() {
       ...previous,
       tick: previous.tick + 1,
       path: session?.path ?? null,
-      saveState: session?.model.state ?? 'clean',
+      saveState: session ? editorSessionSaveState(session) : 'clean',
       total: session?.deck.slides.length ?? 0,
       canUndo: session?.model.canUndo ?? false,
       canRedo: session?.model.canRedo ?? false,
@@ -165,6 +175,11 @@ export function App() {
   const nextFocus = useCallback((cursor: Cursor): StageFocus => {
     focusSeq.current += 1
     return { seq: focusSeq.current, cursor }
+  }, [])
+
+  /** IME変換中なら操作を予約する。確定とコミットの後に実行される */
+  const deferIfComposing = useCallback((action: () => void): boolean => {
+    return stageApi.current?.deferWhileComposing(action) ?? false
   }, [])
 
   const analyzeSession = useCallback((session: EditorSession, analysis: Analysis): void => {
@@ -228,14 +243,26 @@ export function App() {
     })
   }, [view.path, view.saveState])
 
-  // 未保存のまま閉じようとしたときだけ、クローズを保留して確認を出す
+  // 開いている間は閉じるイベントを受け、IME確定後に未保存確認またはクローズを行う
   useEffect(() => {
-    const dirty = view.path !== null && view.saveState !== 'clean'
-    if (!dirty) return
+    if (view.path === null) return
     let alive = true
     let unlisten: (() => void) | undefined
+
+    const handleClose = (): void => {
+      if (deferIfComposing(handleClose)) return
+      const session = sessionRef.current
+      if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
+        setPending({ kind: 'close' })
+        return
+      }
+      platform.forceClose().catch((reason: unknown) => {
+        sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
+      })
+    }
+
     platform
-      .onCloseRequested(() => setPending({ kind: 'close' }))
+      .onCloseRequested(handleClose)
       .then((stop) => {
         if (alive) unlisten = stop
         else stop()
@@ -247,25 +274,60 @@ export function App() {
       alive = false
       unlisten?.()
     }
-  }, [view.path, view.saveState, sync])
+  }, [deferIfComposing, view.path, sync])
 
   const openPathNow = useCallback(
-    async (path: string) => {
+    async (path: string, options: { allowDirty?: boolean } = {}) => {
+      if (deferIfComposing(() => void openPathNow(path, options))) return
+      const startingSession = sessionRef.current
+      const baseline: ContentSnapshot | null = startingSession
+        ? { text: startingSession.model.serialize(), hasBom: startingSession.model.hasBom }
+        : null
       setView((previous) => ({ ...previous, busy: true }))
       try {
         stageApi.current?.endEditing()
-        await platform.stopWatching().catch(() => {})
+        // Rust の open_file は成功時に監視を新しいファイルへ切り替える。
+        // ここで stopWatching すると、開くのに失敗したとき元の監視が止まったままになる。
         const file = await platform.openFile(path)
+        const existing = sessionRef.current
+        if (existing) {
+          // 読み込みを待つ間に元のファイルが編集されていたら、置き換えずに確認をやり直す。
+          const reconfirm = needsOpenReconfirm({
+            snapshot: baseline,
+            current: { text: existing.model.serialize(), hasBom: existing.model.hasBom },
+            state: editorSessionSaveState(existing),
+            allowDirty: options.allowDirty ?? false,
+          })
+          if (reconfirm) {
+            if (existing.path !== path) {
+              // 監視が新しいファイルへ移っているため、元のファイルへ戻す
+              await platform.openFile(existing.path).catch(() => {})
+            }
+            setPending({ kind: 'open', path })
+            setView((previous) => ({ ...previous, busy: false }))
+            return
+          }
+        }
         const baseDir = dirname(path)
         const model = new DocumentModel(file.text, { hasBom: file.hasBom, diskHash: file.hash })
         const { analysis, deck } = rendererRef.current.analyze(model.text, baseDir)
-        sessionRef.current = { path, baseDir, model, renderer: rendererRef.current, analysis, deck }
+        const nextSession: EditorSession = {
+          path,
+          baseDir,
+          model,
+          savedSnapshot: { text: model.serialize(), hasBom: model.hasBom },
+          conflict: false,
+          renderer: rendererRef.current,
+          analysis,
+          deck,
+        }
+        sessionRef.current = nextSession
         editingRef.current = false
         setView((previous) => ({
           ...previous,
           tick: previous.tick + 1,
           path,
-          saveState: model.state,
+          saveState: editorSessionSaveState(nextSession),
           current: 0,
           total: deck.slides.length,
           detail: null,
@@ -287,22 +349,23 @@ export function App() {
         sync({ busy: false, error: strings.errors.openFailed(errorMessage(reason)) })
       }
     },
-    [sync],
+    [deferIfComposing, sync],
   )
 
   const requestOpen = useCallback(
     (path: string) => {
+      if (deferIfComposing(() => requestOpen(path))) return
       const session = sessionRef.current
-      if (session && session.model.state !== 'clean') {
+      if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
         setPending({ kind: 'open', path })
         return
       }
       void openPathNow(path)
     },
-    [openPathNow],
+    [deferIfComposing, openPathNow],
   )
 
-  const openDialog = useCallback(async () => {
+  const openDialogNow = useCallback(async () => {
     try {
       const selected = await platform.pickMarkdownFile(strings.fileDialog.markdownFilter)
       if (selected) requestOpen(selected)
@@ -311,42 +374,60 @@ export function App() {
     }
   }, [requestOpen, sync])
 
+  const openDialog = useCallback(() => {
+    if (deferIfComposing(() => void openDialogNow())) return
+    void openDialogNow()
+  }, [deferIfComposing, openDialogNow])
+
   /** 保存する。conflict のときは帯を出す */
-  const runSave = useCallback(
+  const performSave = useCallback(
     async (expectedHash?: string): Promise<boolean> => {
       const session = sessionRef.current
       if (!session) return false
       stageApi.current?.endEditing()
-      if (session.model.state === 'readonly') {
+      if (editorSessionSaveState(session) === 'readonly') {
         sync({ detail: strings.status.saveState.readonly })
         return false
       }
+      // 保存を始めた時点の内容。応答を待つ間の追加入力は保存済みにしない。
+      const snapshot: ContentSnapshot = {
+        text: session.model.serialize(),
+        hasBom: session.model.hasBom,
+      }
+      const expected = expectedHash ?? session.model.diskHash
       setView((previous) => ({ ...previous, busy: true }))
       try {
-        const result = await platform.saveFile(
-          session.path,
-          session.model.serialize(),
-          session.model.hasBom,
-          expectedHash ?? session.model.diskHash,
-        )
+        const result = await platform.saveFile(session.path, snapshot.text, snapshot.hasBom, expected)
+        if (sessionRef.current !== session) return true
         if (result.ok) {
-          session.model.markSaved(result.hash)
+          const completion = planSaveCompletion(
+            snapshot,
+            { text: session.model.serialize(), hasBom: session.model.hasBom },
+            result.hash,
+          )
+          session.savedSnapshot = completion.savedSnapshot
+          session.conflict = false
+          if (completion.markSaved) {
+            session.model.markSaved(completion.diskHash)
+          } else {
+            // 追加入力は未保存のまま残し、ディスクのハッシュだけを進める。
+            session.model.diskHash = completion.diskHash
+            session.model.breakHistoryGroup()
+          }
           sync({ busy: false, error: null, banner: null })
           return true
         }
         if (result.kind === 'conflict') {
           session.model.markConflict()
           const disk = await platform.openFile(session.path).catch(() => null)
+          if (sessionRef.current !== session) return false
+          const notice = planConflictBanner(disk)
           sync({
             busy: false,
-            banner: disk
-              ? {
-                  kind: 'conflict',
-                  text: disk.text,
-                  hasBom: disk.hasBom,
-                  hash: result.diskHash || disk.hash,
-                }
-              : { kind: 'unreadable', path: session.path, message: strings.errors.unknown },
+            banner:
+              notice.kind === 'conflict'
+                ? notice
+                : { kind: 'unreadable', path: session.path, message: strings.errors.unknown },
           })
           return false
         }
@@ -360,14 +441,28 @@ export function App() {
     [sync],
   )
 
+  /** IME変換中は確定とコミットを待ってから保存する */
+  const runSave = useCallback(
+    (expectedHash?: string): Promise<boolean> => {
+      const stage = stageApi.current
+      if (!stage?.isComposing()) return performSave(expectedHash)
+      return new Promise<boolean>((resolve) => {
+        const action = (): void => {
+          void performSave(expectedHash).then(resolve)
+        }
+        if (!stage.deferWhileComposing(action)) action()
+      })
+    },
+    [performSave],
+  )
+
   /** 競合中: 自分の内容を `<名前>.mine.md` などへ退避する */
   const writeMineCopy = useCallback(
-    async (session: EditorSession): Promise<string | null> => {
-      const text = session.model.serialize()
+    async (session: EditorSession, snapshot: ContentSnapshot): Promise<string | null> => {
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const target = mineFileName(session.path, attempt)
         try {
-          const result = await platform.writeNewFile(target, text, session.model.hasBom)
+          const result = await platform.writeNewFile(target, snapshot.text, snapshot.hasBom)
           if (result.ok) return target
           if (result.kind === 'conflict' || (result.kind === 'io' && isNameTakenError(result.message))) continue
           sync({ error: strings.errors.copyFailed(result.kind === 'io' ? result.message : strings.errors.unknown) })
@@ -389,6 +484,8 @@ export function App() {
       const session = sessionRef.current
       if (!session) return
       session.model.reload(raw, hash, hasBom)
+      session.savedSnapshot = { text: raw, hasBom }
+      session.conflict = false
       const { analysis, deck } = session.renderer.analyze(session.model.text, session.baseDir)
       session.analysis = analysis
       session.deck = deck
@@ -399,23 +496,58 @@ export function App() {
     [syncDeck],
   )
 
-  const chooseConflict = useCallback(
+  const chooseConflictNow = useCallback(
     async (choice: ConflictChoice) => {
       const session = sessionRef.current
-      const banner = view.banner
+      const banner = bannerRef.current
       if (!session || banner?.kind !== 'conflict') return
-      const plan = planConflictChoice(choice, { hash: banner.hash })
       stageApi.current?.endEditing()
+      // 帯を出した時点の内容。待機中の追加入力は捨てない。
+      const snapshot: ContentSnapshot = {
+        text: session.model.serialize(),
+        hasBom: session.model.hasBom,
+      }
       setView((previous) => ({ ...previous, busy: true }))
 
+      // 同じハッシュの通知を無視していた分も含め、選択時点のディスクを読み直す
+      const disk = await platform.openFile(session.path).catch(() => null)
+      if (sessionRef.current !== session) return
+      if (!disk) {
+        sync({
+          busy: false,
+          banner: { kind: 'unreadable', path: session.path, message: strings.errors.unknown },
+        })
+        return
+      }
+
+      const conflictBanner = (): Banner => ({
+        kind: 'conflict',
+        text: disk.text,
+        hasBom: disk.hasBom,
+        hash: disk.hash,
+      })
+      const plan = planConflictChoice(choice, { hash: disk.hash })
+
+      // 上書きは、帯に出した内容からディスクが変わっていないときだけ行う
+      if (plan.save && diskChangedSinceBanner(disk, banner)) {
+        sync({ busy: false, banner: conflictBanner() })
+        return
+      }
+
       if (plan.writeMineCopy) {
-        const saved = await writeMineCopy(session)
+        const saved = await writeMineCopy(session, snapshot)
+        if (sessionRef.current !== session) return
         if (!saved) {
           setView((previous) => ({ ...previous, busy: false }))
           return
         }
         if (plan.reloadDisk) {
-          applyReload(banner.text, banner.hash, banner.hasBom)
+          if (!planMineCopyReload(snapshot, { text: session.model.serialize(), hasBom: session.model.hasBom })) {
+            // 待機中に入力があった。再読み込みせず競合の帯を残す。
+            sync({ busy: false, banner: conflictBanner() })
+            return
+          }
+          applyReload(disk.text, disk.hash, disk.hasBom)
           sync({ banner: { kind: 'info', message: strings.banner.mineSaved(saved) }, busy: false })
         }
         return
@@ -427,17 +559,29 @@ export function App() {
       }
 
       if (plan.reloadDisk) {
-        applyReload(banner.text, banner.hash, banner.hasBom)
+        if (!planMineCopyReload(snapshot, { text: session.model.serialize(), hasBom: session.model.hasBom })) {
+          sync({ busy: false, banner: conflictBanner() })
+          return
+        }
+        applyReload(disk.text, disk.hash, disk.hasBom)
         sync({ busy: false })
         return
       }
       setView((previous) => ({ ...previous, busy: false }))
     },
-    [applyReload, runSave, sync, view.banner, writeMineCopy],
+    [applyReload, runSave, sync, writeMineCopy],
+  )
+
+  const chooseConflict = useCallback(
+    (choice: ConflictChoice) => {
+      if (deferIfComposing(() => void chooseConflictNow(choice))) return
+      void chooseConflictNow(choice)
+    },
+    [chooseConflictNow, deferIfComposing],
   )
 
   /** 履歴。再描画後に記録したカーソル位置へ戻す */
-  const restore = useCallback(
+  const restoreNow = useCallback(
     (direction: 'undo' | 'redo') => {
       const session = sessionRef.current
       if (!session) return
@@ -449,13 +593,23 @@ export function App() {
       const resolved = cursor ? resolveCursor(analysis, cursor) ?? cursor : undefined
       session.analysis = analysis
       session.deck = deck
-      session.focus = resolved ? nextFocus(resolved) : undefined
-      syncDeck({ detail: null })
+      const restoration = planHistoryRestore(deck, resolved, currentRef.current)
+      session.focus = restoration.cursor ? nextFocus(restoration.cursor) : undefined
+      currentRef.current = restoration.current
+      syncDeck({ detail: null, current: restoration.current })
     },
     [nextFocus, syncDeck],
   )
 
-  const goTo = useCallback(
+  const restore = useCallback(
+    (direction: 'undo' | 'redo') => {
+      if (deferIfComposing(() => restoreNow(direction))) return
+      restoreNow(direction)
+    },
+    [deferIfComposing, restoreNow],
+  )
+
+  const goToNow = useCallback(
     (index: number) => {
       const session = sessionRef.current
       if (!session) return
@@ -469,6 +623,14 @@ export function App() {
     [sync],
   )
 
+  const goTo = useCallback(
+    (index: number) => {
+      if (deferIfComposing(() => goToNow(index))) return
+      goToNow(index)
+    },
+    [deferIfComposing, goToNow],
+  )
+
   const goBy = useCallback(
     (delta: number) => {
       goTo(currentRef.current + delta)
@@ -476,7 +638,7 @@ export function App() {
     [goTo],
   )
 
-  const handleExternal = useCallback(
+  const handleExternalNow = useCallback(
     (change: ExternalChange) => {
       const session = sessionRef.current
       if (!session || session.path !== change.path) return
@@ -489,10 +651,12 @@ export function App() {
         )
       }
       if (editingRef.current) stageApi.current?.endEditing()
+      const state = editorSessionSaveState(session)
       const decision = decideExternalChange(
         {
           path: session.path,
-          dirty: session.model.state !== 'clean',
+          dirty: hasUnsavedChanges(state),
+          conflict: state === 'conflict',
           currentText: session.model.serialize(),
           diskHash: session.model.diskHash,
         },
@@ -504,6 +668,8 @@ export function App() {
         case 'synced':
           session.model.markSaved(decision.hash)
           session.model.hasBom = decision.hasBom
+          session.savedSnapshot = { text: session.model.serialize(), hasBom: decision.hasBom }
+          session.conflict = false
           sync()
           return
         case 'reload':
@@ -511,6 +677,7 @@ export function App() {
           return
         case 'conflict':
           session.model.markConflict()
+          session.conflict = true
           sync({
             banner: { kind: 'conflict', text: decision.text, hasBom: decision.hasBom, hash: decision.hash },
           })
@@ -524,6 +691,15 @@ export function App() {
       }
     },
     [applyReload, sync],
+  )
+
+  /** IME変換中は確定とコミットの後に外部変更を反映する */
+  const handleExternal = useCallback(
+    (change: ExternalChange) => {
+      if (deferIfComposing(() => handleExternalNow(change))) return
+      handleExternalNow(change)
+    },
+    [deferIfComposing, handleExternalNow],
   )
   externalRef.current = handleExternal
 
@@ -598,7 +774,7 @@ export function App() {
     onHistory: (direction) => restore(direction),
   }
 
-  const continuePending = useCallback(
+  const continuePendingNow = useCallback(
     async (mode: 'save' | 'discard') => {
       const action = pendingRef.current
       if (!action) return
@@ -611,7 +787,7 @@ export function App() {
       }
       setPending(null)
       if (action.kind === 'open') {
-        await openPathNow(action.path)
+        await openPathNow(action.path, { allowDirty: mode === 'discard' })
         return
       }
       try {
@@ -621,6 +797,14 @@ export function App() {
       }
     },
     [openPathNow, runSave, sync],
+  )
+
+  const continuePending = useCallback(
+    (mode: 'save' | 'discard') => {
+      if (deferIfComposing(() => void continuePendingNow(mode))) return
+      void continuePendingNow(mode)
+    },
+    [continuePendingNow, deferIfComposing],
   )
 
   // キー操作

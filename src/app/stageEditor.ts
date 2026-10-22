@@ -15,7 +15,8 @@ import {
   selectionInRun,
   setCaretInRun,
 } from './caret'
-import { planBoundaryDeletion } from './runDeletion'
+import { planBoundaryDeletion, areRunsDomAdjacent } from './runDeletion'
+import { CompositionGate } from './session'
 import { strings } from './strings'
 
 export type EditSuccess = Extract<EditResult, { ok: true }>
@@ -68,6 +69,22 @@ export class StageEditor {
   private suppressFinish = false
   private pendingBefore: Cursor | undefined
   private lastFocusSeq = -1
+  private readonly composition = new CompositionGate()
+
+  private readonly onCompositionStart = (): void => {
+    this.composition.start()
+  }
+
+  private readonly onCompositionEnd = (): void => {
+    // bindEditing の compositionend（コミット）も同じイベントで走るため、
+    // 予約した操作はすべてのリスナーが終わった後に実行する。
+    const token = this.composition.markEnded()
+    queueMicrotask(() => this.composition.flush(token))
+  }
+
+  private readonly onCompositionInput = (raw: Event): void => {
+    if (raw instanceof InputEvent && raw.isComposing) this.composition.start()
+  }
 
   private readonly onClick = (raw: Event): void => {
     const event = raw as MouseEvent
@@ -142,6 +159,14 @@ export class StageEditor {
       return
     }
 
+    const neighborElement = this.runElement(plan.run.id)
+    const [leftElement, rightElement] =
+      direction === 'backward' ? [neighborElement, runElement] : [runElement, neighborElement]
+    if (!leftElement || !rightElement || !areRunsDomAdjacent(leftElement, rightElement)) {
+      this.options.onNotice('cross-run')
+      return
+    }
+
     const result = this.engine.applyRunEdit(this.analysis.text, plan.run.id, plan.text)
     if (!result.ok) {
       this.options.onNotice(result.reason.code)
@@ -157,6 +182,7 @@ export class StageEditor {
     if (!this.editing) return
     // IME変換中は最初の beforeinput の位置を履歴の起点にする
     if (this.pendingBefore && event instanceof InputEvent && event.isComposing) return
+    if (event instanceof InputEvent && event.isComposing) this.composition.start()
     if (!this.pendingBefore) this.pendingBefore = this.currentCursor(false)
   }
 
@@ -173,6 +199,9 @@ export class StageEditor {
     root.addEventListener('keydown', this.onKeyDown, true)
     root.addEventListener('beforeinput', this.onBeforeInputCapture, true)
     root.addEventListener('paste', this.onBeforeInputCapture, true)
+    root.addEventListener('compositionstart', this.onCompositionStart, true)
+    root.addEventListener('compositionend', this.onCompositionEnd, true)
+    root.addEventListener('input', this.onCompositionInput, true)
   }
 
   get root(): ShadowRoot {
@@ -194,9 +223,20 @@ export class StageEditor {
     }
   }
 
-  /** 編集中なら終了する（再描画は onFinish 経由） */
+  /** 編集中なら終了する（再描画は onFinish 経由）。IME変換中は確定を待つ */
   endEditing(): void {
+    if (this.composition.isComposing) return
     this.adapter?.finish()
+  }
+
+  /** IME変換中か */
+  isComposing(): boolean {
+    return this.composition.isComposing
+  }
+
+  /** 変換中なら操作を予約して true。確定とコミットの後にまとめて実行する */
+  deferWhileComposing(action: () => void): boolean {
+    return this.composition.defer(action)
   }
 
   dispose(): void {
@@ -205,6 +245,9 @@ export class StageEditor {
     root.removeEventListener('keydown', this.onKeyDown, true)
     root.removeEventListener('beforeinput', this.onBeforeInputCapture, true)
     root.removeEventListener('paste', this.onBeforeInputCapture, true)
+    root.removeEventListener('compositionstart', this.onCompositionStart, true)
+    root.removeEventListener('compositionend', this.onCompositionEnd, true)
+    root.removeEventListener('input', this.onCompositionInput, true)
     this.endEditingSilently()
   }
 
