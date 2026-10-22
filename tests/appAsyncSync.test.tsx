@@ -369,6 +369,26 @@ describe('update installation confirmation', () => {
     expect(editorSessionSaveState(session())).toBe('clean')
   })
 
+  it('restores the update notice when the retry confirmation is canceled', async () => {
+    vi.mocked(platform.saveFile).mockResolvedValue({ ok: true, hash: 'mine', mtime: 2 })
+    vi.mocked(platform.downloadAndInstall).mockRejectedValueOnce(new Error('download failed'))
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    await flush(() => click(strings.confirm.saveAndContinue))
+    expect(host.textContent).toContain(strings.update.retry)
+
+    // 再び未保存にしてから再試行し、保存の確認でキャンセルする
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    expect(editorSessionSaveState(session())).not.toBe('clean')
+    await flush(() => click(strings.update.retry))
+    expect(host.textContent).toContain(strings.confirm.updateAction)
+    await flush(() => click(strings.confirm.cancel))
+
+    expect(host.textContent).toContain(strings.update.available(updateInfo.version))
+    expect(host.textContent).not.toContain(strings.update.checking)
+    expect(platform.downloadAndInstall).toHaveBeenCalledTimes(1)
+  })
+
   it('cancels a pending update approval when a close request replaces it', async () => {
     await offerUpdate()
     const checksBeforeClose = vi.mocked(platform.checkForUpdate).mock.calls.length

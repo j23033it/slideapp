@@ -99,10 +99,14 @@ export function UpdateNotice({ checkOnStartup, beforeInstall, onInstallFailure, 
       installRequested.current = false
       onInstallFailure?.()
       console.warn('update pre-install check failed', error)
+      // 再試行から入った場合も「確認中」のままにせず、更新ありの帯に戻す
+      if (mounted.current) setNotice({ kind: 'available', info })
       return
     }
     if (!approved || !mounted.current) {
       installRequested.current = false
+      // 保存の確認でキャンセルされたら、もう一度選べるよう更新ありの帯に戻す
+      if (mounted.current) setNotice({ kind: 'available', info })
       return
     }
     installing.current = true
