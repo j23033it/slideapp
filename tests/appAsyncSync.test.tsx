@@ -87,6 +87,72 @@ afterEach(async () => {
 })
 
 describe('App asynchronous disk callbacks', () => {
+  it.each(['first-open', 'switch-file', 'composition-wait'] as const)(
+    'uses the latest notification received during %s before publishing the new session', async (timing) => {
+      if (timing === 'first-open') {
+        await flush(() => render(null, host))
+        captured.stage = null
+        await flush(() => render(<App />, host))
+      } else {
+        await flush(() => captured.stage!.callbacks.onHistory('undo'))
+      }
+      const nextPath = 'C:\\deck\\next.md'
+      const open = deferred<ReturnType<typeof disk>>()
+      vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
+      vi.mocked(platform.openFile).mockReturnValue(open.promise)
+      await flush(() => click(strings.toolbar.open))
+      expect(platform.openFile).toHaveBeenLastCalledWith(nextPath)
+      let finishComposition: (() => void) | undefined
+      if (timing === 'composition-wait') {
+        captured.stage!.apiRef.current = {
+          endEditing: () => {},
+          isComposing: () => true,
+          deferWhileComposing: (action) => { finishComposition = action; return true },
+        }
+        await flush(() => open.resolve(disk('stale-read')))
+        expect(finishComposition).toBeDefined()
+      }
+      // Rust starts watching before open_file returns. This callback runs while
+      // sessionRef is still null/the old file, or while its IME completion is pending.
+      await flush(() => events.changed({ path: nextPath, ...disk('external-v1') }))
+      await flush(() => events.changed({ path: nextPath, ...disk('external-v2'), hasBom: true }))
+      if (timing === 'composition-wait') {
+        captured.stage!.apiRef.current = null
+        await flush(() => finishComposition!())
+      } else {
+        await flush(() => open.resolve(disk('stale-read')))
+      }
+      expect(session().path).toBe(nextPath)
+      expect(session().model.serialize()).toBe('external-v2')
+      expect(session().model.hasBom).toBe(true)
+      expect(session().model.diskHash).toBe('external-v2')
+      expect(session().savedSnapshot).toEqual({ text: 'external-v2', hasBom: true })
+      expect(editorSessionSaveState(session())).toBe('clean')
+      expect(host.querySelector('.banner')).toBeNull()
+    },
+  )
+
+  it.each(['removed', 'unreadable'] as const)(
+    'preserves a %s notification received before a new file finishes opening', async (type) => {
+      await flush(() => captured.stage!.callbacks.onHistory('undo'))
+      const nextPath = 'C:\\deck\\next.md'
+      const open = deferred<ReturnType<typeof disk>>()
+      vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
+      vi.mocked(platform.openFile).mockReturnValue(open.promise)
+      await flush(() => click(strings.toolbar.open))
+      await flush(() => {
+        if (type === 'removed') events.removed({ path: nextPath })
+        else events.unreadable({ path: nextPath, message: 'locked' })
+      })
+      await flush(() => open.resolve(disk('last-readable')))
+      expect(session().path).toBe(nextPath)
+      expect(session().model.serialize()).toBe('last-readable')
+      expect(host.textContent).toContain(type === 'removed'
+        ? strings.banner.removed('next.md')
+        : strings.banner.unreadable('next.md', 'locked'))
+    },
+  )
+
   it.each(['changed', 'removed', 'unreadable'] as const)(
     'preserves a newer %s notification delivered before save success', async (type) => {
       const save = deferred<SaveOutcome>()

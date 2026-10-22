@@ -137,6 +137,7 @@ export function App() {
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
   const diskObservationRef = useRef<DiskObservation>({ generation: 0, change: null })
+  const openingRef = useRef<{ path: string; observation: DiskObservation } | null>(null)
 
   rendererRef.current = renderer
   currentRef.current = view.current
@@ -313,12 +314,15 @@ export function App() {
       const baseline: ContentSnapshot | null = startingSession
         ? { text: startingSession.model.serialize(), hasBom: startingSession.model.hasBom }
         : null
+      const startedObservation = diskObservationRef.current
+      const opening = { path, observation: startedObservation }
+      openingRef.current = opening
       setView((previous) => ({ ...previous, busy: true }))
       try {
         stageApi.current?.endEditing()
         // Rust の open_file は成功時に監視を新しいファイルへ切り替える。
         // ここで stopWatching すると、開くのに失敗したとき元の監視が止まったままになる。
-        const file = await platform.openFile(path)
+        let file = await platform.openFile(path)
         await waitForComposition()
         const existing = sessionRef.current
         if (existing) {
@@ -339,6 +343,17 @@ export function App() {
             return
           }
         }
+        // open_file は応答前から監視するため、新セッションの作成前に
+        // 受けた通知を照合する。ここまで新しいファイルに未保存の編集はない。
+        const buffered = canApplyDiskResult(startedObservation, opening.observation)
+          ? null
+          : opening.observation.change
+        if (buffered?.type === 'changed') file = buffered
+        const banner: Banner | null = buffered?.type === 'removed'
+          ? { kind: 'removed', path }
+          : buffered?.type === 'unreadable'
+            ? { kind: 'unreadable', path, message: buffered.message }
+            : null
         const baseDir = dirname(path)
         const model = new DocumentModel(file.text, { hasBom: file.hasBom, diskHash: file.hash })
         const { analysis, deck } = rendererRef.current.analyze(model.text, baseDir)
@@ -362,7 +377,7 @@ export function App() {
           current: 0,
           total: deck.slides.length,
           detail: null,
-          banner: null,
+          banner,
           error: null,
           busy: false,
           canUndo: false,
@@ -386,6 +401,8 @@ export function App() {
           await platform.stopWatching().catch(() => {})
         }
         sync({ busy: false, error: strings.errors.openFailed(errorMessage(reason)) })
+      } finally {
+        if (openingRef.current === opening) openingRef.current = null
       }
     },
     [deferIfComposing, replacePending, restoreSessionWatch, sync, waitForComposition],
@@ -772,8 +789,11 @@ export function App() {
   /** IME変換中は確定とコミットの後に外部変更を反映する */
   const handleExternal = useCallback(
     (change: ExternalChange) => {
-      if (sessionRef.current?.path !== change.path) return
+      const opening = openingRef.current
+      if (sessionRef.current?.path !== change.path && opening?.path !== change.path) return
       diskObservationRef.current = { generation: diskObservationRef.current.generation + 1, change }
+      if (opening?.path === change.path) opening.observation = diskObservationRef.current
+      if (sessionRef.current?.path !== change.path) return
       if (deferIfComposing(() => handleExternalNow(change))) return
       handleExternalNow(change)
     },
