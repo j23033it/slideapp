@@ -1,0 +1,6 @@
+{
+  // Marp CLI の設定（テスト用）。コメントと末尾カンマを許容する
+  "themeSet": [
+    "./theme/only.css",
+  ],
+}

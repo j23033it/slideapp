@@ -26,6 +26,13 @@ pub struct AppSettings {
     pub theme: Theme,
     pub sidebar_width: u32,
     pub sidebar_collapsed: bool,
+    /// 既存の設定ファイルに項目が無くても読めるよう既定値を補う
+    #[serde(default = "default_true")]
+    pub check_updates_on_startup: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -34,6 +41,7 @@ impl Default for AppSettings {
             theme: Theme::System,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_collapsed: false,
+            check_updates_on_startup: true,
         }
     }
 }
@@ -196,5 +204,16 @@ mod tests {
 
         assert!(json.contains("\"sidebarWidth\""));
         assert!(json.contains("\"sidebarCollapsed\""));
+        assert!(json.contains("\"checkUpdatesOnStartup\""));
+    }
+
+    #[test]
+    fn settings_without_update_flag_default_to_checking() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"theme":"dark","sidebarWidth":200,"sidebarCollapsed":true}"#,
+        )
+        .unwrap();
+
+        assert!(settings.check_updates_on_startup);
     }
 }

@@ -1,6 +1,7 @@
 mod files;
 mod binary;
 mod prefs;
+mod themes;
 mod watching;
 
 use std::path::{Path, PathBuf};
@@ -62,6 +63,19 @@ fn stop_watching(service: tauri::State<'_, FileService>) {
     service.stop();
 }
 
+/// 開いたMarkdownの近くにあるMarpのテーマ設定を読み、
+/// 読み込んだCSSのフォルダを資産プロトコルの許可範囲に加える。
+#[tauri::command]
+fn read_theme_config(app: tauri::AppHandle, markdown_path: String) -> themes::ThemeConfig {
+    let config = themes::read_theme_config(Path::new(&markdown_path));
+    for theme in &config.themes {
+        if let Some(parent) = Path::new(&theme.path).parent() {
+            allow_asset_directory(&app, parent);
+        }
+    }
+    config
+}
+
 /// 親フォルダ以下（画像サブフォルダを含む）を資産プロトコルで読めるようにする。
 fn allow_asset_directory(app: &tauri::AppHandle, directory: &Path) {
     if let Err(error) = app.asset_protocol_scope().allow_directory(directory, true) {
@@ -76,12 +90,15 @@ pub fn run() {
     tauri::Builder::default()
         .manage(FileService::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             binary::write_binary,
             open_file,
             save_file,
             write_new_file,
             stop_watching,
+            read_theme_config,
             prefs::recent_files_get,
             prefs::recent_files_add,
             prefs::settings_get,

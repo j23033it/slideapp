@@ -5,4 +5,11 @@ import type { Platform } from './types'
 export const platform: Platform = tauriPlatform
 
 export { DEFAULT_SETTINGS } from './types'
-export type { AppSettings, OpenedFile, Platform, ThemePreference } from './types'
+export type {
+  AppSettings,
+  OpenedFile,
+  Platform,
+  ThemePreference,
+  UpdateInfo,
+  UpdateProgress,
+} from './types'

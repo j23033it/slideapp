@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: NSIS インストーラーを作成
+    runs-on: windows-latest
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js を準備
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust を準備
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust のビルドキャッシュ
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 依存関係をインストール
+        run: npm ci
+
+      - name: 版とタグの一致を確認
+        run: node scripts/check-version.mjs ${{ github.ref_name }}
+
+      - name: ビルドして下書きリリースを作成
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SlideApp ${{ github.ref_name }}
+          releaseBody: |
+            ${{ github.ref_name }} の配布物です。
+
+            インストーラー（SlideApp_${{ github.ref_name }}_x64-setup.exe）をダウンロードして実行してください。
+            アプリ内の更新機能でも更新できます。
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true

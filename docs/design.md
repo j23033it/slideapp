@@ -103,7 +103,7 @@ slideapp/
 |---|---|
 | `open_file(path)` | バイト列を読み、`{ text, hasBom, hash, mtime }` を返す。監視を開始し、資産プロトコルの許可範囲に親フォルダを加える |
 | `save_file(path, text, hasBom, expectedHash)` | ディスクの現在のハッシュが `expectedHash` と違えば保存せず `Conflict` を返す。同じなら原子的に保存し、新しいハッシュを返す |
-| `read_theme_config(dir)` | `.marprc.yml` / `.marprc.json` / `.vscode/settings.json` からテーマCSSの場所を探し、CSS本文を返す |
+| `read_theme_config(markdownPath)` | .mdのフォルダから上へ（`.git` のあるフォルダかドライブ直下まで）`.marprc.yml` / `.marprc.yaml` / `.marprc.json` / `.vscode/settings.json` を探し、最初に見つかった設定のテーマCSSを `{ themes: [{ path, css }], warnings }` で返す。JS設定・URLテーマは読まず警告にする |
 | `recent_files_get / recent_files_add` | 最近使ったファイル（最大10件）。アプリ設定フォルダのJSONに保存 |
 | `settings_get / settings_set` | テーマ（system/light/dark）、更新確認の有無、サイドバー幅など |
 | `write_binary(path, bytes)` | PPTXの書き出し |
