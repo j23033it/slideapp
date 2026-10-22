@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 
 import { platform, type UpdateInfo, type UpdateProgress } from '../platform'
 import { progressFrom } from '../platform/progress'
+import { strings } from './strings'
 import {
   canApplyCheckResult,
   nextRequestId,
@@ -19,34 +20,19 @@ export interface UpdateNoticeProps {
    * 起動時に更新を確認するか。設定 `checkUpdatesOnStartup`（既定 true）を渡す。
    * 省略した場合は確認する。
    */
-  checkOnStartup?: boolean
+  checkOnStartup?: boolean | null
+  /** インストール前の確認。false なら更新帯を維持して処理を中止する */
+  beforeInstall: () => Promise<boolean>
+  /** インストール処理が失敗し、アプリが続行できるときに呼ばれる */
+  onInstallFailure?: () => void
   /** 「後で」「閉じる」で帯を閉じたときに呼ばれる */
   onDismiss?: () => void
 }
 
-/** この部品だけで使う文言。アプリ共通の strings とは独立させている */
-const text = {
-  available: (version: string) => `v${version} があります`,
-  install: '更新して再起動',
-  later: '後で',
-  checking: '更新を確認しています…',
-  downloading: (version: string) => `v${version} をダウンロードしています…`,
-  progressUnknown: 'ダウンロード中…',
-  progress: (percent: number) => `${percent}%`,
-  progressLabel: '更新のダウンロード進捗',
-  installing: 'インストールしています…アプリを再起動します',
-  failed: (message: string) => `更新に失敗しました: ${message}`,
-  restartFailed: '更新はインストールされました。アプリを手動で再起動してください。',
-  noUpdate: '配布されている更新が見つかりませんでした',
-  retry: '再試行',
-  dismiss: '閉じる',
-  unknownError: '不明なエラー',
-} as const
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message
   if (typeof error === 'string' && error.length > 0) return error
-  return text.unknownError
+  return strings.update.unknownError
 }
 
 function percentOf(progress: UpdateProgress): number | null {
@@ -57,11 +43,14 @@ function percentOf(progress: UpdateProgress): number | null {
  * 新しい版があるときにツールバーの下へ帯を出す。
  * 起動時の確認は `checkOnStartup` で切り替え、手動確認は `UPDATE_CHECK_EVENT` で受ける。
  */
-export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
+export function UpdateNotice({ checkOnStartup, beforeInstall, onInstallFailure, onDismiss }: UpdateNoticeProps) {
   const [notice, setNotice] = useState<Notice>({ kind: 'none' })
   const mounted = useRef(true)
+  const startupCheckStarted = useRef(false)
   /** ダウンロード・インストール中は、別の確認で表示を上書きしない */
   const installing = useRef(false)
+  /** 確認画面が開いている間の二重クリックも抑止する */
+  const installRequested = useRef(false)
   /** 最後に始めた確認の世代。古い確認の結果を捨てるために使う */
   const checkRequest = useRef(0)
 
@@ -70,7 +59,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
    * `apply` が false のときは帯へ反映せず、結果だけを返す（インストールの再試行用）。
    */
   const check = useCallback(async (manual: boolean, apply = true): Promise<CheckOutcome> => {
-    if (installing.current) return { status: 'stale' }
+    if (installing.current || installRequested.current) return { status: 'stale' }
 
     const requestId = nextRequestId(checkRequest.current)
     checkRequest.current = requestId
@@ -80,7 +69,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
     try {
       outcome = { status: 'ok', info: await platform.checkForUpdate() }
     } catch (error) {
-      outcome = { status: 'error', message: text.failed(errorMessage(error)) }
+      outcome = { status: 'error', message: strings.update.failed(errorMessage(error)) }
       if (!manual) console.warn('update check failed', error)
     }
 
@@ -89,7 +78,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       !canApplyCheckResult({
         requestId,
         latestRequestId: checkRequest.current,
-        installing: installing.current,
+        installing: installing.current || installRequested.current,
       })
     ) {
       // 新しい確認に追い越された、またはインストールが始まったあとの結果
@@ -101,8 +90,27 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
   }, [])
 
   const install = useCallback(async (info: UpdateInfo) => {
-    if (installing.current) return
+    if (installing.current || installRequested.current) return
+    installRequested.current = true
+    let approved: boolean
+    try {
+      approved = await beforeInstall()
+    } catch (error) {
+      installRequested.current = false
+      onInstallFailure?.()
+      console.warn('update pre-install check failed', error)
+      // 再試行から入った場合も「確認中」のままにせず、更新ありの帯に戻す
+      if (mounted.current) setNotice({ kind: 'available', info })
+      return
+    }
+    if (!approved || !mounted.current) {
+      installRequested.current = false
+      // 保存の確認でキャンセルされたら、もう一度選べるよう更新ありの帯に戻す
+      if (mounted.current) setNotice({ kind: 'available', info })
+      return
+    }
     installing.current = true
+    installRequested.current = false
     // 進行中の確認があとから完了しても、インストール中の表示を壊さないようにする
     checkRequest.current = nextRequestId(checkRequest.current)
     setNotice({ kind: 'downloading', info, progress: progressFrom(0, null) })
@@ -113,8 +121,14 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       })
     } catch (error) {
       installing.current = false
+      onInstallFailure?.()
       if (!mounted.current) return
-      setNotice({ kind: 'error', message: text.failed(errorMessage(error)), retry: 'install', info })
+      setNotice({
+        kind: 'error',
+        message: strings.update.failed(errorMessage(error)),
+        retry: 'install',
+        info,
+      })
       return
     }
 
@@ -125,17 +139,16 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       await platform.relaunch()
     } catch (error) {
       installing.current = false
+      onInstallFailure?.()
       if (!mounted.current) return
       console.warn('relaunch failed', error)
-      setNotice({ kind: 'error', message: text.restartFailed, retry: 'install', info })
+      setNotice({ kind: 'error', message: strings.update.restartFailed, retry: 'install', info })
     }
-  }, [])
+  }, [beforeInstall, onInstallFailure])
 
-  // 起動時の確認と、手動確認のイベント
+  // 手動確認のイベント
   useEffect(() => {
     mounted.current = true
-    if (checkOnStartup !== false) void check(false)
-
     const onRequest = () => {
       void check(true)
     }
@@ -145,9 +158,17 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       mounted.current = false
       window.removeEventListener(UPDATE_CHECK_EVENT, onRequest)
     }
+  }, [check])
+
+  // 設定読込後に起動時確認を一度だけ判断する。null は設定読込中。
+  useEffect(() => {
+    if (checkOnStartup === null || startupCheckStarted.current) return
+    startupCheckStarted.current = true
+    if (checkOnStartup !== false) void check(false)
   }, [check, checkOnStartup])
 
   const dismiss = useCallback(() => {
+    if (installing.current || installRequested.current) return
     setNotice({ kind: 'none' })
     onDismiss?.()
   }, [onDismiss])
@@ -166,7 +187,12 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       if (outcome.info) {
         await install(outcome.info)
       } else {
-        setNotice({ kind: 'error', message: text.failed(text.noUpdate), retry: 'check', info: null })
+        setNotice({
+          kind: 'error',
+          message: strings.update.failed(strings.update.noUpdate),
+          retry: 'check',
+          info: null,
+        })
       }
       return
     }
@@ -178,19 +204,19 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
     case 'checking':
       return (
         <div class="banner" role="status">
-          <span class="banner-message">{text.checking}</span>
+          <span class="banner-message">{strings.update.checking}</span>
         </div>
       )
 
     case 'available':
       return (
         <div class="banner" role="status">
-          <span class="banner-message">{text.available(notice.info.version)}</span>
+          <span class="banner-message">{strings.update.available(notice.info.version)}</span>
           <button type="button" onClick={() => void install(notice.info)}>
-            {text.install}
+            {strings.update.install}
           </button>
           <button type="button" onClick={dismiss}>
-            {text.later}
+            {strings.update.later}
           </button>
         </div>
       )
@@ -200,14 +226,14 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       return (
         <div class="banner" role="status">
           <span class="banner-message">
-            {text.downloading(notice.info.version)}{' '}
-            {percent === null ? text.progressUnknown : text.progress(percent)}
+            {strings.update.downloading(notice.info.version)}{' '}
+            {percent === null ? strings.update.progressUnknown : strings.update.progress(percent)}
           </span>
           {percent === null ? (
-            <progress aria-label={text.progressLabel} style={{ width: '160px' }} />
+            <progress aria-label={strings.update.progressLabel} style={{ width: '160px' }} />
           ) : (
             <progress
-              aria-label={text.progressLabel}
+              aria-label={strings.update.progressLabel}
               max={100}
               value={percent}
               style={{ width: '160px' }}
@@ -220,7 +246,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
     case 'installing':
       return (
         <div class="banner" role="status">
-          <span class="banner-message">{text.installing}</span>
+          <span class="banner-message">{strings.update.installing}</span>
         </div>
       )
 
@@ -229,10 +255,10 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
         <div class="banner" data-tone="error" role="alert">
           <span class="banner-message">{notice.message}</span>
           <button type="button" onClick={() => void retry()}>
-            {text.retry}
+            {strings.update.retry}
           </button>
           <button type="button" onClick={dismiss}>
-            {text.dismiss}
+            {strings.update.dismiss}
           </button>
         </div>
       )

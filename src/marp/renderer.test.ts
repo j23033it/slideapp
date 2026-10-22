@@ -17,4 +17,28 @@ describe('MarpRenderer', () => {
     expect(backgroundSlide).toContain('sample.png')
     expect(backgroundSlide).not.toContain('url(&quot;images/sample.png&quot;)')
   })
+
+  it('registers custom themes on the render engine and invalidates a cached deck', () => {
+    const renderer = new MarpRenderer((path) => `asset://localhost/${encodeURIComponent(path)}`)
+    const markdown = '<!-- theme: custom -->\n\n# Theme'
+
+    renderer.setThemes([
+      {
+        path: 'C:\\deck\\themes\\custom.css',
+        css: '/* @theme custom */\nsection { color: #123456; }',
+      },
+    ])
+    expect(renderer.render(markdown, 'C:\\deck').css).toContain('#123456')
+
+    renderer.setThemes([
+      {
+        path: 'C:\\deck\\themes\\custom.css',
+        css: '/* @theme custom */\nsection { color: #abcdef; }',
+      },
+    ])
+    const updated = renderer.render(markdown, 'C:\\deck')
+
+    expect(updated.css).toContain('#abcdef')
+    expect(updated.css).not.toContain('#123456')
+  })
 })

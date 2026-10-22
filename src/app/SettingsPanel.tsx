@@ -6,6 +6,7 @@ import { strings } from './strings'
 export interface SettingsPanelProps {
   settings: AppSettings
   onThemeChange: (theme: ThemePreference) => void
+  onCheckUpdatesOnStartupChange: (enabled: boolean) => void
   onResetSidebarWidth: () => void
   onClose: () => void
 }
@@ -16,6 +17,7 @@ const THEMES: ThemePreference[] = ['system', 'light', 'dark']
 export function SettingsPanel({
   settings,
   onThemeChange,
+  onCheckUpdatesOnStartupChange,
   onResetSidebarWidth,
   onClose,
 }: SettingsPanelProps) {
@@ -45,6 +47,17 @@ export function SettingsPanel({
           >
             ×
           </button>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-radio">
+            <input
+              type="checkbox"
+              checked={settings.checkUpdatesOnStartup}
+              onChange={(event) => onCheckUpdatesOnStartupChange(event.currentTarget.checked)}
+            />
+            {strings.settings.checkUpdatesOnStartup}
+          </label>
         </div>
 
         <div class="settings-group">
