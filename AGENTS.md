@@ -19,3 +19,9 @@ Marp形式のMarkdownを、スライドのプレビュー上で直接編集す�
 - 開発起動：`npm run tauri dev`
 - テスト：`npm test`（Vitest）、`cargo test --manifest-path src-tauri/Cargo.toml`
 - 型検査：`npm run typecheck`
+
+## 並列開発
+
+- 機能ごとにワークツリーとブランチを分けて並行開発する。触るファイルが重なる作業は同時に進めない
+- 子エージェントは担当範囲外のファイル（特に `src/app/App.tsx` などの共有部分）を変えず、組み込み方法を報告に書く。組み込みは司令塔が行う
+- 完成したら司令塔がコミットし、PRを作ってマージし、ワークツリーとブランチを削除する
