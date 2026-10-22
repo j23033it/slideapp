@@ -1,7 +1,7 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
-import type { AppSettings, OpenedFile, Platform } from './types'
+import type { AppSettings, OpenedFile, Platform, ThemeConfig } from './types'
 
 /**
  * Tauri 2 のコマンドを呼ぶ実装。
@@ -10,6 +10,10 @@ import type { AppSettings, OpenedFile, Platform } from './types'
 export const tauriPlatform: Platform = {
   openFile(path: string): Promise<OpenedFile> {
     return invoke<OpenedFile>('open_file', { path })
+  },
+
+  readThemeConfig(markdownPath: string): Promise<ThemeConfig> {
+    return invoke<ThemeConfig>('read_theme_config', { markdownPath })
   },
 
   async pickMarkdownFile(filterName: string): Promise<string | null> {
