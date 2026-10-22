@@ -8,6 +8,7 @@ import { editorSessionSaveState } from '../src/app/session'
 import type { SlideStageProps } from '../src/app/SlideStage'
 import { strings } from '../src/app/strings'
 import { UPDATE_CHECK_EVENT } from '../src/app/UpdateNotice'
+import { exportPptx, type ExportReport } from '../src/export/pptx'
 import { DEFAULT_SETTINGS, platform, type UpdateInfo } from '../src/platform'
 import type { FileEventHandlers, SaveOutcome } from '../src/platform/types'
 
@@ -25,10 +26,15 @@ vi.mock('../src/platform', async (original) => ({
     settingsGet: vi.fn(), settingsSet: vi.fn(), recentFilesGet: vi.fn(),
     recentFilesAdd: vi.fn(), setWindowTitle: vi.fn(), listenFileEvents: vi.fn(),
     onCloseRequested: vi.fn(), stopWatching: vi.fn(), pickMarkdownFile: vi.fn(),
+    pickPptxSavePath: vi.fn(), writeBinary: vi.fn(),
     openFile: vi.fn(), readThemeConfig: vi.fn(), convertFileSrc: vi.fn(),
     saveFile: vi.fn(), writeNewFile: vi.fn(), forceClose: vi.fn(),
     checkForUpdate: vi.fn(), downloadAndInstall: vi.fn(), relaunch: vi.fn(),
   },
+}))
+vi.mock('../src/export/pptx', () => ({
+  defaultPptxPath: (path: string) => /\.(md|markdown)$/i.test(path) ? path.replace(/\.(md|markdown)$/i, '.pptx') : `${path}.pptx`,
+  exportPptx: vi.fn(),
 }))
 
 const path = 'C:\\deck\\deck.md'
@@ -53,13 +59,23 @@ function click(text: string) {
   button!.click()
 }
 function session() { return captured.stage!.session }
-async function editMine() {
+async function editDocument(text: string) {
   await flush(() => {
     const current = session()
-    const edit = { start: 0, end: current.model.text.length, insert: 'mine' }
-    const { analysis } = current.renderer.analyze('mine', current.baseDir)
-    captured.stage!.callbacks.onCommit({ ok: true, edit, analysis, newText: 'mine', escaped: false }, {})
+    const edit = { start: 0, end: current.model.text.length, insert: text }
+    const { analysis } = current.renderer.analyze(text, current.baseDir)
+    captured.stage!.callbacks.onCommit({ ok: true, edit, analysis, newText: text, escaped: false }, {})
   })
+}
+async function editMine() { await editDocument('mine') }
+
+const cleanExportReport: ExportReport = {
+  slideCount: 1,
+  rasterizedCount: 0,
+  rasterizedElements: [],
+  approximatedElements: [],
+  substitutedFonts: [],
+  warnings: [],
 }
 
 async function offerUpdate() {
@@ -76,6 +92,8 @@ beforeEach(async () => {
   vi.mocked(platform.settingsSet).mockResolvedValue()
   vi.mocked(platform.recentFilesGet).mockResolvedValue([])
   vi.mocked(platform.recentFilesAdd).mockResolvedValue([path])
+  vi.mocked(platform.pickPptxSavePath).mockResolvedValue('C:\\deck\\deck.pptx')
+  vi.mocked(platform.writeBinary).mockResolvedValue()
   vi.mocked(platform.setWindowTitle).mockResolvedValue()
   vi.mocked(platform.stopWatching).mockResolvedValue()
   vi.mocked(platform.onCloseRequested).mockImplementation((handler) => {
@@ -92,6 +110,7 @@ beforeEach(async () => {
   vi.mocked(platform.pickMarkdownFile).mockResolvedValue(path)
   vi.mocked(platform.openFile).mockResolvedValue(disk('base'))
   vi.mocked(platform.readThemeConfig).mockResolvedValue({ themes: [], warnings: [] })
+  vi.mocked(exportPptx).mockResolvedValue({ bytes: new Uint8Array([1, 2, 3]), report: cleanExportReport })
   host = document.createElement('div')
   document.body.append(host)
   await flush(() => render(<App />, host))
@@ -228,6 +247,163 @@ describe('App asynchronous disk callbacks', () => {
     await flush(() => click(strings.banner.conflict.mine))
     expect(session().model.serialize()).toBe('external-v1')
     expect(editorSessionSaveState(session())).toBe('clean')
+  })
+})
+
+describe('PowerPoint export', () => {
+  it('enables export for an open file and disables it with no selected file', async () => {
+    const exportButton = () => [...host.querySelectorAll('button')]
+      .find((item) => item.textContent === strings.toolbar.exportPptx)
+    expect(exportButton()?.disabled).toBe(false)
+
+    await flush(() => render(null, host))
+    captured.stage = null
+    await flush(() => render(<App />, host))
+    expect(exportButton()?.disabled).toBe(true)
+  })
+
+  it('Ctrl+E opens the save dialog and cancellation does not export or write', async () => {
+    vi.mocked(platform.pickPptxSavePath).mockResolvedValue(null)
+    await flush(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', ctrlKey: true, bubbles: true })))
+
+    expect(platform.pickPptxSavePath).toHaveBeenCalledWith('C:\\deck\\deck.pptx')
+    expect(exportPptx).not.toHaveBeenCalled()
+    expect(platform.writeBinary).not.toHaveBeenCalled()
+    expect(host.textContent).not.toContain(strings.status.exporting)
+  })
+
+  it('exports unsaved Markdown and presents all successful report details', async () => {
+    const bytes = new Uint8Array([9, 8, 7])
+    const report: ExportReport = {
+      ...cleanExportReport,
+      rasterizedCount: 1,
+      rasterizedElements: [{ slide: 1, element: 'math', reason: 'MathJax' }],
+      approximatedElements: [{ slide: 1, element: 'h1', property: 'letter-spacing', value: '1px', replacement: 'PowerPoint spacing' }],
+      substitutedFonts: [{ requested: 'Noto Sans JP', replacement: 'Yu Gothic' }],
+      warnings: ['Web font unavailable'],
+    }
+    vi.mocked(exportPptx).mockResolvedValue({ bytes, report })
+
+    await flush(() => click(strings.toolbar.exportPptx))
+
+    expect(exportPptx).toHaveBeenCalledTimes(1)
+    const [source] = vi.mocked(exportPptx).mock.calls[0]!
+    expect(source.markdown).toBe('mine')
+    expect(source.baseDir).toBe('C:\\deck')
+    expect(source.marp).toBeDefined()
+    expect(platform.saveFile).not.toHaveBeenCalled()
+    expect(platform.writeBinary).toHaveBeenCalledWith('C:\\deck\\deck.pptx', bytes)
+    expect(host.textContent).toContain(strings.export.rasterized(1))
+    expect(host.textContent).toContain('MathJax')
+    expect(host.textContent).toContain('PowerPoint spacing')
+    expect(host.textContent).toContain('Noto Sans JP → Yu Gothic')
+    expect(host.textContent).toContain('Web font unavailable')
+    expect(host.querySelector('[role="dialog"]')).not.toBeNull()
+
+    await flush(() => click(strings.export.close))
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('shows a concise success message when the report has no issues', async () => {
+    await flush(() => click(strings.toolbar.exportPptx))
+
+    expect(host.querySelector('[role="status"]')?.textContent)
+      .toContain(strings.export.succeeded('C:\\deck\\deck.pptx'))
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('shows an export exception in an error banner', async () => {
+    vi.mocked(exportPptx).mockRejectedValue(new Error('renderer failed'))
+    await flush(() => click(strings.toolbar.exportPptx))
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(strings.export.failed('renderer failed'))
+    expect(platform.writeBinary).not.toHaveBeenCalled()
+  })
+
+  it('writes partial output and shows report errors in the banner and report dialog', async () => {
+    const report: ExportReport = {
+      ...cleanExportReport,
+      rasterizedCount: 1,
+      rasterizedElements: [{ slide: 1, element: 'svg', reason: 'fallback' }],
+      errors: [{ slide: 2, element: 'image', reason: 'asset unavailable' }],
+      warnings: ['Error on slide 2, image: asset unavailable'],
+    }
+    vi.mocked(exportPptx).mockResolvedValue({ bytes: new Uint8Array([1]), report })
+
+    await flush(() => click(strings.toolbar.exportPptx))
+
+    expect(platform.writeBinary).toHaveBeenCalledTimes(1)
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(strings.export.partial('C:\\deck\\deck.pptx'))
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('asset unavailable')
+    expect(host.querySelector('[role="dialog"]')?.textContent).toContain(strings.export.errors(1))
+    const closeReport = [...host.querySelector('[role="dialog"]')!.querySelectorAll('button')]
+      .find((item) => item.textContent === strings.export.close)
+    await flush(() => closeReport!.click())
+    expect(host.querySelector('[role="alert"]')).not.toBeNull()
+  })
+
+  it('shows file write failures in an error banner', async () => {
+    vi.mocked(platform.writeBinary).mockRejectedValue(new Error('disk full'))
+    await flush(() => click(strings.toolbar.exportPptx))
+
+    expect(host.querySelector('[role="alert"]')?.textContent)
+      .toContain(strings.export.writeFailed('C:\\deck\\deck.pptx', 'disk full'))
+    expect(host.textContent).not.toContain(strings.export.succeeded('C:\\deck\\deck.pptx'))
+  })
+
+  it('waits for IME composition and blocks duplicate exports until completion', async () => {
+    const saveDialog = deferred<string | null>()
+    vi.mocked(platform.pickPptxSavePath).mockReturnValue(saveDialog.promise)
+    let finishComposition: (() => void) | undefined
+    captured.stage!.apiRef.current = {
+      endEditing: () => {},
+      isComposing: () => true,
+      deferWhileComposing: (action) => { finishComposition = action; return true },
+    }
+
+    await flush(() => {
+      click(strings.toolbar.exportPptx)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', ctrlKey: true, bubbles: true }))
+    })
+    expect(platform.pickPptxSavePath).not.toHaveBeenCalled()
+    expect(host.textContent).toContain(strings.status.exporting)
+
+    captured.stage!.apiRef.current = null
+    await flush(() => finishComposition!())
+    expect(platform.pickPptxSavePath).toHaveBeenCalledTimes(1)
+    const exportButton = [...host.querySelectorAll('button')]
+      .find((item) => item.textContent === strings.toolbar.exportPptx)
+    expect(exportButton?.disabled).toBe(true)
+    expect(exportPptx).not.toHaveBeenCalled()
+
+    await flush(() => saveDialog.resolve('C:\\deck\\deck.pptx'))
+    expect(exportPptx).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the starting Markdown when the document is edited or switched during export', async () => {
+    const exportResult = deferred<{ bytes: Uint8Array; report: ExportReport }>()
+    const bytes = new Uint8Array([4, 5, 6])
+    vi.mocked(exportPptx).mockReturnValue(exportResult.promise)
+    await flush(() => click(strings.toolbar.exportPptx))
+    const source = vi.mocked(exportPptx).mock.calls[0]![0]
+    expect(source.markdown).toBe('mine')
+
+    await editDocument('edited during export')
+    expect(session().model.serialize()).toBe('edited during export')
+    expect(source.markdown).toBe('mine')
+
+    const nextPath = 'C:\\deck\\next.md'
+    vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
+    vi.mocked(platform.openFile).mockResolvedValue(disk('next deck'))
+    await flush(() => click(strings.toolbar.open))
+    expect(host.textContent).toContain(strings.confirm.title)
+    await flush(() => click(strings.confirm.discard))
+    expect(session().path).toBe(nextPath)
+
+    await flush(() => exportResult.resolve({ bytes, report: cleanExportReport }))
+    expect(platform.writeBinary).toHaveBeenCalledWith('C:\\deck\\deck.pptx', bytes)
+    expect(platform.saveFile).not.toHaveBeenCalled()
+    expect(source.markdown).toBe('mine')
   })
 })
 

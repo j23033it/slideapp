@@ -6,12 +6,13 @@ export interface StatusBarProps {
   saveState: SaveState
   slideIndex: number
   slideTotal: number
+  exporting: boolean
   /** 編集中の要素の種類、または読み取り専用の理由 */
   detail: string | null
 }
 
 /** ステータスバー（パス・保存状態・ページ番号・編集状態） */
-export function StatusBar({ path, saveState, slideIndex, slideTotal, detail }: StatusBarProps) {
+export function StatusBar({ path, saveState, slideIndex, slideTotal, detail, exporting }: StatusBarProps) {
   const stateLabel = path ? strings.status.saveState[saveState] : null
 
   return (
@@ -25,7 +26,9 @@ export function StatusBar({ path, saveState, slideIndex, slideTotal, detail }: S
       <span class="status-item">
         {strings.status.slideCounter(slideTotal === 0 ? 0 : slideIndex + 1, slideTotal)}
       </span>
-      {detail ? <span class="status-detail">{detail}</span> : null}
+      {exporting ? (
+        <span class="status-detail" role="status" aria-live="polite">{strings.status.exporting}</span>
+      ) : detail ? <span class="status-detail">{detail}</span> : null}
     </div>
   )
 }

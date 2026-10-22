@@ -104,6 +104,10 @@ button {
   color: var(--sm-danger);
 }
 
+.banner[data-tone='success'] {
+  background: var(--sm-status);
+}
+
 .banner .banner-message {
   flex: 1;
   user-select: text;
@@ -124,6 +128,20 @@ button {
   flex: 0 0 auto;
 }
 
+.export-banner-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.export-error-list {
+  max-height: 100px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 /* 未保存のまま開く・閉じるときの確認 */
 .modal-backdrop {
   position: fixed;
@@ -142,6 +160,40 @@ button {
   border: 1px solid var(--sm-border);
   border-radius: 6px;
   box-shadow: 0 10px 36px rgba(0, 0, 0, 0.24);
+}
+
+.export-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+}
+
+.export-report-list {
+  min-height: 0;
+  overflow: auto;
+  margin-bottom: 14px;
+}
+
+.export-report-section {
+  margin: 10px 0;
+}
+
+.export-report-section h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.export-report-section ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.export-report-section li {
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .modal-title {

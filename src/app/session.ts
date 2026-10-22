@@ -1,6 +1,7 @@
 import type { Cursor, DocumentModel, SaveState } from '../document'
 import type { Analysis } from '../editing'
 import type { MarpRenderer, RenderedDeck } from '../marp/renderer'
+import type { ThemeConfig } from '../platform'
 import { saveStateFromSnapshot, type ContentSnapshot } from './sync'
 import type { StageFocus } from './stageEditor'
 
@@ -14,6 +15,8 @@ export interface EditorSession {
   /** 外部変更との競合が未解決か */
   conflict: boolean
   renderer: MarpRenderer
+  /** 現在のプレビューに適用したテーマ設定 */
+  themeConfig: ThemeConfig
   analysis: Analysis
   deck: RenderedDeck
   /** 元に戻す・やり直す・外部変更の後に戻すカーソル位置 */
