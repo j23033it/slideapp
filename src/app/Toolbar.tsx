@@ -6,10 +6,13 @@ export interface ToolbarProps {
   sidebarCollapsed: boolean
   busy: boolean
   canSave: boolean
+  canExport: boolean
+  exporting: boolean
   canUndo: boolean
   canRedo: boolean
   onOpen: () => void
   onSave: () => void
+  onExportPptx: () => void
   onUndo: () => void
   onRedo: () => void
   onToggleSidebar: () => void
@@ -29,10 +32,13 @@ export function Toolbar({
   sidebarCollapsed,
   busy,
   canSave,
+  canExport,
+  exporting,
   canUndo,
   canRedo,
   onOpen,
   onSave,
+  onExportPptx,
   onUndo,
   onRedo,
   onToggleSidebar,
@@ -98,7 +104,14 @@ export function Toolbar({
 
       <div class="toolbar-divider" />
 
-      <button type="button" class="toolbar-button" title={strings.toolbar.exportPptxTitle} disabled>
+      <button
+        type="button"
+        class="toolbar-button"
+        title={strings.toolbar.exportPptxTitle}
+        onClick={onExportPptx}
+        disabled={!canExport || busy || exporting}
+        aria-busy={exporting}
+      >
         {strings.toolbar.exportPptx}
       </button>
       <button

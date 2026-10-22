@@ -1,10 +1,14 @@
 import type { JSX } from 'preact'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import { Marp } from '@marp-team/marp-core'
 
 import { DocumentModel, type Cursor, type SaveState } from '../document'
 import type { Analysis, ReadonlyCode } from '../editing'
+import type { ExportReport } from '../export/pptx'
 import { resolveCursor } from '../editing'
 import { MarpRenderer } from '../marp/renderer'
+import { registerThemes } from '../marp/themes'
+import { installImagePathRule, type MarkdownItLike } from '../marp/urls'
 import {
   DEFAULT_SETTINGS,
   platform,
@@ -57,6 +61,10 @@ type PendingAction =
   | { kind: 'open'; path: string }
   | { kind: 'close' }
   | { kind: 'update'; resolve: (approved: boolean) => void }
+
+type ExportNotice =
+  | { kind: 'success'; path: string; report: ExportReport }
+  | { kind: 'error'; message: string; report?: ExportReport }
 
 interface ViewState {
   tick: number
@@ -120,6 +128,20 @@ function themeWarningsBanner(warnings: string[]): Banner | null {
   return warnings.length > 0 ? { kind: 'themeWarnings', warnings } : null
 }
 
+function createExportMarp(baseDir: string, config: ThemeConfig): Marp {
+  const marp = new Marp({ script: false, math: 'mathjax' })
+  const toAssetUrl = (path: string) => platform.convertFileSrc(path)
+  installImagePathRule(marp.markdown as MarkdownItLike, () => baseDir, toAssetUrl)
+  registerThemes(marp, config.themes, toAssetUrl)
+  return marp
+}
+
+function hasExportReportDetails(report: ExportReport): boolean {
+  return report.rasterizedCount > 0 || report.rasterizedElements.length > 0 ||
+    (report.approximatedElements?.length ?? 0) > 0 || report.substitutedFonts.length > 0 ||
+    report.warnings.length > 0 || (report.errors?.length ?? 0) > 0
+}
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   if (target.isContentEditable) return true
@@ -150,6 +172,9 @@ export function App() {
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [updateInstallLocked, setUpdateInstallLocked] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportNotice, setExportNotice] = useState<ExportNotice | null>(null)
+  const [exportReportOpen, setExportReportOpen] = useState(false)
 
   const renderer = useMemo(() => new MarpRenderer((path) => platform.convertFileSrc(path)), [])
   const rendererRef = useRef(renderer)
@@ -160,6 +185,7 @@ export function App() {
   const pendingRef = useRef<PendingAction | null>(null)
   const pendingOperationRef = useRef(0)
   const updateInstallLockedRef = useRef(false)
+  const exportingRef = useRef(false)
   const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
@@ -449,6 +475,7 @@ export function App() {
           savedSnapshot: { text: model.serialize(), hasBom: model.hasBom },
           conflict: false,
           renderer: rendererRef.current,
+          themeConfig,
           analysis,
           deck,
         }
@@ -615,6 +642,73 @@ export function App() {
     [performSave],
   )
 
+  /** IME確定後の内容を固定し、PPTXは元のMarkdownを保存せずに別ファイルへ出力する */
+  const runPptxExport = useCallback(async (): Promise<void> => {
+    if (
+      exportingRef.current || updateInstallLockedRef.current || pendingRef.current || view.busy
+    ) return
+    const session = sessionRef.current
+    if (!session) return
+
+    exportingRef.current = true
+    setExporting(true)
+    setExportNotice(null)
+    setExportReportOpen(false)
+    try {
+      await waitForComposition()
+      if (updateInstallLockedRef.current || pendingRef.current) return
+      if (sessionRef.current === session) stageApi.current?.endEditing()
+
+      // ダイアログや生成を待つ間に編集・ファイル切り替えがあっても、開始時の内容を使う。
+      const snapshot = {
+        markdown: session.model.serialize(),
+        path: session.path,
+        baseDir: session.baseDir,
+        themeConfig: session.themeConfig,
+      }
+      const pptx = await import('../export/pptx')
+      const path = await platform.pickPptxSavePath(pptx.defaultPptxPath(snapshot.path))
+      if (!path) return
+
+      const { bytes, report } = await pptx.exportPptx(
+        {
+          markdown: snapshot.markdown,
+          marp: createExportMarp(snapshot.baseDir, snapshot.themeConfig),
+          baseDir: snapshot.baseDir,
+        },
+        { title: snapshot.path, toAssetUrl: (assetPath) => platform.convertFileSrc(assetPath) },
+      )
+      try {
+        await platform.writeBinary(path, bytes)
+      } catch (reason) {
+        setExportNotice({
+          kind: 'error',
+          message: strings.export.writeFailed(path, errorMessage(reason)),
+          report,
+        })
+        setExportReportOpen(hasExportReportDetails(report))
+        return
+      }
+
+      if (report.errors?.length) {
+        setExportNotice({
+          kind: 'error',
+          message: strings.export.partial(path),
+          report,
+        })
+        setExportReportOpen(true)
+      } else {
+        setExportNotice({ kind: 'success', path, report })
+        setExportReportOpen(hasExportReportDetails(report))
+      }
+    } catch (reason) {
+      setExportNotice({ kind: 'error', message: strings.export.failed(errorMessage(reason)) })
+    } finally {
+      exportingRef.current = false
+      setExporting(false)
+    }
+  }, [view.busy, waitForComposition])
+
   /** 競合中: 自分の内容を `<名前>.mine.md` などへ退避する */
   const writeMineCopy = useCallback(
     async (session: EditorSession, snapshot: ContentSnapshot): Promise<string | null> => {
@@ -647,6 +741,7 @@ export function App() {
     ): string[] | null => {
       if (sessionRef.current !== session) return null
       const themeWarnings = registerThemeConfig(session.renderer, themeConfig)
+      session.themeConfig = themeConfig
       session.model.reload(raw, hash, hasBom)
       session.savedSnapshot = { text: raw, hasBom }
       session.conflict = false
@@ -1109,9 +1204,15 @@ export function App() {
   // キー操作
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (updateInstallLockedRef.current || event.defaultPrevented || event.isComposing) return
+      if (updateInstallLockedRef.current || event.defaultPrevented) return
       if (pendingRef.current) return
       const mod = event.ctrlKey || event.metaKey
+      if (mod && !event.altKey && event.key.toLowerCase() === 'e') {
+        event.preventDefault()
+        void runPptxExport()
+        return
+      }
+      if (event.isComposing) return
       if (mod && !event.altKey && event.key.toLowerCase() === 's') {
         event.preventDefault()
         void runSave()
@@ -1167,7 +1268,7 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [goBy, goTo, openDialog, restore, runSave])
+  }, [goBy, goTo, openDialog, restore, runPptxExport, runSave])
 
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((previous) => ({ ...previous, ...patch }))
@@ -1217,6 +1318,11 @@ export function App() {
   const session = sessionRef.current
   const slideTotal = session?.deck.slides.length ?? 0
   const conflictBanner = view.banner?.kind === 'conflict' ? view.banner : null
+  const exportReport = exportNotice?.report
+  const exportReportHasDetails = exportReport ? hasExportReportDetails(exportReport) : false
+  const exportReportErrors = exportReport?.errors ?? []
+  const showExportBanner = exportNotice !== null &&
+    (exportNotice.kind === 'error' || !exportReportHasDetails)
 
   return (
     <div class="app" inert={updateInstallLocked}>
@@ -1225,10 +1331,13 @@ export function App() {
         sidebarCollapsed={sidebarCollapsed}
         busy={view.busy}
         canSave={session !== null && view.saveState !== 'readonly'}
+        canExport={session !== null}
+        exporting={exporting}
         canUndo={view.canUndo}
         canRedo={view.canRedo}
         onOpen={() => void openDialog()}
         onSave={() => void runSave()}
+        onExportPptx={() => void runPptxExport()}
         onUndo={() => restore('undo')}
         onRedo={() => restore('redo')}
         onToggleSidebar={() => updateSettings({ sidebarCollapsed: !sidebarCollapsed })}
@@ -1248,6 +1357,32 @@ export function App() {
           <span class="banner-message">{view.error}</span>
           <button type="button" onClick={() => sync({ error: null })}>
             {strings.errors.dismiss}
+          </button>
+        </div>
+      ) : null}
+
+      {showExportBanner && exportNotice ? (
+        <div
+          class="banner"
+          data-tone={exportNotice.kind === 'error' ? 'error' : 'success'}
+          role={exportNotice.kind === 'error' ? 'alert' : 'status'}
+        >
+          <div class="export-banner-content">
+            <span class="banner-message">
+              {exportNotice.kind === 'success'
+                ? strings.export.succeeded(exportNotice.path)
+                : exportNotice.message}
+            </span>
+            {exportNotice.kind === 'error' && exportReportErrors.length > 0 ? (
+              <ul class="export-error-list">
+                {exportReportErrors.map((error, index) => (
+                  <li key={index}>{strings.export.errorItem(error.slide, error.element, error.reason)}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+          <button type="button" onClick={() => setExportNotice(null)}>
+            {strings.banner.dismiss}
           </button>
         </div>
       ) : null}
@@ -1321,6 +1456,7 @@ export function App() {
         slideIndex={view.current}
         slideTotal={slideTotal}
         detail={view.detail}
+        exporting={exporting}
       />
 
       {settingsOpen ? (
@@ -1358,6 +1494,85 @@ export function App() {
               </button>
               <button type="button" onClick={cancelPending}>
                 {strings.confirm.cancel}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {exportReportOpen && exportNotice?.report ? (
+        <div class="modal-backdrop">
+          <div
+            class="modal export-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="export-report-title"
+          >
+            <h2 class="modal-title" id="export-report-title">{strings.export.reportTitle}</h2>
+            <p class="modal-message">
+              {exportNotice.kind === 'success'
+                ? strings.export.succeeded(exportNotice.path)
+                : exportNotice.message}
+            </p>
+            <div class="export-report-list">
+              {exportNotice.report.rasterizedCount > 0 || exportNotice.report.rasterizedElements.length > 0 ? (
+                <section class="export-report-section">
+                  <h3>{strings.export.rasterized(Math.max(exportNotice.report.rasterizedCount, exportNotice.report.rasterizedElements.length))}</h3>
+                  <ul>
+                    {exportNotice.report.rasterizedElements.map((item, index) => (
+                      <li key={index}>{strings.export.rasterizedItem(item.slide, item.element, item.reason)}</li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {(exportNotice.report.approximatedElements?.length ?? 0) > 0 ? (
+                <section class="export-report-section">
+                  <h3>{strings.export.approximated(exportNotice.report.approximatedElements!.length)}</h3>
+                  <ul>
+                    {exportNotice.report.approximatedElements!.map((item, index) => (
+                      <li key={index}>
+                        {strings.export.approximatedItem(item.slide, item.element, item.property, item.value, item.replacement)}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {exportNotice.report.substitutedFonts.length > 0 ? (
+                <section class="export-report-section">
+                  <h3>{strings.export.substitutedFonts(exportNotice.report.substitutedFonts.length)}</h3>
+                  <ul>
+                    {exportNotice.report.substitutedFonts.map((font, index) => (
+                      <li key={index}>{strings.export.substitutedFont(font.requested, font.replacement)}</li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+              {exportNotice.report.warnings.length > 0 ? (
+                <section class="export-report-section">
+                  <h3>{strings.export.warnings(exportNotice.report.warnings.length)}</h3>
+                  <ul>{exportNotice.report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+                </section>
+              ) : null}
+              {exportReportErrors.length > 0 ? (
+                <section class="export-report-section">
+                  <h3>{strings.export.errors(exportReportErrors.length)}</h3>
+                  <ul>
+                    {exportReportErrors.map((error, index) => (
+                      <li key={index}>{strings.export.errorItem(error.slide, error.element, error.reason)}</li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+            </div>
+            <div class="modal-buttons">
+              <button
+                type="button"
+                onClick={() => {
+                  setExportReportOpen(false)
+                  if (exportNotice.kind === 'success') setExportNotice(null)
+                }}
+              >
+                {strings.export.close}
               </button>
             </div>
           </div>

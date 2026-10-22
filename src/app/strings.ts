@@ -19,7 +19,7 @@ export const strings = {
     redo: 'やり直す',
     redoTitle: 'やり直す (Ctrl+Y)',
     exportPptx: 'PowerPointに書き出し',
-    exportPptxTitle: 'PowerPointに書き出し（未実装）',
+    exportPptxTitle: 'PowerPointに書き出し (Ctrl+E)',
     checkUpdates: '更新を確認',
     checkUpdatesTitle: '更新を確認',
     themeTitle: (label: string) => `テーマ: ${label}（クリックで切り替え）`,
@@ -77,6 +77,7 @@ export const strings = {
     },
     slideCounter: (n: number, total: number) => `スライド ${n} / ${total}`,
     ready: '準備完了',
+    exporting: '書き出し中…',
     /** 編集中の要素の種類 */
     editing: {
       heading: (level: number) => `編集: 見出し ${level}`,
@@ -157,6 +158,25 @@ export const strings = {
     recentFailed: (message: string) => `最近使ったファイルを更新できませんでした: ${message}`,
     unknown: '不明なエラー',
     dismiss: '閉じる',
+  },
+
+  export: {
+    succeeded: (path: string) => `書き出しました：${path}`,
+    partial: (path: string) => `${path} に書き出しましたが、一部の要素を出力できませんでした。`,
+    failed: (message: string) => `PowerPointに書き出せませんでした: ${message}`,
+    writeFailed: (path: string, message: string) => `${path} に書き込めませんでした: ${message}`,
+    reportTitle: '書き出しレポート',
+    rasterized: (count: number) => `画像化した要素（${count}件）`,
+    rasterizedItem: (slide: number, element: string, reason: string) => `スライド ${slide} / ${element}: ${reason}`,
+    approximated: (count: number) => `近似した要素（${count}件）`,
+    approximatedItem: (slide: number, element: string, property: string, value: string, replacement: string) =>
+      `スライド ${slide} / ${element}: ${property}=${value} → ${replacement}`,
+    substitutedFonts: (count: number) => `代替フォント（${count}件）`,
+    substitutedFont: (requested: string, replacement: string) => `${requested} → ${replacement}`,
+    warnings: (count: number) => `警告（${count}件）`,
+    errors: (count: number) => `エラー（${count}件）`,
+    errorItem: (slide: number, element: string, reason: string) => `スライド ${slide} / ${element}: ${reason}`,
+    close: '閉じる',
   },
 
   /** ウィンドウタイトル。未保存の変更があるときはファイル名の後に ● を付ける */
