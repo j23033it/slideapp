@@ -55,7 +55,7 @@ describe('bounded native approximations', () => {
     ['font-feature-settings', '"kern" 0, "tnum"'], ['font-kerning', 'none'], ['font-kerning', 'normal'],
     ['text-rendering', 'optimizeLegibility'], ['text-rendering', 'geometricPrecision'],
     ['-webkit-font-smoothing', 'antialiased'], ['-webkit-font-smoothing', 'subpixel-antialiased'],
-    ['letter-spacing', '-0.5px'], ['letter-spacing', '1px'],
+    ['letter-spacing', '1px'],
     ['border-top-color', 'rgba(0,0,0,.3)'],
   ])('keeps %s:%s native and reports the applied approximation', (property, value) => {
     const style = computed(property, value)
@@ -70,9 +70,11 @@ describe('bounded native approximations', () => {
     expect(nativeStyleReason(computed(property, value))).toContain(property)
     expect(styleApproximations(computed(property, value))).not.toContainEqual(expect.objectContaining({property}))
   })
-  it('uses the same small spacing rule when serializing', () => {
+  it('serializes small negative character spacing exactly and retains its conservative bound', () => {
     const style = computed('letter-spacing', '-0.5px')
-    expect(nativeLetterSpacing(style)).toBe(0)
+    expect(nativeStyleReason(style)).toBeUndefined()
+    expect(styleApproximations(style)).not.toContainEqual(expect.objectContaining({property:'letter-spacing'}))
+    expect(nativeLetterSpacing(style)).toBe(-0.5)
     style.letterSpacing = '2px'
     style.getPropertyValue = key => key === 'letter-spacing' ? '2px' : key === 'font-size' ? '32px' : ''
     expect(nativeLetterSpacing(style)).toBe(2)

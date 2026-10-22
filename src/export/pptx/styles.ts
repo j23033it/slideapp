@@ -12,6 +12,7 @@ const length = (value: string) => /^-?(?:\d+(?:\.\d+)?|\.\d+)px$/.test(value) ? 
 const small = (value: string, style: CSSStyleDeclaration, em: number, cap: number) => Math.abs(length(value)) <= Math.min(cap, length(style.fontSize) * em)
 /** The only lossy native mappings. Bounds prevent large visual differences from being ignored. */
 export const APPROXIMATION_RULES: readonly ApproximationRule[] = [
+  { property: 'font-weight', accepts: v => v === '300', replacement: 'PowerPoint regular weight (no light-weight run property)' },
   { property: 'text-underline-offset', accepts: (v, s) => v !== 'auto' && small(v, s, .3, 10), replacement: 'PowerPoint underline position' },
   { property: 'text-decoration-thickness', accepts: (v, s) => v === 'from-font' || (length(v) > 0 && small(v, s, .15, 4)), replacement: 'PowerPoint underline thickness' },
   { property: 'font-variant-numeric', accepts: v => v !== 'normal' && v.split(/\s+/).every(n => ['tabular-nums', 'proportional-nums', 'lining-nums'].includes(n)), replacement: 'Default numeric glyph metrics' },
@@ -19,7 +20,7 @@ export const APPROXIMATION_RULES: readonly ApproximationRule[] = [
   { property: 'font-kerning', accepts: v => ['normal', 'none'].includes(v), replacement: 'PowerPoint default kerning' },
   { property: 'text-rendering', accepts: v => ['optimizeSpeed', 'optimizeLegibility', 'geometricPrecision'].includes(v), replacement: 'PowerPoint text rendering' },
   { property: '-webkit-font-smoothing', accepts: v => ['antialiased', 'subpixel-antialiased', 'none'].includes(v), replacement: 'PowerPoint text antialiasing' },
-  { property: 'letter-spacing', accepts: (v, s) => length(v) !== 0 && small(v, s, .05, 1), replacement: '0px' },
+  { property: 'letter-spacing', accepts: (v, s) => length(v) > 0 && small(v, s, .05, 1), replacement: '0px' },
   ...['top', 'right', 'bottom', 'left'].map(side => ({ property: `border-${side}-color`, accepts: (v: string, s: CSSStyleDeclaration) => {
     if (!(length(s.getPropertyValue(`border-${side}-width`)) > 0) || ['none', 'hidden'].includes(s.getPropertyValue(`border-${side}-style`))) return false
     try { const alpha = cssColor(v).transparency; return alpha > 0 && alpha < 100 } catch { return false }
@@ -52,7 +53,7 @@ const VALUES: Record<string, readonly string[]> = {
   'font-stretch': ['normal', '100%'], 'font-variant-caps': ['normal'],
   'font-variant-numeric': ['normal'], 'font-variant-position': ['normal'],
   'writing-mode': ['horizontal-tb'], direction: ['ltr'], 'unicode-bidi': ['normal', 'isolate'],
-  'white-space': ['normal', 'pre', 'pre-wrap'], 'text-transform': ['none'],
+  'white-space': ['normal', 'pre', 'pre-wrap', 'nowrap'], 'text-transform': ['none'],
   'text-decoration-style': ['solid'], 'text-decoration-thickness': ['auto'],
   'font-feature-settings': ['normal'], 'font-kerning': ['auto'], 'text-rendering': ['auto'],
   '-webkit-font-smoothing': ['auto'],
@@ -82,6 +83,7 @@ export function nativeStyleReason(style: CSSStyleDeclaration, context: 'text' | 
   for (const property of ['letter-spacing', 'font-size', 'line-height']) {
     const value = style.getPropertyValue(property)
     if (!value || approximated.has(property) || (property !== 'font-size' && value === 'normal')) continue
+    if (property === 'letter-spacing' && length(value) < 0 && small(value, style, .05, 1)) continue
     try { if (pixels(value) < (property === 'letter-spacing' ? 0 : Number.MIN_VALUE)) return unsupported(property, value) }
     catch { return unsupported(property, value) }
   }

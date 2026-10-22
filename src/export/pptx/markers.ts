@@ -14,7 +14,7 @@ export function markerText(content: string): string {
   return decoded
 }
 export function markerCharacter(content: string): string | undefined { return markerText(content).trimEnd() || undefined }
-export function measureMarker(li: Element, fonts: Map<string, string>, scale: number): { marker?: NonNullable<Paragraph['list']>['marker']; suppressed?: boolean; text?: string } {
+export function measureMarker(li: Element, fonts: Map<string, string>, scale: number): { marker?: NonNullable<Paragraph['list']>['marker']; suppressed?: boolean; text?: string; approximation?: {property: string; value: string; replacement: string} } {
   const base = getComputedStyle(li), style = getComputedStyle(li, '::marker')
   if (base.display && base.display !== 'list-item') return { suppressed: true }
   const content = style.content
@@ -33,5 +33,10 @@ export function measureMarker(li: Element, fonts: Map<string, string>, scale: nu
   if (!fontFace) throw new Error(`Unresolved ::marker font family: ${family}`)
   const fontSize = pixels(style.fontSize || base.fontSize) * scale
   if (!(fontSize > 0)) throw new Error(`Unsupported CSS ::marker font-size: ${style.fontSize}`)
+  // Chromium's default disc matches Verdana's bullet at 110%; preserve explicitly
+  // authored marker faces/sizes/colors through the independent mapping below.
+  if (!character && content === 'normal' && base.listStyleType === 'disc' && style.fontFamily === base.fontFamily && style.fontSize === base.fontSize && style.color === base.color) {
+    return { marker: { fontFace: 'Verdana', fontSize: fontSize * 1.1, ...cssColor(style.color || base.color) }, approximation: {property:'list-style-type',value:'disc',replacement:'Verdana U+2022 at 110% of the CSS marker size'} }
+  }
   return { marker: { character, fontFace, fontSize, ...cssColor(style.color || base.color) }, text: character ? markerText(content) : undefined }
 }

@@ -31,7 +31,9 @@ export function clipsContent(element: Element): string | undefined {
     if (!overflow || overflow === 'visible') continue
     const box = element.getBoundingClientRect()
     const extent = axis === 'x' ? 'Width' : 'Height'
-    if ((element as HTMLElement)[`scroll${extent}`] > (element as HTMLElement)[`client${extent}`] + 1 ||
+    // A section's trailing child margin can increase scrollHeight without any
+    // clipped paint. Its child boxes below still detect actual content overflow.
+    if ((!element.matches('section') && (element as HTMLElement)[`scroll${extent}`] > (element as HTMLElement)[`client${extent}`] + 1) ||
       [...element.querySelectorAll('*')].some(child => {
         if (!isPainted(child)) return false
         const r = child.getBoundingClientRect()

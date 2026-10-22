@@ -22,6 +22,8 @@ export interface Paragraph {
   lineHeight: number; spaceBefore: number; spaceAfter: number
   padding: [number, number, number, number]
   wrap?: boolean
+  valign?: 'top' | 'middle'
+  sizeTolerance?: [number, number]
   list?: { level: number; type: string; start: number; indent: number; marker?: { character?: string; fontFace: string; fontSize: number; color: string; transparency: number } }
   fill?: { color: string; transparency: number }
 }
@@ -31,10 +33,11 @@ export interface TableCell {
   border: [PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps]
 }
 export type Part = { kind: 'text'; paragraph: Paragraph } |
-  { kind: 'list'; rect: Rect; paragraphs: Paragraph[] } |
+  { kind: 'list'; rect: Rect; paragraphs: Paragraph[]; positioned?: boolean } |
   { kind: 'image'; rect: Rect; data: string } |
-  { kind: 'line'; x: number; y: number; width: number; height: number; color: string; points: number } |
-  { kind: 'box'; rect: Rect; fill: { color: string; transparency: number } } |
+  { kind: 'line'; x: number; y: number; width: number; height: number; color: string; points: number; transparency?: number; dash?: boolean; flipH?: boolean; flipV?: boolean } |
+  { kind: 'box'; rect: Rect; fill: { color: string; transparency: number }; radius?: number; line?: PptxGenJS.ShapeLineProps } |
+  { kind: 'polygon'; rect: Rect; points: { x: number; y: number }[]; fill: { color: string; transparency: number } } |
   { kind: 'table'; rect: Rect; rows: TableCell[][]; columnWidths: number[]; rowHeights: number[] }
 export interface MeasuredSlide {
   width: number; height: number; background: string; parts: Part[]; notes: string[]
@@ -75,12 +78,14 @@ export function toTextOptions(p: Paragraph, scale = 1 / 96): PptxGenJS.TextProps
   toPosition(p.rect, scale)
   const pt = scale * 72
   const options: PptxGenJS.TextPropsOptions = {
-    ...toPosition({ ...p.rect, width: p.rect.width + 3, height: p.rect.height + 2 }, scale),
-    align: p.align, valign: 'top', fit: 'none', wrap: p.wrap ?? true,
+    ...toPosition({ ...p.rect, width: p.rect.width + (p.sizeTolerance?.[0] ?? 3), height: p.rect.height + (p.sizeTolerance?.[1] ?? 2) }, scale),
+    align: p.align, valign: p.valign ?? 'top', fit: 'none', wrap: p.wrap ?? true,
     margin: p.padding.map(n => n * pt) as [number, number, number, number],
     lineSpacing: p.lineHeight * pt,
     paraSpaceBefore: p.spaceBefore * pt, paraSpaceAfter: p.spaceAfter * pt,
-    fill: p.fill,
+    fill: p.fill?.transparency === 100 ? undefined : p.fill,
+    fontFace: p.runs[0]?.style.fontFace, fontSize: p.runs[0] ? p.runs[0].style.fontSize * pt : undefined,
+    lang: 'ja-JP',
   }
   if (p.list) {
     const list = p.list
@@ -122,6 +127,8 @@ export function validatePart(part: Part): void {
   } else {
     toPosition(part.rect)
     if (part.kind === 'list') part.paragraphs.forEach(paragraph)
+    if (part.kind === 'box' && part.radius !== undefined && (!Number.isFinite(part.radius) || part.radius < 0)) throw new Error('Invalid measured radius')
+    if (part.kind === 'polygon' && (part.points.length < 3 || part.points.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y)))) throw new Error('Invalid measured polygon')
     if (part.kind === 'table') {
       if (!part.rows.length || !part.columnWidths.length || part.rows.some(row => row.length !== part.columnWidths.length) || part.rowHeights.length !== part.rows.length || [...part.columnWidths, ...part.rowHeights].some(n => !Number.isFinite(n) || n <= 0)) throw new Error('Invalid measured table geometry')
       part.rows.flat().forEach(cell => paragraph(cell.style))
