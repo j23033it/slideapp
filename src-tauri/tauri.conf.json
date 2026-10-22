@@ -22,8 +22,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.bunny.net; img-src 'self' asset: http://asset.localhost https: data:; font-src 'self' data: https://fonts.bunny.net; media-src 'self' asset: http://asset.localhost https: data:; connect-src ipc: http://ipc.localhost",
-      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.bunny.net; img-src 'self' asset: http://asset.localhost https: data:; font-src 'self' data: https://fonts.bunny.net; media-src 'self' asset: http://asset.localhost https: data:; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' http://asset.localhost https://fonts.bunny.net; img-src 'self' asset: http://asset.localhost https: data:; font-src 'self' data: https://fonts.bunny.net; media-src 'self' asset: http://asset.localhost https: data:; connect-src ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' http://asset.localhost https://fonts.bunny.net; img-src 'self' asset: http://asset.localhost https: data:; font-src 'self' data: https://fonts.bunny.net; media-src 'self' asset: http://asset.localhost https: data:; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420",
       "assetProtocol": {
         "enable": true,
         "scope": []

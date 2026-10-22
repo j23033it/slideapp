@@ -13,6 +13,7 @@ import type {
   OpenedFile,
   Platform,
   SaveOutcome,
+  ThemeConfig,
 } from './types'
 
 interface SaveValue {
@@ -46,6 +47,10 @@ export function toSaveOutcome(value: unknown): SaveOutcome {
 export const tauriPlatform: Platform = {
   openFile(path: string): Promise<OpenedFile> {
     return invoke<OpenedFile>('open_file', { path })
+  },
+
+  readThemeConfig(markdownPath: string): Promise<ThemeConfig> {
+    return invoke<ThemeConfig>('read_theme_config', { markdownPath })
   },
 
   async pickMarkdownFile(filterName: string): Promise<string | null> {
