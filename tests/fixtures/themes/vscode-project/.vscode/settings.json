@@ -1,0 +1,8 @@
+{
+  // VS Code の Marp 拡張の設定（テスト用）
+  "markdown.marp.themes": [
+    "themes/one.css", // ワークスペース（.vscode の親）基準
+    "../shared/two.css",
+  ],
+  "editor.fontSize": 14,
+}
