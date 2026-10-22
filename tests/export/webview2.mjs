@@ -52,6 +52,19 @@ try {
       assert.ok(model.slides[0].parts.some(part => part.kind === 'image'))
     }
     if (name === 'review-hidden.md') assert.ok(!JSON.stringify(model.slides).includes('HIDDEN_'))
+    if (name === 'review-hidden-list-parent.md') {
+      const list = model.slides[0].parts.find(part => part.kind === 'list')
+      assert.deepEqual(list.paragraphs.map(p => p.runs.map(run => run.text).join('')), ['Visible item', 'Visible child'])
+      assert.ok(list.paragraphs.every(p => p.rect.width > 0 && p.rect.height > 0))
+      assert.ok(!JSON.stringify(model.slides).includes('HIDDEN_'))
+    }
+    if (name === 'review-half-alpha-background.md') {
+      const box = model.slides[0].parts.find(part => part.kind === 'box')
+      assert.equal(model.slides[0].background, 'FFFFFF')
+      assert.deepEqual(box.fill, { color: 'FF0000', transparency: 50 })
+      assert.deepEqual(box.rect, { x: 0, y: 0, width: 1280, height: 720 })
+      assert.equal(model.report.rasterizedCount, 0)
+    }
     if (name === 'review-transparent-text.md' || name === 'review-half-alpha.md') {
       const runs = model.slides[0].parts.filter(part => part.kind === 'text').flatMap(part => part.paragraph.runs)
       assert.equal(runs.find(run => /INVISIBLE|FAINT/.test(run.text)).style.transparency, name.includes('half-alpha') ? 75 : 100)

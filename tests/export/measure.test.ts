@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
-import { collectRuns, relativeRect, measureList, measureTable } from '../../src/export/pptx/measure'
+import { collectRuns, relativeRect, measureList, measureSlide, measureTable } from '../../src/export/pptx/measure'
+import type { ExportReport } from '../../src/export/pptx/model'
 import { inlineImages } from '../../src/export/pptx/raster'
 import { generatePptx } from '../../src/export/pptx/generate'
 
@@ -107,6 +108,55 @@ describe('export DOM text collection', () => {
       expect(measured.paragraphs.map(p => p.list?.level)).toEqual([0, 1, 2, 0])
       expect(measured.paragraphs.map(p => p.spaceAfter)).toEqual([0, 0, 7, 0])
     } finally { vi.restoreAllMocks(); host.remove() }
+  })
+  it('omits nested items beneath display:none ancestors and paragraphs with empty geometry', async () => {
+    const host = document.createElement('div')
+    host.innerHTML = '<ul style="color:rgb(0,0,0);font-size:29px;line-height:44px"><li style="display:none">HIDDEN_PARENT<ul><li>HIDDEN_CHILD</li></ul></li><li style="display:none">HIDDEN_LOOSE_PARENT<ul><li><p>HIDDEN_PARAGRAPH</p></li></ul></li><li>ZERO_WIDTH</li><li>ZERO_HEIGHT</li><li><p>EMPTY_TEXT_RECT</p></li><li>Visible</li></ul>'
+    for (const el of host.querySelectorAll<HTMLElement>('*')) el.style.backgroundColor = 'rgba(0,0,0,0)'
+    document.body.append(host)
+    const list = host.firstElementChild as HTMLElement
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue(new DOMRect(78, 200, 1123, 44))
+    for (const el of list.querySelectorAll('li,p')) {
+      const text = el.textContent!
+      const hidden = text.includes('HIDDEN_')
+      const emptyParagraph = el.tagName === 'P' && text === 'EMPTY_TEXT_RECT'
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(new DOMRect(136, 200,
+        hidden || emptyParagraph || text === 'ZERO_WIDTH' ? 0 : 200, hidden || text === 'ZERO_HEIGHT' ? 0 : 44))
+    }
+    vi.spyOn(Range.prototype, 'getClientRects').mockImplementation(function (this: Range) {
+      const text = this.startContainer.textContent!
+      return [text === 'EMPTY_TEXT_RECT' ? new DOMRect(136, 200, 0, 44) :
+        text.includes('HIDDEN_') ? new DOMRect() : new DOMRect(136, 200, 200, 44)] as unknown as DOMRectList
+    })
+    try {
+      const measured = measureList(list, new DOMRect(), new Map())
+      expect(measured.paragraphs.map(p => p.runs.map(r => r.text).join(''))).toEqual(['Visible'])
+      const bytes = await generatePptx([{ width: 1280, height: 720, background: 'FFFFFF', notes: [], parts: [measured] }])
+      const xml = await (await JSZip.loadAsync(bytes)).file('ppt/slides/slide1.xml')!.async('string')
+      expect(xml).toContain('<a:t>Visible</a:t>')
+      expect(xml).not.toMatch(/HIDDEN_|ZERO_|EMPTY_TEXT_RECT/)
+    } finally { vi.restoreAllMocks(); host.remove() }
+  })
+  it.each([
+    ['rgba(255,0,0,.5)', 50],
+    ['rgba(255,0,0,.25)', 75],
+  ])('preserves a translucent solid slide background (%s) in native OOXML', async (background, transparency) => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.innerHTML = `<foreignObject><section xmlns="http://www.w3.org/1999/xhtml" style="background-color:${background};background-image:none"></section></foreignObject>`
+    document.body.append(svg)
+    const rect = new DOMRect(0, 0, 1280, 720)
+    Object.defineProperty(svg, 'viewBox', { value: { baseVal: { width: 1280, height: 720 } } })
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue(rect)
+    vi.spyOn(svg.querySelector('section')!, 'getBoundingClientRect').mockReturnValue(rect)
+    const report: ExportReport = { slideCount: 1, rasterizedCount: 0, rasterizedElements: [], substitutedFonts: [], warnings: [] }
+    try {
+      const measured = await measureSlide(svg, [], new Map(), '', report, 0)
+      expect(measured.background).toBe('FFFFFF')
+      expect(measured.parts).toEqual([{ kind: 'box', rect: { x: 0, y: 0, width: 1280, height: 720 }, fill: { color: 'FF0000', transparency } }])
+      expect(report.rasterizedElements).toEqual([])
+      const xml = await (await JSZip.loadAsync(await generatePptx([measured]))).file('ppt/slides/slide1.xml')!.async('string')
+      expect(xml).toContain(`<a:srgbClr val="FF0000"><a:alpha val="${(100 - transparency) * 1000}"/></a:srgbClr>`)
+    } finally { vi.restoreAllMocks(); svg.remove() }
   })
   it('reserves native table text width and serializes exact DOM padding and row heights', async () => {
     const host = document.createElement('div')

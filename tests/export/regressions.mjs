@@ -1,5 +1,7 @@
 // Review reproductions run in real WebView2, alongside the representative fixtures.
 export const regressionCases = {
+ 'hidden-list-parent':'<style>section > ul > li:first-child {display:none}</style>\n\n# Hidden list parent\n\n- HIDDEN_PARENT\n  - HIDDEN_CHILD\n    - HIDDEN_GRANDCHILD\n- Visible item\n  - Visible child',
+ 'half-alpha-background':'<style>section {background-color:rgba(255,0,0,.5);background-image:none}</style>\n\n# Translucent background\n\nEditable text on pink',
 'table-image':'# Table image\n\n| Icon | Label |\n| --- | --- |\n| ![width:60px](./picture.png) | PRESENT |',
  'hidden':'<style>strong {display:none} em {visibility:hidden}</style>\n\n# Visible\n\nBefore **HIDDEN_BOLD** after *HIDDEN_ITALIC* end',
  'inline-fill':'<style>strong {background-color:yellow;color:red}</style>\n\n# Inline fill\n\nBefore **HIGHLIGHT** after',

@@ -194,14 +194,15 @@ export function measureTable(table: HTMLTableElement, origin: DOMRect, fonts: Ma
 export function measureList(list: HTMLElement, origin: DOMRect, fonts: Map<string, string>): Extract<Part, { kind: 'list' }> {
   const paragraphs: Paragraph[] = []
   for (const li of list.querySelectorAll<HTMLElement>('li')) {
-    if (getComputedStyle(li).display === 'none') continue
+    // A descendant of display:none still computes to list-item, but has no box.
+    if (!visible(li)) continue
     const blocks = [...li.querySelectorAll<HTMLElement>(':scope > p')]
     for (const [index, block] of (blocks.length ? blocks : [li]).entries()) {
-      if (getComputedStyle(block).display === 'none' || getComputedStyle(block).visibility === 'hidden') continue
+      if (!visible(block) || getComputedStyle(block).visibility === 'hidden') continue
       const p = paragraph(block, origin, fonts, ownTextRect(block))
       p.padding = [0, 0, 0, 0]
       if (index > 0) p.list = undefined
-      if (p.runs.length) paragraphs.push(p)
+      if (p.runs.length && p.rect.width > 0 && p.rect.height > 0) paragraphs.push(p)
     }
   }
   // Loose lists can have continuation paragraphs after a nested list.
@@ -258,7 +259,13 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
     const style = getComputedStyle(section)
     const color = cssColor(style.backgroundColor)
     if (color.transparency === 0) background = color.color
-    if (section.dataset.marpitAdvancedBackground === 'background' || style.backgroundImage !== 'none') {
+    const rasterBackground = section.dataset.marpitAdvancedBackground === 'background' || style.backgroundImage !== 'none'
+    // Keep alpha as a native layer over the slide's white base. Raster backgrounds
+    // already contain this color, so adding it there would apply the alpha twice.
+    if (color.transparency > 0 && color.transparency < 100 && !rasterBackground) {
+      parts.push({ kind: 'box', rect: relativeRect(section.getBoundingClientRect(), origin), fill: color })
+    }
+    if (rasterBackground) {
       // Only a leaf-free CSS background has a content-independent appearance.
       const cacheable = section.dataset.marpitAdvancedBackground !== 'background'
       const key = JSON.stringify([fontCSS, ...[...style].map(property => [property, style.getPropertyValue(property)])])
