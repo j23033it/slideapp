@@ -24,6 +24,7 @@ import { StatusBar } from './StatusBar'
 import { strings } from './strings'
 import { UPDATE_CHECK_EVENT, UpdateNotice } from './UpdateNotice'
 import {
+  canApplyDiskResult,
   decideExternalChange,
   diskChangedSinceBanner,
   hasUnsavedChanges,
@@ -37,6 +38,7 @@ import {
   type ContentSnapshot,
   type ConflictChoice,
   type ExternalChange,
+  type DiskObservation,
 } from './sync'
 import { Toolbar } from './Toolbar'
 
@@ -157,6 +159,8 @@ export function App() {
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
   const externalChangeRequest = useRef(0)
+  const diskObservationRef = useRef<DiskObservation>({ generation: 0, change: null })
+  const openingRef = useRef<{ path: string; observation: DiskObservation } | null>(null)
 
   rendererRef.current = renderer
   currentRef.current = view.current
@@ -333,12 +337,15 @@ export function App() {
       const baseline: ContentSnapshot | null = startingSession
         ? { text: startingSession.model.serialize(), hasBom: startingSession.model.hasBom }
         : null
+      const startedObservation = diskObservationRef.current
+      const opening = { path, observation: startedObservation }
+      openingRef.current = opening
       setView((previous) => ({ ...previous, busy: true }))
       try {
         stageApi.current?.endEditing()
         // Rust の open_file は成功時に監視を新しいファイルへ切り替える。
         // ここで stopWatching すると、開くのに失敗したとき元の監視が止まったままになる。
-        const file = await platform.openFile(path)
+        let file = await platform.openFile(path)
         const themeConfig = await readThemeConfig(path)
         await waitForComposition()
         const existing = sessionRef.current
@@ -360,6 +367,17 @@ export function App() {
             return
           }
         }
+        // open_file は応答前から監視するため、新セッションの作成前に
+        // 受けた通知を照合する。ここまで新しいファイルに未保存の編集はない。
+        const buffered = canApplyDiskResult(startedObservation, opening.observation)
+          ? null
+          : opening.observation.change
+        if (buffered?.type === 'changed') file = buffered
+        const banner: Banner | null = buffered?.type === 'removed'
+          ? { kind: 'removed', path }
+          : buffered?.type === 'unreadable'
+            ? { kind: 'unreadable', path, message: buffered.message }
+            : null
         const baseDir = dirname(path)
         const model = new DocumentModel(file.text, { hasBom: file.hasBom, diskHash: file.hash })
         const themeWarnings = registerThemeConfig(rendererRef.current, themeConfig)
@@ -384,7 +402,8 @@ export function App() {
           current: 0,
           total: deck.slides.length,
           detail: null,
-          banner: themeWarningsBanner(themeWarnings),
+          // 削除・読み取り不能の知らせを、テーマ設定の警告より優先する
+          banner: banner ?? themeWarningsBanner(themeWarnings),
           error: null,
           busy: false,
           canUndo: false,
@@ -408,6 +427,8 @@ export function App() {
           await platform.stopWatching().catch(() => {})
         }
         sync({ busy: false, error: strings.errors.openFailed(errorMessage(reason)) })
+      } finally {
+        if (openingRef.current === opening) openingRef.current = null
       }
     },
     [deferIfComposing, replacePending, restoreSessionWatch, sync, waitForComposition],
@@ -456,11 +477,16 @@ export function App() {
         hasBom: session.model.hasBom,
       }
       const expected = expectedHash ?? session.model.diskHash
+      const observation = diskObservationRef.current
       setView((previous) => ({ ...previous, busy: true }))
       try {
         const result = await platform.saveFile(session.path, snapshot.text, snapshot.hasBom, expected)
         if (sessionRef.current !== session) return true
         if (result.ok) {
+          if (!canApplyDiskResult(observation, diskObservationRef.current, result.hash)) {
+            sync({ busy: false })
+            return false
+          }
           const completion = planSaveCompletion(
             snapshot,
             { text: session.model.serialize(), hasBom: session.model.hasBom },
@@ -481,8 +507,13 @@ export function App() {
         if (result.kind === 'conflict') {
           session.model.markConflict()
           session.conflict = true
+          const conflictObservation = diskObservationRef.current
           const disk = await platform.openFile(session.path).catch(() => null)
           if (sessionRef.current !== session) return false
+          if (!canApplyDiskResult(conflictObservation, diskObservationRef.current)) {
+            sync({ busy: false })
+            return false
+          }
           const notice = planConflictBanner(disk)
           sync({
             busy: false,
@@ -586,9 +617,14 @@ export function App() {
       setView((previous) => ({ ...previous, busy: true }))
 
       // 同じハッシュの通知を無視していた分も含め、選択時点のディスクを読み直す
+      const observation = diskObservationRef.current
       const disk = await platform.openFile(session.path).catch(() => null)
       await waitForComposition()
       if (sessionRef.current !== session) return
+      if (!canApplyDiskResult(observation, diskObservationRef.current)) {
+        sync({ busy: false })
+        return
+      }
       if (!disk) {
         sync({
           busy: false,
@@ -635,6 +671,10 @@ export function App() {
         const saved = await writeMineCopy(session, snapshot)
         await waitForComposition()
         if (sessionRef.current !== session) return
+        if (!canApplyDiskResult(observation, diskObservationRef.current)) {
+          sync({ busy: false })
+          return
+        }
         if (!saved) {
           setView((previous) => ({ ...previous, busy: false }))
           return
@@ -817,6 +857,11 @@ export function App() {
   /** IME変換中は確定とコミットの後に外部変更を反映する */
   const handleExternal = useCallback(
     (change: ExternalChange) => {
+      const opening = openingRef.current
+      if (sessionRef.current?.path !== change.path && opening?.path !== change.path) return
+      diskObservationRef.current = { generation: diskObservationRef.current.generation + 1, change }
+      if (opening?.path === change.path) opening.observation = diskObservationRef.current
+      if (sessionRef.current?.path !== change.path) return
       if (deferIfComposing(() => handleExternalNow(change))) return
       void handleExternalNow(change)
     },

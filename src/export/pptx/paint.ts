@@ -1,0 +1,48 @@
+import { cssColor, type Part, type Rect } from './model'
+import { borderColor, pixels } from './styles'
+
+export const BOX_ELEMENTS = 'h1,h2,h3,h4,h5,h6,marp-h1,marp-h2,marp-h3,marp-h4,marp-h5,marp-h6,p,ul,ol,li,table,thead,tbody,tfoot,tr,th,td,col,colgroup,blockquote,pre,marp-pre,header,footer,figure,figcaption,div'
+export const SIDES = ['top', 'right', 'bottom', 'left'] as const
+const active = (v: string) => !!v && !['none', 'initial'].includes(v)
+function transparent(value: string): boolean { try { return !value || cssColor(value).transparency === 100 } catch { return false } }
+export function hasBoxPaint(style: CSSStyleDeclaration): boolean {
+  return !transparent(style.backgroundColor) || active(style.backgroundImage) ||
+    active(style.boxShadow) || SIDES.some(side => Number.parseFloat(style.getPropertyValue(`border-${side}-width`)) > 0) ||
+    (active(style.outlineStyle) && style.outlineStyle !== 'hidden' && Number.parseFloat(style.outlineWidth) > 0) || active(style.borderImageSource)
+}
+export function separateBox(element: Element): boolean {
+  const style = getComputedStyle(element)
+  if (element.matches('thead,tbody,tfoot,tr,th,td,col,colgroup') && transparent(style.backgroundColor) && !rasterBox(style, true)) return false
+  return (element.matches(BOX_ELEMENTS) || element.matches('a,strong,em,s,mark,code,span')) && getComputedStyle(element).backgroundClip !== 'text' && hasBoxPaint(getComputedStyle(element))
+}
+/** Unequal/elliptical corners, clipping, images, outlines and shadows stay browser-painted. */
+export function rasterBox(style: CSSStyleDeclaration, tableBorder = false): boolean {
+  if (active(style.backgroundImage) || active(style.boxShadow) || active(style.borderImageSource) ||
+      (active(style.outlineStyle) && style.outlineStyle !== 'hidden' && Number.parseFloat(style.outlineWidth) > 0)) return true
+  if (['top-left', 'top-right', 'bottom-left', 'bottom-right'].some(corner =>
+    (style.getPropertyValue(`border-${corner}-radius`) || '0px').split(/\s+/).some(v => Number.parseFloat(v) !== 0))) return true
+  if (style.backgroundClip && style.backgroundClip !== 'border-box') return true
+  for (const side of SIDES) {
+    if (!(Number.parseFloat(style.getPropertyValue(`border-${side}-width`)) > 0)) continue
+    if (!['none', 'hidden', 'solid'].includes(style.getPropertyValue(`border-${side}-style`))) return true
+    // Native lines cannot preserve alpha across arbitrary overlapping backgrounds.
+    try { if (!tableBorder && cssColor(style.getPropertyValue(`border-${side}-color`)).transparency % 100 !== 0) return true } catch { return true }
+  }
+  try { cssColor(style.backgroundColor) } catch { return true }
+  return false
+}
+export function nativeBox(element: Element, rect: Rect): Part[] {
+  const style = getComputedStyle(element), parts: Part[] = []
+  const fill = cssColor(style.backgroundColor)
+  if (fill.transparency < 100) parts.push({ kind: 'box', rect, fill })
+  for (const side of SIDES) {
+    const thickness = pixels(style.getPropertyValue(`border-${side}-width`))
+    const type = style.getPropertyValue(`border-${side}-style`), color = style.getPropertyValue(`border-${side}-color`)
+    if (thickness <= 0 || ['none', 'hidden'].includes(type) || cssColor(color).transparency === 100) continue
+    const vertical = side === 'left' || side === 'right'
+    parts.push({ kind: 'line', x: rect.x + (side === 'right' ? rect.width - thickness / 2 : vertical ? thickness / 2 : 0),
+      y: rect.y + (side === 'bottom' ? rect.height - thickness / 2 : vertical ? 0 : thickness / 2),
+      width: vertical ? 0 : rect.width, height: vertical ? rect.height : 0, color: borderColor(element, color), points: thickness * .75 })
+  }
+  return parts
+}

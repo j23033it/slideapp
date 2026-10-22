@@ -1,4 +1,5 @@
 mod files;
+mod binary;
 mod prefs;
 mod themes;
 mod watching;
@@ -92,6 +93,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
+            binary::write_binary,
             open_file,
             save_file,
             write_new_file,
