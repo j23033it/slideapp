@@ -19,16 +19,20 @@
     "@tauri-apps/plugin-dialog": "^2.2.2",
     "@tauri-apps/plugin-process": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.14.0",
-    "preact": "^10.25.4",
-    "markdown-it": "14.3.3"
+    "html-to-image": "1.11.13",
+    "jszip": "3.10.2",
+    "markdown-it": "14.3.3",
+    "pptxgenjs": "4.0.1",
+    "preact": "^10.25.4"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.1",
     "@tauri-apps/cli": "^2.5.0",
+    "@types/node": "26.6.5",
+    "happy-dom": "20.14.6",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",
-    "vitest": "5.0.5",
-    "happy-dom": "20.14.6"
+    "vitest": "5.0.5"
   },
   "overrides": {
     "markdown-it": "14.3.3"

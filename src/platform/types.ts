@@ -70,6 +70,8 @@ export interface Platform {
   readThemeConfig(markdownPath: string): Promise<ThemeConfig>
   /** .md選択ダイアログを開く。キャンセル時は null */
   pickMarkdownFile(filterName: string): Promise<string | null>
+  pickPptxSavePath(defaultPath: string): Promise<string | null>
+  writeBinary(path: string, bytes: Uint8Array): Promise<void>
   recentFilesGet(): Promise<string[]>
   /** 先頭に追加し、最大10件に切り詰めた一覧を返す */
   recentFilesAdd(path: string): Promise<string[]>
