@@ -117,6 +117,69 @@ button {
   background: transparent;
 }
 
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 未保存のまま開く・閉じるときの確認 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.modal {
+  width: min(420px, calc(100vw - 32px));
+  padding: 16px;
+  background: var(--sm-surface);
+  border: 1px solid var(--sm-border);
+  border-radius: 6px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.24);
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal-message {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.modal-action {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--sm-text-muted);
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-buttons button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--sm-border);
+  border-radius: 4px;
+  background: var(--sm-surface);
+  font-size: 12px;
+}
+
+.modal-buttons button:hover {
+  background: var(--sm-hover);
+}
+
 /* 本体（サイドバー + スライド） */
 .main {
   flex: 1;
@@ -322,6 +385,16 @@ button {
 .status-item {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.status-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sm-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
 }
 
 .status-dirty {

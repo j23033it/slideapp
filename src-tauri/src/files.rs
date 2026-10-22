@@ -33,6 +33,7 @@ pub struct SavedFile {
 )]
 pub enum SaveError {
     Conflict { disk_hash: String },
+    Exists,
     Io { message: String },
 }
 
@@ -324,6 +325,11 @@ fn recover_failed_replace(path: &Path, backup: &mut RemoveOnDrop, error: io::Err
                         "{error}; recovery failed: {message}; original retained at {location}"
                     ),
                 },
+                SaveError::Exists => SaveError::Io {
+                    message: format!(
+                        "{error}; recovery destination exists; original retained at {location}"
+                    ),
+                },
             };
         }
     }
@@ -415,7 +421,11 @@ pub(crate) fn write_new_markdown(
     has_bom: bool,
 ) -> Result<SavedFile, SaveError> {
     let bytes = encoded_markdown(text, has_bom);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if is_name_collision(&error) => return Err(SaveError::Exists),
+        Err(error) => return Err(error.into()),
+    };
     let result = (|| -> io::Result<()> {
         file.write_all(&bytes)?;
         file.flush()?;
@@ -430,6 +440,11 @@ pub(crate) fn write_new_markdown(
         hash: sha256_hex(&bytes),
         mtime: modified_millis(fs::metadata(path)),
     })
+}
+
+fn is_name_collision(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AlreadyExists
+        || matches!(error.raw_os_error(), Some(80 | 183))
 }
 
 #[cfg(test)]
@@ -576,7 +591,7 @@ mod tests {
             assert_eq!(saved.hash, sha256_hex(&expected));
             assert!(matches!(
                 write_new_markdown(&path, "overwritten", false),
-                Err(SaveError::Io { .. })
+                Err(SaveError::Exists)
             ));
             assert_eq!(fs::read(&path).unwrap(), expected);
             fs::remove_file(&path).unwrap();
@@ -846,12 +861,31 @@ mod tests {
             serde_json::json!({ "kind": "conflict", "diskHash": "abc" })
         );
         assert_eq!(
+            serde_json::to_value(SaveError::Exists).unwrap(),
+            serde_json::json!({ "kind": "exists" })
+        );
+        assert_eq!(
             serde_json::to_value(SaveError::Io {
                 message: "locked".into()
             })
             .unwrap(),
             serde_json::json!({ "kind": "io", "message": "locked" })
         );
+    }
+
+    #[test]
+    fn recognizes_name_collisions_by_kind_and_windows_error_code() {
+        assert!(is_name_collision(&io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "localized message"
+        )));
+        for code in [80, 183] {
+            assert!(is_name_collision(&io::Error::from_raw_os_error(code)));
+        }
+        assert!(!is_name_collision(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied"
+        )));
     }
 
     #[cfg(windows)]

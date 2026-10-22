@@ -7,6 +7,27 @@ describe('lossless document model', () => {
     expect(joinEols(document.text, document.eols)).toBe(raw);
     expect(new TextEncoder().encode(joinEols(document.text, document.eols))).toEqual(new TextEncoder().encode(raw));
   });
+  it.each<[string, string, string[]]>([
+    ['a\r\nb\r\nc', 'a\nb\nc', ['\r\n', '\r\n', '']],
+    ['a\nb\n', 'a\nb\n', ['\n', '\n', '']],
+    ['a\r\nb\nc\r\n', 'a\nb\nc\n', ['\r\n', '\n', '\r\n', '']],
+    ['a\r\nb', 'a\nb', ['\r\n', '']],
+    ['', '', ['']],
+    ['a\n\n\n', 'a\n\n\n', ['\n', '\n', '\n', '']],
+  ])('splits %j into normalized text and per-line EOLs', (raw, text, eols) => {
+    expect(splitEols(raw)).toEqual({ text, eols });
+  });
+  it('keeps every trailing newline and round trips Japanese decks', () => {
+    for (const raw of [
+      'a\r\n\r\nb\r\n',
+      '日本語の\r\nスライド\n本文\r\n',
+      '---\r\nmarp: true\r\ntheme: gaia\r\n---\r\n\r\n# 見出し\r\n\r\n- 箇条書き\n- 二つ目',
+    ]) {
+      const document = splitEols(raw);
+      expect(document.eols.length).toBe(document.text.split('\n').length);
+      expect(joinEols(document.text, document.eols)).toBe(raw);
+    }
+  });
   it('changes only the selected range with mixed EOL and no final newline', () => {
     const raw = 'before  \r\nrepeat\nrepeat\r\nafter';
     const document = splitEols(raw);
