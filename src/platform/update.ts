@@ -10,6 +10,9 @@ import type { UpdateInfo, UpdateProgress } from './types'
  */
 let pending: Update | null = null
 
+/** 確認要求の世代。古い確認が後から完了しても `pending` を置き換えないために使う。 */
+let checkGeneration = 0
+
 /** 確認済みの更新を捨てる（リソースを解放する）。 */
 function discardPending(): void {
   const update = pending
@@ -23,10 +26,16 @@ function discardPending(): void {
 
 /** 更新を確認する。新しい版がなければ null。 */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  const generation = ++checkGeneration
   discardPending()
 
   const update = await check()
   if (!update) return null
+  if (generation !== checkGeneration) {
+    // 後から始まった確認がある。この結果は画面でも捨てられるので、リソースだけ解放する。
+    void update.close().catch(() => {})
+    return null
+  }
 
   pending = update
   return {
@@ -50,6 +59,8 @@ export async function downloadAndInstall(
   }
 
   pending = null
+  // インストール開始後に完了した確認が、別の版を `pending` に入れないようにする
+  checkGeneration++
 
   let downloaded = 0
   let total: number | null = null
