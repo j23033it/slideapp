@@ -646,6 +646,11 @@ export function App() {
       if (plan.reloadDisk) {
         await waitForComposition()
         if (sessionRef.current !== session) return
+        // テーマ設定を待つ間に届いた新しいディスク通知は、その処理に任せる
+        if (!canApplyDiskResult(observation, diskObservationRef.current)) {
+          sync({ busy: false })
+          return
+        }
       }
 
       // 読み込み待ちの間に確定した入力があれば、選択時点の内容を
