@@ -2,6 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 
 import { platform, type UpdateInfo, type UpdateProgress } from '../platform'
 import { progressFrom } from '../platform/progress'
+import {
+  canApplyCheckResult,
+  nextRequestId,
+  noticeForCheckResult,
+  type CheckOutcome,
+  type CheckResult,
+  type Notice,
+} from './updateCheck'
 
 /** ツールバーなどから手動で確認するとき、window にこのイベントを投げる */
 export const UPDATE_CHECK_EVENT = 'slideapp:check-update'
@@ -35,14 +43,6 @@ const text = {
   unknownError: '不明なエラー',
 } as const
 
-type Notice =
-  | { kind: 'none' }
-  | { kind: 'checking' }
-  | { kind: 'available'; info: UpdateInfo }
-  | { kind: 'downloading'; info: UpdateInfo; progress: UpdateProgress }
-  | { kind: 'installing'; info: UpdateInfo }
-  | { kind: 'error'; message: string; retry: 'check' | 'install'; info: UpdateInfo | null }
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) return error.message
   if (typeof error === 'string' && error.length > 0) return error
@@ -62,30 +62,49 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
   const mounted = useRef(true)
   /** ダウンロード・インストール中は、別の確認で表示を上書きしない */
   const installing = useRef(false)
+  /** 最後に始めた確認の世代。古い確認の結果を捨てるために使う */
+  const checkRequest = useRef(0)
 
-  const check = useCallback(async (manual: boolean) => {
-    if (installing.current) return
+  /**
+   * 更新を確認する。完了時には世代とインストール開始を確かめ、古い結果は捨てる。
+   * `apply` が false のときは帯へ反映せず、結果だけを返す（インストールの再試行用）。
+   */
+  const check = useCallback(async (manual: boolean, apply = true): Promise<CheckOutcome> => {
+    if (installing.current) return { status: 'stale' }
+
+    const requestId = nextRequestId(checkRequest.current)
+    checkRequest.current = requestId
     if (manual) setNotice({ kind: 'checking' })
 
+    let outcome: CheckResult
     try {
-      const info = await platform.checkForUpdate()
-      if (!mounted.current) return
-      setNotice(info ? { kind: 'available', info } : { kind: 'none' })
+      outcome = { status: 'ok', info: await platform.checkForUpdate() }
     } catch (error) {
-      if (!mounted.current) return
-      if (manual) {
-        setNotice({ kind: 'error', message: text.failed(errorMessage(error)), retry: 'check', info: null })
-      } else {
-        // 起動時の確認失敗は黙って諦める（オフラインでも通常の利用を妨げない）
-        console.warn('update check failed', error)
-        setNotice({ kind: 'none' })
-      }
+      outcome = { status: 'error', message: text.failed(errorMessage(error)) }
+      if (!manual) console.warn('update check failed', error)
     }
+
+    if (
+      !mounted.current ||
+      !canApplyCheckResult({
+        requestId,
+        latestRequestId: checkRequest.current,
+        installing: installing.current,
+      })
+    ) {
+      // 新しい確認に追い越された、またはインストールが始まったあとの結果
+      return { status: 'stale' }
+    }
+
+    if (apply) setNotice(noticeForCheckResult(outcome, manual))
+    return outcome
   }, [])
 
   const install = useCallback(async (info: UpdateInfo) => {
     if (installing.current) return
     installing.current = true
+    // 進行中の確認があとから完了しても、インストール中の表示を壊さないようにする
+    checkRequest.current = nextRequestId(checkRequest.current)
     setNotice({ kind: 'downloading', info, progress: progressFrom(0, null) })
 
     try {
@@ -138,18 +157,16 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
 
     if (notice.retry === 'install') {
       // 失敗した更新は破棄済みなので、確認からやり直してから入れ直す
-      setNotice({ kind: 'checking' })
-      try {
-        const info = await platform.checkForUpdate()
-        if (!mounted.current) return
-        if (info) {
-          await install(info)
-        } else {
-          setNotice({ kind: 'error', message: text.failed(text.noUpdate), retry: 'check', info: null })
-        }
-      } catch (error) {
-        if (!mounted.current) return
-        setNotice({ kind: 'error', message: text.failed(errorMessage(error)), retry: 'check', info: null })
+      const outcome = await check(true, false)
+      if (!mounted.current || outcome.status === 'stale') return
+      if (outcome.status === 'error') {
+        setNotice({ kind: 'error', message: outcome.message, retry: 'check', info: null })
+        return
+      }
+      if (outcome.info) {
+        await install(outcome.info)
+      } else {
+        setNotice({ kind: 'error', message: text.failed(text.noUpdate), retry: 'check', info: null })
       }
       return
     }
