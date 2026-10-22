@@ -10,6 +10,22 @@ export type ExternalChange =
   | { type: 'removed'; path: string }
   | { type: 'unreadable'; path: string; message: string }
 
+/** 最新の監視通知。本文が同じでも削除・読み取り不能を含めて世代を進める。 */
+export interface DiskObservation {
+  generation: number
+  change: ExternalChange | null
+}
+
+/** 待機中の新しい観測を古い応答で消さない。保存と同じハッシュだけは照合済み。 */
+export function canApplyDiskResult(
+  started: DiskObservation,
+  latest: DiskObservation,
+  savedHash?: string,
+): boolean {
+  return started.generation === latest.generation ||
+    (savedHash !== undefined && latest.change?.type === 'changed' && latest.change.hash === savedHash)
+}
+
 export interface SyncState {
   path: string
   /** 未保存の変更があるか（conflict / readonly も含めて clean 以外） */

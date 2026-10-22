@@ -22,6 +22,7 @@ import type { EditSuccess, EditingCursors, StageFocus } from './stageEditor'
 import { StatusBar } from './StatusBar'
 import { strings } from './strings'
 import {
+  canApplyDiskResult,
   decideExternalChange,
   diskChangedSinceBanner,
   hasUnsavedChanges,
@@ -35,6 +36,7 @@ import {
   type ContentSnapshot,
   type ConflictChoice,
   type ExternalChange,
+  type DiskObservation,
 } from './sync'
 import { Toolbar } from './Toolbar'
 
@@ -134,6 +136,7 @@ export function App() {
   const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
+  const diskObservationRef = useRef<DiskObservation>({ generation: 0, change: null })
 
   rendererRef.current = renderer
   currentRef.current = view.current
@@ -431,11 +434,16 @@ export function App() {
         hasBom: session.model.hasBom,
       }
       const expected = expectedHash ?? session.model.diskHash
+      const observation = diskObservationRef.current
       setView((previous) => ({ ...previous, busy: true }))
       try {
         const result = await platform.saveFile(session.path, snapshot.text, snapshot.hasBom, expected)
         if (sessionRef.current !== session) return true
         if (result.ok) {
+          if (!canApplyDiskResult(observation, diskObservationRef.current, result.hash)) {
+            sync({ busy: false })
+            return false
+          }
           const completion = planSaveCompletion(
             snapshot,
             { text: session.model.serialize(), hasBom: session.model.hasBom },
@@ -456,8 +464,13 @@ export function App() {
         if (result.kind === 'conflict') {
           session.model.markConflict()
           session.conflict = true
+          const conflictObservation = diskObservationRef.current
           const disk = await platform.openFile(session.path).catch(() => null)
           if (sessionRef.current !== session) return false
+          if (!canApplyDiskResult(conflictObservation, diskObservationRef.current)) {
+            sync({ busy: false })
+            return false
+          }
           const notice = planConflictBanner(disk)
           sync({
             busy: false,
@@ -549,9 +562,14 @@ export function App() {
       setView((previous) => ({ ...previous, busy: true }))
 
       // 同じハッシュの通知を無視していた分も含め、選択時点のディスクを読み直す
+      const observation = diskObservationRef.current
       const disk = await platform.openFile(session.path).catch(() => null)
       await waitForComposition()
       if (sessionRef.current !== session) return
+      if (!canApplyDiskResult(observation, diskObservationRef.current)) {
+        sync({ busy: false })
+        return
+      }
       if (!disk) {
         sync({
           busy: false,
@@ -591,6 +609,10 @@ export function App() {
         const saved = await writeMineCopy(session, snapshot)
         await waitForComposition()
         if (sessionRef.current !== session) return
+        if (!canApplyDiskResult(observation, diskObservationRef.current)) {
+          sync({ busy: false })
+          return
+        }
         if (!saved) {
           setView((previous) => ({ ...previous, busy: false }))
           return
@@ -750,6 +772,8 @@ export function App() {
   /** IME変換中は確定とコミットの後に外部変更を反映する */
   const handleExternal = useCallback(
     (change: ExternalChange) => {
+      if (sessionRef.current?.path !== change.path) return
+      diskObservationRef.current = { generation: diskObservationRef.current.generation + 1, change }
       if (deferIfComposing(() => handleExternalNow(change))) return
       handleExternalNow(change)
     },
