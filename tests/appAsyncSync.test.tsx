@@ -7,7 +7,8 @@ import { App } from '../src/app/App'
 import { editorSessionSaveState } from '../src/app/session'
 import type { SlideStageProps } from '../src/app/SlideStage'
 import { strings } from '../src/app/strings'
-import { DEFAULT_SETTINGS, platform } from '../src/platform'
+import { UPDATE_CHECK_EVENT } from '../src/app/UpdateNotice'
+import { DEFAULT_SETTINGS, platform, type UpdateInfo } from '../src/platform'
 import type { FileEventHandlers, SaveOutcome } from '../src/platform/types'
 
 const captured = vi.hoisted(() => ({ stage: null as SlideStageProps | null }))
@@ -26,15 +27,18 @@ vi.mock('../src/platform', async (original) => ({
     onCloseRequested: vi.fn(), stopWatching: vi.fn(), pickMarkdownFile: vi.fn(),
     openFile: vi.fn(), readThemeConfig: vi.fn(), convertFileSrc: vi.fn(),
     saveFile: vi.fn(), writeNewFile: vi.fn(), forceClose: vi.fn(),
+    checkForUpdate: vi.fn(), downloadAndInstall: vi.fn(), relaunch: vi.fn(),
   },
 }))
 
 const path = 'C:\\deck\\deck.md'
 const disk = (text: string, hash = text) => ({ text, hash, hasBom: false, mtime: 1 })
+const updateInfo: UpdateInfo = { version: '0.2.0', currentVersion: '0.1.0', notes: null, date: null }
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 let host: HTMLDivElement
@@ -57,6 +61,12 @@ async function editMine() {
   })
 }
 
+async function offerUpdate() {
+  vi.mocked(platform.checkForUpdate).mockResolvedValue(updateInfo)
+  await flush(() => window.dispatchEvent(new Event(UPDATE_CHECK_EVENT)))
+  expect(host.textContent).toContain(strings.update.available(updateInfo.version))
+}
+
 beforeEach(async () => {
   vi.resetAllMocks()
   captured.stage = null
@@ -67,6 +77,9 @@ beforeEach(async () => {
   vi.mocked(platform.setWindowTitle).mockResolvedValue()
   vi.mocked(platform.stopWatching).mockResolvedValue()
   vi.mocked(platform.onCloseRequested).mockResolvedValue(() => {})
+  vi.mocked(platform.checkForUpdate).mockResolvedValue(null)
+  vi.mocked(platform.downloadAndInstall).mockResolvedValue()
+  vi.mocked(platform.relaunch).mockResolvedValue()
   vi.mocked(platform.listenFileEvents).mockImplementation(async (handlers) => {
     events = handlers
     return () => {}
@@ -209,6 +222,121 @@ describe('App asynchronous disk callbacks', () => {
     vi.mocked(platform.writeNewFile).mockResolvedValue({ ok: true, hash: 'mine', mtime: 2 })
     await flush(() => click(strings.banner.conflict.mine))
     expect(session().model.serialize()).toBe('external-v1')
+    expect(editorSessionSaveState(session())).toBe('clean')
+  })
+})
+
+describe('update installation confirmation', () => {
+  it('saves before installing and locks document changes after approval', async () => {
+    vi.mocked(platform.saveFile).mockResolvedValue({ ok: true, hash: 'mine', mtime: 2 })
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    expect(host.textContent).toContain(strings.confirm.title)
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+
+    await flush(() => click(strings.confirm.saveAndContinue))
+    expect(platform.saveFile).toHaveBeenCalledWith(path, 'mine', false, 'base')
+    expect(platform.downloadAndInstall).toHaveBeenCalledTimes(1)
+    expect(platform.relaunch).toHaveBeenCalledTimes(1)
+    expect(host.firstElementChild?.hasAttribute('inert')).toBe(true)
+
+    const savedCalls = vi.mocked(platform.saveFile).mock.calls.length
+    const before = session().model.serialize()
+    await flush(() => events.changed({ path, ...disk('external-after-install-lock') }))
+    expect(session().model.serialize()).toBe(before)
+    await flush(() => {
+      click(strings.toolbar.save)
+      const current = session()
+      const { analysis } = current.renderer.analyze('ignored', current.baseDir)
+      captured.stage!.callbacks.onCommit({
+        ok: true,
+        edit: { start: 0, end: current.model.text.length, insert: 'ignored' },
+        analysis,
+        newText: 'ignored',
+        escaped: false,
+      }, {})
+    })
+    expect(platform.saveFile).toHaveBeenCalledTimes(savedCalls)
+    expect(session().model.serialize()).toBe(before)
+  })
+
+  it('installs after the user chooses to discard unsaved changes', async () => {
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    await flush(() => click(strings.confirm.discard))
+    expect(platform.saveFile).not.toHaveBeenCalled()
+    expect(platform.downloadAndInstall).toHaveBeenCalledTimes(1)
+    expect(platform.relaunch).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the update available when the user cancels', async () => {
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    await flush(() => click(strings.confirm.cancel))
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+    expect(platform.relaunch).not.toHaveBeenCalled()
+    expect(host.textContent).toContain(strings.update.available(updateInfo.version))
+    expect([...host.querySelectorAll('button')].some((button) => button.textContent === strings.update.install)).toBe(true)
+  })
+
+  it('installs without confirmation when the document is clean', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    expect(editorSessionSaveState(session())).toBe('clean')
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    expect(host.textContent).not.toContain(strings.confirm.title)
+    expect(platform.downloadAndInstall).toHaveBeenCalledTimes(1)
+    expect(platform.relaunch).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['save error', { ok: false as const, kind: 'io' as const, message: 'locked' }],
+    ['save conflict', { ok: false as const, kind: 'conflict' as const, diskHash: 'other' }],
+  ] as const)('does not install after a %s', async (_label, outcome) => {
+    vi.mocked(platform.saveFile).mockResolvedValue(outcome)
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    await flush(() => click(strings.confirm.saveAndContinue))
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+    expect(platform.relaunch).not.toHaveBeenCalled()
+    expect([...host.querySelectorAll('button')].some((button) => button.textContent === strings.update.install)).toBe(true)
+  })
+
+  it('waits for IME composition and commit before checking for unsaved changes', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    let finishComposition: (() => void) | undefined
+    captured.stage!.apiRef.current = {
+      endEditing: () => {},
+      isComposing: () => true,
+      deferWhileComposing: (action) => { finishComposition = action; return true },
+    }
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    expect(host.textContent).not.toContain(strings.confirm.title)
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+
+    await editMine()
+    captured.stage!.apiRef.current = null
+    await flush(() => finishComposition!())
+    expect(host.textContent).toContain(strings.confirm.title)
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+    await flush(() => click(strings.confirm.cancel))
+  })
+
+  it('holds external changes during installation and applies them if installation fails', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    const installation = deferred<void>()
+    vi.mocked(platform.downloadAndInstall).mockReturnValue(installation.promise)
+    await offerUpdate()
+    await flush(() => click(strings.update.install))
+    expect(host.firstElementChild?.hasAttribute('inert')).toBe(true)
+
+    await flush(() => events.changed({ path, ...disk('external-during-install') }))
+    expect(session().model.serialize()).toBe('base')
+
+    await flush(() => installation.reject(new Error('download failed')))
+    expect(host.firstElementChild?.hasAttribute('inert')).toBe(false)
+    expect(session().model.serialize()).toBe('external-during-install')
     expect(editorSessionSaveState(session())).toBe('clean')
   })
 })

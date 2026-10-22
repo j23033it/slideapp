@@ -21,6 +21,10 @@ export interface UpdateNoticeProps {
    * 省略した場合は確認する。
    */
   checkOnStartup?: boolean | null
+  /** インストール前の確認。false なら更新帯を維持して処理を中止する */
+  beforeInstall: () => Promise<boolean>
+  /** インストール処理が失敗し、アプリが続行できるときに呼ばれる */
+  onInstallFailure?: () => void
   /** 「後で」「閉じる」で帯を閉じたときに呼ばれる */
   onDismiss?: () => void
 }
@@ -39,12 +43,14 @@ function percentOf(progress: UpdateProgress): number | null {
  * 新しい版があるときにツールバーの下へ帯を出す。
  * 起動時の確認は `checkOnStartup` で切り替え、手動確認は `UPDATE_CHECK_EVENT` で受ける。
  */
-export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
+export function UpdateNotice({ checkOnStartup, beforeInstall, onInstallFailure, onDismiss }: UpdateNoticeProps) {
   const [notice, setNotice] = useState<Notice>({ kind: 'none' })
   const mounted = useRef(true)
   const startupCheckStarted = useRef(false)
   /** ダウンロード・インストール中は、別の確認で表示を上書きしない */
   const installing = useRef(false)
+  /** 確認画面が開いている間の二重クリックも抑止する */
+  const installRequested = useRef(false)
   /** 最後に始めた確認の世代。古い確認の結果を捨てるために使う */
   const checkRequest = useRef(0)
 
@@ -53,7 +59,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
    * `apply` が false のときは帯へ反映せず、結果だけを返す（インストールの再試行用）。
    */
   const check = useCallback(async (manual: boolean, apply = true): Promise<CheckOutcome> => {
-    if (installing.current) return { status: 'stale' }
+    if (installing.current || installRequested.current) return { status: 'stale' }
 
     const requestId = nextRequestId(checkRequest.current)
     checkRequest.current = requestId
@@ -72,7 +78,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       !canApplyCheckResult({
         requestId,
         latestRequestId: checkRequest.current,
-        installing: installing.current,
+        installing: installing.current || installRequested.current,
       })
     ) {
       // 新しい確認に追い越された、またはインストールが始まったあとの結果
@@ -84,8 +90,23 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
   }, [])
 
   const install = useCallback(async (info: UpdateInfo) => {
-    if (installing.current) return
+    if (installing.current || installRequested.current) return
+    installRequested.current = true
+    let approved: boolean
+    try {
+      approved = await beforeInstall()
+    } catch (error) {
+      installRequested.current = false
+      onInstallFailure?.()
+      console.warn('update pre-install check failed', error)
+      return
+    }
+    if (!approved || !mounted.current) {
+      installRequested.current = false
+      return
+    }
     installing.current = true
+    installRequested.current = false
     // 進行中の確認があとから完了しても、インストール中の表示を壊さないようにする
     checkRequest.current = nextRequestId(checkRequest.current)
     setNotice({ kind: 'downloading', info, progress: progressFrom(0, null) })
@@ -96,6 +117,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       })
     } catch (error) {
       installing.current = false
+      onInstallFailure?.()
       if (!mounted.current) return
       setNotice({
         kind: 'error',
@@ -113,11 +135,12 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
       await platform.relaunch()
     } catch (error) {
       installing.current = false
+      onInstallFailure?.()
       if (!mounted.current) return
       console.warn('relaunch failed', error)
       setNotice({ kind: 'error', message: strings.update.restartFailed, retry: 'install', info })
     }
-  }, [])
+  }, [beforeInstall, onInstallFailure])
 
   // 手動確認のイベント
   useEffect(() => {
@@ -141,6 +164,7 @@ export function UpdateNotice({ checkOnStartup, onDismiss }: UpdateNoticeProps) {
   }, [check, checkOnStartup])
 
   const dismiss = useCallback(() => {
+    if (installing.current || installRequested.current) return
     setNotice({ kind: 'none' })
     onDismiss?.()
   }, [onDismiss])

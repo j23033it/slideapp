@@ -53,7 +53,10 @@ type Banner =
   | { kind: 'themeWarnings'; warnings: string[] }
   | { kind: 'info'; message: string }
 
-type PendingAction = { kind: 'open'; path: string } | { kind: 'close' }
+type PendingAction =
+  | { kind: 'open'; path: string }
+  | { kind: 'close' }
+  | { kind: 'update'; resolve: (approved: boolean) => void }
 
 interface ViewState {
   tick: number
@@ -146,6 +149,7 @@ export function App() {
   const [view, setView] = useState<ViewState>(INITIAL_VIEW)
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [updateInstallLocked, setUpdateInstallLocked] = useState(false)
 
   const renderer = useMemo(() => new MarpRenderer((path) => platform.convertFileSrc(path)), [])
   const rendererRef = useRef(renderer)
@@ -155,9 +159,11 @@ export function App() {
   const currentRef = useRef(0)
   const pendingRef = useRef<PendingAction | null>(null)
   const pendingOperationRef = useRef(0)
+  const updateInstallLockedRef = useRef(false)
   const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
+  const pendingUpdateExternalRef = useRef<ExternalChange | null>(null)
   const externalChangeRequest = useRef(0)
   const diskObservationRef = useRef<DiskObservation>({ generation: 0, change: null })
   const openingRef = useRef<{ path: string; observation: DiskObservation } | null>(null)
@@ -222,6 +228,36 @@ export function App() {
     return new Promise<void>((resolve) => {
       if (!stage.deferWhileComposing(resolve)) resolve()
     })
+  }, [])
+
+  /** 更新を始める前にIMEを確定し、未保存確認を既存の終了ダイアログへ渡す */
+  const beforeUpdateInstall = useCallback(async (): Promise<boolean> => {
+    if (updateInstallLockedRef.current) return false
+    await waitForComposition()
+    if (
+      updateInstallLockedRef.current ||
+      pendingRef.current ||
+      openingRef.current ||
+      view.busy
+    ) return false
+
+    stageApi.current?.endEditing()
+    const session = sessionRef.current
+    if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
+      return new Promise<boolean>((resolve) => replacePending({ kind: 'update', resolve }))
+    }
+
+    updateInstallLockedRef.current = true
+    setUpdateInstallLocked(true)
+    return true
+  }, [replacePending, view.busy, waitForComposition])
+
+  const releaseUpdateInstall = useCallback(() => {
+    updateInstallLockedRef.current = false
+    setUpdateInstallLocked(false)
+    const pendingChange = pendingUpdateExternalRef.current
+    pendingUpdateExternalRef.current = null
+    if (pendingChange) externalRef.current(pendingChange)
   }, [])
 
   /** 監視先を戻したときの読み込み結果も、外部変更と同じ規則で反映する */
@@ -304,6 +340,12 @@ export function App() {
     let unlisten: (() => void) | undefined
 
     const handleClose = (): void => {
+      if (updateInstallLockedRef.current) {
+        platform.forceClose().catch((reason: unknown) => {
+          sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
+        })
+        return
+      }
       if (deferIfComposing(handleClose)) return
       const session = sessionRef.current
       if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
@@ -332,6 +374,7 @@ export function App() {
 
   const openPathNow = useCallback(
     async (path: string, options: { allowDirty?: boolean } = {}) => {
+      if (updateInstallLockedRef.current) return
       if (deferIfComposing(() => void openPathNow(path, options))) return
       const startingSession = sessionRef.current
       const baseline: ContentSnapshot | null = startingSession
@@ -436,6 +479,7 @@ export function App() {
 
   const requestOpen = useCallback(
     (path: string) => {
+      if (updateInstallLockedRef.current) return
       if (deferIfComposing(() => requestOpen(path))) return
       const session = sessionRef.current
       if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
@@ -464,6 +508,7 @@ export function App() {
   /** 保存する。conflict のときは帯を出す */
   const performSave = useCallback(
     async (expectedHash?: string): Promise<boolean> => {
+      if (updateInstallLockedRef.current) return false
       const session = sessionRef.current
       if (!session) return false
       stageApi.current?.endEditing()
@@ -540,6 +585,7 @@ export function App() {
   /** IME変換中は確定とコミットを待ってから保存する */
   const runSave = useCallback(
     (expectedHash?: string): Promise<boolean> => {
+      if (updateInstallLockedRef.current) return Promise.resolve(false)
       const stage = stageApi.current
       if (!stage?.isComposing()) return performSave(expectedHash)
       return new Promise<boolean>((resolve) => {
@@ -792,6 +838,7 @@ export function App() {
 
   const handleExternalNow = useCallback(
     async (change: ExternalChange) => {
+      if (updateInstallLockedRef.current) return
       const session = sessionRef.current
       if (!session || session.path !== change.path) return
       const requestId = ++externalChangeRequest.current
@@ -821,7 +868,14 @@ export function App() {
       if (decision.type === 'reload') {
         themeConfig = await readThemeConfig(session.path)
         await waitForComposition()
-        if (sessionRef.current !== session || requestId !== externalChangeRequest.current) return
+        if (
+          sessionRef.current !== session ||
+          requestId !== externalChangeRequest.current
+        ) return
+        if (updateInstallLockedRef.current) {
+          pendingUpdateExternalRef.current = change
+          return
+        }
         if (editingRef.current) stageApi.current?.endEditing()
         // テーマ設定を読んでいる間に編集や新しいファイル通知があれば、現在状態で判断し直す。
         decision = decide()
@@ -864,6 +918,10 @@ export function App() {
     (change: ExternalChange) => {
       const opening = openingRef.current
       if (sessionRef.current?.path !== change.path && opening?.path !== change.path) return
+      if (updateInstallLockedRef.current) {
+        pendingUpdateExternalRef.current = change
+        return
+      }
       diskObservationRef.current = { generation: diskObservationRef.current.generation + 1, change }
       if (opening?.path === change.path) opening.observation = diskObservationRef.current
       if (sessionRef.current?.path !== change.path) return
@@ -901,6 +959,7 @@ export function App() {
 
   const stageCallbacks: SlideStageCallbacks = {
     onBegin: (label) => {
+      if (updateInstallLockedRef.current) return
       editingRef.current = true
       sync({ detail: label })
     },
@@ -917,6 +976,7 @@ export function App() {
       sync({ detail: strings.status.reasons[code] })
     },
     onCommit: (result: EditSuccess, cursors: EditingCursors) => {
+      if (updateInstallLockedRef.current) return
       const session = sessionRef.current
       if (!session) return
       try {
@@ -929,6 +989,7 @@ export function App() {
       sync()
     },
     onCrossRun: (result: EditSuccess, target: Cursor, before?: Cursor) => {
+      if (updateInstallLockedRef.current) return
       const session = sessionRef.current
       if (!session) return
       try {
@@ -942,7 +1003,10 @@ export function App() {
       editingRef.current = false
       syncDeck({ detail: null })
     },
-    onHistory: (direction) => restore(direction),
+    onHistory: (direction) => {
+      if (updateInstallLockedRef.current) return
+      restore(direction)
+    },
   }
 
   const continuePendingNow = useCallback(
@@ -957,10 +1021,29 @@ export function App() {
         if (!isCurrentOperation()) return
         if (!saved) {
           replacePending(null)
+          if (action.kind === 'update') action.resolve(false)
           return
         }
       }
       if (!isCurrentOperation()) return
+      if (action.kind === 'update') {
+        await waitForComposition()
+        if (!isCurrentOperation()) return
+        stageApi.current?.endEditing()
+        if (mode === 'save') {
+          const session = sessionRef.current
+          if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
+            // 保存中に追加された編集は、更新前にもう一度選択してもらう。
+            replacePending(action)
+            return
+          }
+        }
+        updateInstallLockedRef.current = true
+        setUpdateInstallLocked(true)
+        replacePending(null)
+        action.resolve(true)
+        return
+      }
       if (mode === 'save' && action.kind === 'close') {
         const session = sessionRef.current
         if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
@@ -981,7 +1064,7 @@ export function App() {
         sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
       }
     },
-    [openPathNow, replacePending, runSave, sync],
+    [openPathNow, replacePending, runSave, sync, waitForComposition],
   )
 
   const continuePending = useCallback(
@@ -992,10 +1075,17 @@ export function App() {
     [continuePendingNow, deferIfComposing],
   )
 
+  const cancelPending = useCallback(() => {
+    const action = pendingRef.current
+    if (!action) return
+    replacePending(null)
+    if (action.kind === 'update') action.resolve(false)
+  }, [replacePending])
+
   // キー操作
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing) return
+      if (updateInstallLockedRef.current || event.defaultPrevented || event.isComposing) return
       if (pendingRef.current) return
       const mod = event.ctrlKey || event.metaKey
       if (mod && !event.altKey && event.key.toLowerCase() === 's') {
@@ -1105,7 +1195,7 @@ export function App() {
   const conflictBanner = view.banner?.kind === 'conflict' ? view.banner : null
 
   return (
-    <div class="app">
+    <div class="app" inert={updateInstallLocked}>
       <Toolbar
         theme={settings.theme}
         sidebarCollapsed={sidebarCollapsed}
@@ -1125,6 +1215,8 @@ export function App() {
 
       <UpdateNotice
         checkOnStartup={settingsLoaded ? settings.checkUpdatesOnStartup : null}
+        beforeInstall={beforeUpdateInstall}
+        onInstallFailure={releaseUpdateInstall}
       />
 
       {view.error ? (
@@ -1227,7 +1319,11 @@ export function App() {
             </h2>
             <p class="modal-message">{strings.confirm.message}</p>
             <p class="modal-action">
-              {pending.kind === 'open' ? strings.confirm.openAction : strings.confirm.closeAction}
+              {pending.kind === 'open'
+                ? strings.confirm.openAction
+                : pending.kind === 'update'
+                  ? strings.confirm.updateAction
+                  : strings.confirm.closeAction}
             </p>
             <div class="modal-buttons">
               <button type="button" onClick={() => void continuePending('save')}>
@@ -1236,7 +1332,7 @@ export function App() {
               <button type="button" onClick={() => void continuePending('discard')}>
                 {strings.confirm.discard}
               </button>
-              <button type="button" onClick={() => replacePending(null)}>
+              <button type="button" onClick={cancelPending}>
                 {strings.confirm.cancel}
               </button>
             </div>

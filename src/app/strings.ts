@@ -145,6 +145,7 @@ export const strings = {
     cancel: 'キャンセル',
     openAction: '別のファイルを開く',
     closeAction: 'アプリを閉じる',
+    updateAction: '更新をインストールして再起動する',
   },
 
   errors: {
