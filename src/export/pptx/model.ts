@@ -22,7 +22,7 @@ export interface Paragraph {
   lineHeight: number; spaceBefore: number; spaceAfter: number
   padding: [number, number, number, number]
   wrap?: boolean
-  list?: { level: number; type: string; start: number; indent: number }
+  list?: { level: number; type: string; start: number; indent: number; marker?: { character?: string; fontFace: string; fontSize: number; color: string; transparency: number } }
   fill?: { color: string; transparency: number }
 }
 export interface TableCell {
@@ -87,9 +87,9 @@ export function toTextOptions(p: Paragraph, scale = 1 / 96): PptxGenJS.TextProps
     if (!supportedMarker(list.type)) throw new Error(`Unsupported CSS list-style-type: ${list.type}`)
     if (!Number.isInteger(list.level) || list.level < 0 || list.level > 8) throw new Error(`Unsupported list level: ${list.level}`)
     if (!Number.isInteger(list.start) || list.start < 1 || list.start > 32767) throw new Error(`Unsupported list start: ${list.start}`)
-    if (list.type === 'none') return options
+    if (list.type === 'none' && !list.marker?.character) return options
     options.indentLevel = list.level
-    options.bullet = Object.hasOwn(NUMBER_MARKERS, list.type)
+    options.bullet = list.marker?.character ? { characterCode: list.marker.character.codePointAt(0)!.toString(16), indent: list.indent * pt } : Object.hasOwn(NUMBER_MARKERS, list.type)
       ? { type: 'number', style: NUMBER_MARKERS[list.type], numberStartAt: list.start, indent: list.indent * pt }
       : { characterCode: BULLET_MARKERS[list.type]!, indent: list.indent * pt }
     // The DOM rect starts at the text. Move the shape left to accommodate its marker.

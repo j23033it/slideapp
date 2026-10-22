@@ -17,7 +17,7 @@ export function paintedState(element: Element, pseudo?: string): PaintedState {
   }
   const style = getComputedStyle(element, pseudo), rect = element.getBoundingClientRect()
   if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)) throw new Error('Invalid measured geometry')
-  const generated = !pseudo || (!!style.content && !['none', 'normal'].includes(style.content))
+  const generated = !pseudo || (['::first-letter', '::first-line'].includes(pseudo) && !!element.textContent?.trim()) || (pseudo === '::marker' && getComputedStyle(element).display === 'list-item') || (!!style.content && !['none', 'normal'].includes(style.content))
   const box = (rect.width > 0 || element.tagName === 'BR') && rect.height > 0
   const painted = generated && style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) &&
     (box || (!!pseudo && Number.parseFloat(style.width) > 0 && Number.parseFloat(style.height) > 0))

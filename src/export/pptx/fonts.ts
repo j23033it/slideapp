@@ -9,7 +9,7 @@ const fontList = (css: string) => css.split(',').map(f => f.trim().replace(/^["'
 
 /** Local FontFace lookup excludes downloaded fonts, unlike document.fonts.check(). */
 export async function resolveFonts(root: ParentNode, report: ExportReport): Promise<Map<string, string>> {
-  const families = new Set([...root.querySelectorAll('*')].map(el => getComputedStyle(el).fontFamily))
+  const families = new Set([...root.querySelectorAll('*')].flatMap(el => [getComputedStyle(el).fontFamily, ...(el.matches('li') ? [getComputedStyle(el, '::marker').fontFamily] : [])]).filter(Boolean))
   const localCache = new Map<string, Promise<boolean>>()
   const available = (family: string) => {
     if (!localCache.has(family)) localCache.set(family, new FontFace('__slideapp_local_probe', `local(${JSON.stringify(family)})`).load().then(() => true, () => false))

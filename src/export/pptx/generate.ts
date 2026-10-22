@@ -15,6 +15,12 @@ function listRuns(paragraphs: Paragraph[]): PptxGenJS.TextProps[] {
 // PptxGenJS multiplies bullet.indent by (lvl + 1) for both marL and hanging
 // indentation. OOXML keeps those independent: use the measured text offset and
 // marker gap instead. Only our named list shapes are adjusted, never Markdown.
+const xmlEscape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;')
+function markerXml(p: Paragraph): string | undefined {
+  const marker = p.list?.marker
+  if (!marker) return undefined
+  return `<a:buClr><a:srgbClr val="${marker.color}"><a:alpha val="${Math.round((100 - marker.transparency) * 1000)}"/></a:srgbClr></a:buClr><a:buSzPts val="${Math.round(marker.fontSize * 75)}"/><a:buFont typeface="${xmlEscape(marker.fontFace)}"/>`
+}
 function correctListIndents(xml: string, lists: Map<string, Extract<Part, { kind: 'list' }>>): string {
   let found = 0
   const corrected = xml.replace(/<p:sp>.*?<\/p:sp>/gs, shape => {
@@ -31,8 +37,14 @@ function correctListIndents(xml: string, lists: Map<string, Extract<Part, { kind
         // PptxGenJS emits pPr for each rich run; OOXML permits just one per paragraph.
         if (!first) return ''
         first = false
-        const attrs = ` lvl="${p.list?.level ?? 0}" marL="${Math.round((p.rect.x - list.rect.x) * 9525)}" indent="${p.list && p.list.type !== 'none' ? -Math.round(p.list.indent * 9525) : 0}"`
-        return properties.replace(/ (?:lvl|marL|indent)="[^"]*"/g, '').replace('<a:pPr', `<a:pPr${attrs}`)
+        const attrs = ` lvl="${p.list?.level ?? 0}" marL="${Math.round((p.rect.x - list.rect.x) * 9525)}" indent="${p.list && (p.list.type !== 'none' || p.list.marker?.character) ? -Math.round(p.list.indent * 9525) : 0}"`
+        let result = properties.replace(/ (?:lvl|marL|indent)="[^"]*"/g, '').replace('<a:pPr', `<a:pPr${attrs}`)
+        const marker = markerXml(p)
+        if (marker) {
+          result = result.replace(/<a:bu(?:Clr|SzPct|SzPts|Font|ClrTx|SzTx)\b[^>]*(?:\/>|>.*?<\/a:bu(?:Clr|SzPct|SzPts|Font|ClrTx|SzTx)>)/gs, '')
+          result = result.replace(/(<a:bu(?:Char|AutoNum)\b)/, `${marker}$1`)
+        }
+        return result
       })
     })
     if (index !== list.paragraphs.length) throw new Error('Missing PowerPoint list paragraph')

@@ -5,6 +5,10 @@ import { cellAlignment, pseudoNeedsRaster, rasterReason, type ElementFacts, type
 import { isPainted, paintedState } from './visibility'
 import { nativeStyleReason, pixels, styleApproximations, nativeLetterSpacing, borderColor } from './styles'
 
+import { separateBox as separateBackground, rasterBox, nativeBox } from './paint'
+import { layoutPaintReason, clipsContent, textPseudoReason } from './cssAudit'
+import { measureMarker } from './markers'
+
 const px = pixels
 const BLOCKS = 'h1,h2,h3,h4,h5,h6,marp-h1,marp-h2,marp-h3,marp-h4,marp-h5,marp-h6,p,li,pre,marp-pre,blockquote,header,footer'
 const MATH = 'svg,mjx-container,.katex,.MathJax,marp-auto-scaling'
@@ -38,6 +42,9 @@ function requiredCellAlignment(value: string): NonNullable<TableCell['valign']> 
 }
 
 export function tableShapeReason(table: HTMLTableElement): string | undefined {
+  const tableStyle = getComputedStyle(table)
+  if (tableStyle.borderCollapse === 'separate' && tableStyle.borderSpacing.split(/\s+/).some(n => Number.parseFloat(n) > 0)) return `CSS border-spacing: ${tableStyle.borderSpacing}`
+  if ([...table.querySelectorAll('caption')].some(el => isPainted(el))) return 'Table caption layout'
   const rows = [...table.rows], columns = rows[0]?.cells.length ?? 0
   if (!rows.length || !columns) return 'Empty table grid'
   if ([...table.querySelectorAll('col,colgroup')].some(el => {
@@ -112,7 +119,7 @@ export function collectRuns(element: Element, fonts: Map<string, string>, ownLis
   return runs.filter(r => r.text !== '')
 }
 
-function listInfo(element: HTMLElement): Paragraph['list'] {
+function listInfo(element: HTMLElement, fonts: Map<string, string>): Paragraph['list'] {
   const li = element.matches('li') ? element : element.parentElement?.matches('li') && element === element.parentElement.firstElementChild ? element.parentElement : null
   const list = li?.parentElement
   if (!li || !list?.matches('ul,ol')) return undefined
@@ -125,14 +132,17 @@ function listInfo(element: HTMLElement): Paragraph['list'] {
     if (item === li) break
     number++
   }
-  const style = getComputedStyle(li), type = style.listStyleType
+  const style = getComputedStyle(li)
+  const measured = measureMarker(li, fonts, textScale(element))
+  const type = measured.suppressed ? 'none' : style.listStyleType
   const context = document.createElement('canvas').getContext('2d')
   if (context) context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`
   // CSS outside decimal markers include the period and a space. Reserve the actual
   // glyph advance instead of a fixed .8em, which made Office's marker touch text.
-  const marker = type === 'decimal' ? `${number}. ` : ''
-  const indent = marker && context ? context.measureText(marker).width : px(style.fontSize) * .8
-  return { level, type, start: number, indent }
+  const marker = measured.marker?.character ? measured.text! : type === 'decimal' ? `${number}. ` : ''
+  if (context && measured.marker) context.font = `${measured.marker.fontSize}px ${measured.marker.fontFace}`
+  const indent = marker && context ? context.measureText(marker).width : (measured.marker?.fontSize ?? px(style.fontSize)) * .8
+  return { level, type, start: number, indent, marker: measured.marker }
 }
 
 function paragraph(element: HTMLElement, origin: DOMRect, fonts: Map<string, string>, rect = element.getBoundingClientRect()): Paragraph {
@@ -145,12 +155,12 @@ function paragraph(element: HTMLElement, origin: DOMRect, fonts: Map<string, str
     lineHeight, spaceBefore: 0, spaceAfter: 0,
     // External margins are already present in the absolute DOM coordinates.
     padding: [px(style.paddingTop), px(style.paddingRight), px(style.paddingBottom), px(style.paddingLeft)],
-    fill: separateBackground(element) ? undefined : cssColor(style.backgroundColor), list: listInfo(element),
+    fill: separateBackground(element) ? undefined : cssColor(style.backgroundColor), list: listInfo(element, fonts),
   }
 }
 
 function hasCompositeEffects(style: CSSStyleDeclaration): boolean {
-  return ['transform', 'filter', 'clip-path', 'mask-image', 'backdrop-filter'].some(property => {
+  return ['transform', 'filter', 'clip-path', 'mask-image', 'mask-border-source', '-webkit-mask-box-image-source', 'backdrop-filter'].some(property => {
     const value = style.getPropertyValue(property)
     return value && value !== 'none'
   }) || (!!style.opacity && style.opacity !== '1') || (!!style.mixBlendMode && style.mixBlendMode !== 'normal')
@@ -164,13 +174,6 @@ function pseudoFacts(element: Element, pseudo: string): PseudoFacts {
     background: cssColor(style.backgroundColor).transparency < 100 || style.backgroundImage !== 'none',
     border: ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`border-${side}-width`)) > 0),
     effects: hasEffects(style), sized: Number.parseFloat(style.width) > 0 || Number.parseFloat(style.height) > 0 }
-}
-function separateBackground(element: Element): boolean {
-  if (!element.matches('h1,h2,h3,h4,h5,h6,marp-h1,marp-h2,marp-h3,marp-h4,marp-h5,marp-h6,p,ul,ol,table,blockquote,header,footer')) return false
-  const style = getComputedStyle(element)
-  if (style.backgroundClip === 'text') return false
-  return style.backgroundImage !== 'none' || px(style.borderRadius) > 0 || ['top', 'right', 'bottom', 'left'].some(side =>
-    px(style.getPropertyValue(`border-${side}-width`)) > 0 && !['none', 'hidden', 'solid'].includes(style.getPropertyValue(`border-${side}-style`)))
 }
 function complexReason(element: Element): string | undefined {
   const kind = element.matches('section') ? 'section' : element.matches('table') ? 'table' : element.matches('ul,ol') ? 'list' : 'text'
@@ -186,20 +189,35 @@ function complexReason(element: Element): string | undefined {
       if (el !== element && style.display !== 'none' && rect.width > 0 && rect.height > 0) facts.hiddenLayout = true
       continue
     }
-    const separate = (el === element || kind === 'list' && el.matches('ul,ol')) && separateBackground(el)
+    const separate = separateBackground(el)
     const unsupported = nativeStyleReason(style, el.matches('td,th') ? 'cell' : el.matches('table,thead,tbody,tfoot,tr,col,colgroup') ? 'structural' : el.matches('li,ul,ol') ? 'list' : kind === 'section' ? 'section' : 'text', separate)
     if (unsupported) return unsupported
-    facts.effects ||= hasEffects(style, kind === 'section')
+    const layout = layoutPaintReason(style) ?? clipsContent(el) ?? textPseudoReason(el)
+    if (layout) return layout
+    if (el.matches('li')) {
+      // Validate before committing a native list; measurement resolves its font later.
+      const families = new Map([[style.fontFamily, style.fontFamily], [getComputedStyle(el, '::marker').fontFamily, 'marker']])
+      try { measureMarker(el, families, 1) } catch (error) { return String(error) }
+    }
+    if (el !== element) for (const pseudo of ['::before', '::after']) {
+      const generated = getComputedStyle(el, pseudo)
+      if (pseudoNeedsRaster(pseudoFacts(el, pseudo)) && !['absolute', 'fixed'].includes(generated.position)) return `CSS generated inline/nested layout: ${pseudo}`
+    }
+    if (el !== element && ((style.position && style.position !== 'static') || (style.cssFloat && style.cssFloat !== 'none'))) return `CSS inline/nested positioning: ${style.position} / ${style.cssFloat}`
+    facts.effects ||= hasEffects(style, kind === 'section' || separate)
     if (kind === 'section') continue
     facts.math ||= el.matches(MATH)
     facts.emoji ||= [...el.childNodes].some(node => node.nodeType === Node.TEXT_NODE && /\p{Extended_Pictographic}/u.test(node.textContent ?? ''))
     facts.background ||= (!separate && style.backgroundImage !== 'none') || style.backgroundClip === 'text'
     facts.verticalText ||= !!style.writingMode && style.writingMode !== 'horizontal-tb'
-    facts.rounded ||= !separate && px(style.borderRadius) > 0
     facts.customMarker ||= style.listStyleImage !== 'none' || (el.matches('ol') && el.hasAttribute('reversed'))
     const inline = el !== element && (style.display === 'inline' || style.display === 'inline-block')
-    facts.inlineDecoration ||= inline && (cssColor(style.backgroundColor).transparency < 100 ||
-      ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`padding-${side}`)) > 0 || px(style.getPropertyValue(`border-${side}-width`)) > 0))
+    if (el !== element && style.display === 'inline-block') return 'CSS inline-block layout'
+    if (inline && ['top', 'right', 'bottom', 'left'].some(side => Number.parseFloat(style.getPropertyValue(`margin-${side}`)) !== 0 && style.getPropertyValue(`margin-${side}`))) return 'CSS inline margin layout'
+    if (style.whiteSpace.startsWith('pre') && [...el.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent?.includes('\t'))) return 'CSS preserved tab layout'
+    facts.inlineDecoration ||= inline && ((!separate && cssColor(style.backgroundColor).transparency < 100) ||
+      ['top', 'right', 'bottom', 'left'].some(side => px(style.getPropertyValue(`padding-${side}`)) > 0 || (!separate && px(style.getPropertyValue(`border-${side}-width`)) > 0)))
+    if (['flex', 'inline-flex', 'grid', 'inline-grid'].includes(style.display)) return `CSS text layout display: ${style.display}`
     if (el !== element && style.whiteSpace !== getComputedStyle(element).whiteSpace) return `Mixed CSS white-space: ${style.whiteSpace}`
     const hasText = [...el.childNodes].some(node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())
     facts.textTransform ||= hasText && !!style.textTransform && style.textTransform !== 'none'
@@ -239,7 +257,9 @@ function cellBorder(cell: HTMLTableCellElement, side: string, table: HTMLTableEl
   }
   let result: PptxGenJS.BorderProps = { type: 'none', color: 'FFFFFF', pt: 0 }
   for (const node of candidates) {
-    const style = getComputedStyle(node), width = px(style.getPropertyValue(`border-${side}-width`))
+    const style = getComputedStyle(node)
+    if (separateBackground(node) && rasterBox(style, node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup'))) continue
+    const width = px(style.getPropertyValue(`border-${side}-width`))
     const type = style.getPropertyValue(`border-${side}-style`), color = style.getPropertyValue(`border-${side}-color`)
     if (type === 'hidden') return { type: 'none', color: 'FFFFFF', pt: 0 }
     if (type !== 'solid' || width <= Number(result.pt) / .75 || cssColor(color).transparency === 100) continue
@@ -255,8 +275,8 @@ export function measureTable(table: HTMLTableElement, origin: DOMRect, fonts: Ma
   const result: TableCell[][] = rows.map(row => [...row.cells].map(cell => {
     const style = getComputedStyle(cell)
     const borders = ['top', 'right', 'bottom', 'left'].map(side => cellBorder(cell, side, table)) as TableCell['border']
-    let fill = cssColor(style.backgroundColor)
-    if (fill.transparency === 100) fill = cssColor(getComputedStyle(row).backgroundColor)
+    const fill = separateBackground(cell) ? { color: 'FFFFFF', transparency: 100 } : cssColor(style.backgroundColor)
+    // Row and group paint is separated beneath the native table. Cells retain their own alpha.
     return { runs: collectRuns(cell, fonts), style: paragraph(cell, origin, fonts), fill, border: borders, valign: requiredCellAlignment(style.verticalAlign) }
   }))
   const columnWidths = [...rows[0]!.cells].map((cell, column) => Math.max(cell.getBoundingClientRect().width,
@@ -285,6 +305,8 @@ export function measureList(list: HTMLElement, origin: DOMRect, fonts: Map<strin
       if (p.runs.length) { validatePart({ kind: 'text', paragraph: p }); paragraphs.push(p) }
     }
   }
+  // A single textbox cannot interleave a later item's background with earlier text.
+  for (let i = 1; i < paragraphs.length; i++) if (paragraphs[i]!.rect.y < paragraphs[i - 1]!.rect.y + paragraphs[i - 1]!.rect.height - 1) throw new Error('Overlapping list item paint order')
   // Loose lists can have continuation paragraphs after a nested list.
   paragraphs.sort((a, b) => a.rect.y - b.rect.y)
   for (let index = 0; index < paragraphs.length - 1; index++) {
@@ -338,7 +360,18 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
     } catch (error) { reportElementError(report, slideIndex + 1, el.tagName.toLowerCase(), `${reason}; rasterization failed: ${error instanceof Error ? error.message : String(error)}`); return false }
   }
   // Only section compositing effects require a whole-slide fallback.
-  const sectionReason = sections.map(section => { try { return complexReason(section) } catch (error) { return String(error) } }).find(Boolean)
+  const sectionReason = sections.map(section => { try {
+    for (const node of [section, ...section.querySelectorAll('*')]) {
+      try { if (!isPainted(node)) continue } catch { continue }
+      const s = getComputedStyle(node)
+      for (const pseudo of ['::before', '::after']) {
+        if (!isPainted(node, pseudo)) continue
+        const paint = getComputedStyle(node, pseudo)
+        if ((paint.zIndex && !['auto', '0'].includes(paint.zIndex) && (node !== section || (pseudo === '::before' ? Number(paint.zIndex) > 0 : Number(paint.zIndex) < 0))) || (paint.mixBlendMode && paint.mixBlendMode !== 'normal') || (paint.backdropFilter && paint.backdropFilter !== 'none')) return `CSS ${pseudo} stacking/compositing`
+      }
+      if ((node !== section && s.zIndex && !['auto', '0'].includes(s.zIndex)) || (s.mixBlendMode && s.mixBlendMode !== 'normal') || (s.backdropFilter && s.backdropFilter !== 'none')) return `CSS stacking/compositing: z-index=${s.zIndex}; mix-blend-mode=${s.mixBlendMode}; backdrop-filter=${s.backdropFilter}`
+    }
+    return complexReason(section) } catch (error) { return String(error) } }).find(Boolean)
   if (sectionReason) {
     if (await fallback(svg as unknown as HTMLElement, `Slide: ${sectionReason}`)) return { width: viewBox.width, height: viewBox.height, background, parts, notes }
   }
@@ -378,8 +411,10 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
     for (const node of [element, ...element.querySelectorAll('*')]) {
       if (approximationSeen.has(node) || rasterized.has(node) || !isPainted(node)) continue
       approximationSeen.add(node)
-      for (const approximation of styleApproximations(getComputedStyle(node))) {
-        ;(report.approximatedElements ??= []).push({ slide: slideIndex + 1, element: node.tagName.toLowerCase(), ...approximation })
+      const styles = [[node.tagName.toLowerCase(), getComputedStyle(node)], ...(node.matches('li') ? [[`${node.tagName.toLowerCase()}::marker`, getComputedStyle(node, '::marker')]] : [])] as [string, CSSStyleDeclaration][]
+      for (const [elementName, style] of styles) for (const approximation of styleApproximations(style)) {
+        if (approximation.property.startsWith('border-') && separateBackground(node) && rasterBox(style, node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup'))) continue
+        ;(report.approximatedElements ??= []).push({ slide: slideIndex + 1, element: elementName, ...approximation })
       }
     }
   }
@@ -435,6 +470,11 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       for (const child of element.children) await walk(child as HTMLElement)
       return
     }
+    const ownStyle = getComputedStyle(element)
+    const ownReason = layoutPaintReason(ownStyle) ?? clipsContent(element)
+    if (ownReason || hasEffects(ownStyle, separateBackground(element))) {
+      await fallback(element, ownReason ?? 'CSS transform, filter, shadow or opacity'); return
+    }
     if (element.matches('ul,ol')) {
       const reason = complexReason(element)
       if (reason) await fallback(element, reason)
@@ -456,25 +496,11 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       if (element.dataset.pptxRasterReason) report.rasterizedElements.push({ slide: slideIndex + 1, element: 'img', reason: element.dataset.pptxRasterReason })
       return
     }
-    if (element.matches(BLOCKS) || element.dataset.pptxPseudo === 'true') {
+    if (element.matches(BLOCKS) || element.dataset.pptxPseudo === 'true' || (!element.querySelector(`${BLOCKS},ul,ol,table,figure`) && [...element.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim()))) {
       const reason = complexReason(element)
       if (reason) { await fallback(element, reason); return }
       const children = [...element.children] as HTMLElement[]
-      const rect = relativeRect(element.getBoundingClientRect(), origin)
-      const style = getComputedStyle(element)
-      for (const side of separateBackground(element) ? [] : ['top', 'right', 'bottom', 'left']) {
-        const thickness = px(style.getPropertyValue(`border-${side}-width`))
-        const borderStyle = style.getPropertyValue(`border-${side}-style`)
-        const color = cssColor(style.getPropertyValue(`border-${side}-color`))
-        if (thickness <= 0 || ['none', 'hidden'].includes(borderStyle) || color.transparency === 100) continue
-        const vertical = side === 'left' || side === 'right'
-        parts.push({ kind: 'line', x: rect.x + (side === 'right' ? rect.width - thickness / 2 : vertical ? thickness / 2 : 0),
-          y: rect.y + (side === 'bottom' ? rect.height - thickness / 2 : vertical ? 0 : thickness / 2),
-          width: vertical ? 0 : rect.width, height: vertical ? rect.height : 0, color: borderColor(element, style.getPropertyValue(`border-${side}-color`)), points: thickness * .75 })
-      }
       if (element.matches('blockquote') || (element.matches('li') && children.some(c => c.matches('p')))) {
-        const fill = cssColor(style.backgroundColor)
-        if (fill.transparency < 100 && !separateBackground(element)) parts.push({ kind: 'box', rect, fill })
         for (const child of children) await walk(child)
         return
       }
@@ -493,6 +519,8 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       return
     }
     if (element.matches(MATH) || element.namespaceURI === 'http://www.w3.org/2000/svg') { await fallback(element, 'Math or SVG'); return }
+    const wrapperReason = textPseudoReason(element)
+    if (wrapperReason || [...element.childNodes].some(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim())) { await fallback(element, wrapperReason ?? 'Mixed wrapper text layout'); return }
     for (const child of element.children) await walk(child as HTMLElement)
   }
   const walk = async (element: HTMLElement): Promise<void> => {
@@ -505,9 +533,17 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       if (!rasterFallback && parts.slice(start).some(part => ['text', 'table', 'list'].includes(part.kind))) recordApproximations(element)
       if (!rasterFallback && isPainted(element)) {
         const nativeEnd = parts.length
-        const backgroundNodes = element.matches('ul,ol') ? [element, ...element.querySelectorAll('ul,ol')] : [element]
+        const backgroundNodes = element.matches(`${BLOCKS},ul,ol,table`) ? [element, ...element.querySelectorAll('*')] : [element]
         for (const node of backgroundNodes.filter(separateBackground)) {
+          if (rasterized.has(node) || decorationSeen.get(node)?.has('background')) continue
+          const seen = decorationSeen.get(node) ?? new Set<string>()
+          seen.add('background'); decorationSeen.set(node, seen)
           try {
+            if (!rasterBox(getComputedStyle(node), node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup')) && getComputedStyle(node).display !== 'inline') {
+              const box = nativeBox(node, relativeRect(node.getBoundingClientRect(), origin))
+              parts.push(...(node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup') ? box.filter(p => p.kind === 'box') : box))
+              continue
+            }
             const image = await rasterizeBackground(node, svg, fontCSS)
             if (image) {
               const part: Part = { kind: 'image', rect: relativeRect(image.rect, origin), data: image.data }

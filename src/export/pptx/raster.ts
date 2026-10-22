@@ -46,11 +46,11 @@ export async function inlineImages(root: ParentNode, resolveImage = imageDataUrl
         el.removeAttribute('srcset')
         await el.decode()
       }
-      for (const pseudo of ['', '::before', '::after']) {
+      for (const pseudo of ['', '::before', '::after', '::marker', '::first-letter', '::first-line']) {
         const style = getComputedStyle(el, pseudo || null)
         if (!isPainted(el, pseudo || undefined)) continue
         const declarations: string[] = []
-        for (const property of ['content', 'background-image', 'mask-image', '-webkit-mask-image', 'border-image-source']) {
+        for (const property of ['content', 'background-image', 'mask-image', '-webkit-mask-image', 'mask-border-source', '-webkit-mask-box-image-source', 'border-image-source', 'list-style-image']) {
           if (!pseudo && property === 'content') continue
           const value = style.getPropertyValue(property)
           let next = value
@@ -213,7 +213,11 @@ async function paintInSlide(element: Element, slide: SVGSVGElement, fontCSS: str
   const root = slide.getRootNode() as Document | ShadowRoot
   if (pseudo) {
     const suppressed = '[data-pptx-pseudo-suppressed]'.repeat(4)
-    rules.push(`${suppressed}::before,${suppressed}::after{visibility:hidden!important}`)
+    rules.push(`${suppressed}::before,${suppressed}::after,${suppressed}::marker{visibility:hidden!important}`)
+    if (pseudo === 'background') {
+      const target = '[data-pptx-pseudo-target]'.repeat(5)
+      rules.push(`${target}::first-letter,${target}::first-line{color:transparent!important;-webkit-text-fill-color:transparent!important;text-decoration-color:transparent!important;text-shadow:none!important}`)
+    }
     if (pseudo !== 'background') {
       const computed = getComputedStyle(element, pseudo)
       const hiddenText = hidePseudoText ? 'color:transparent!important;-webkit-text-fill-color:transparent!important;text-decoration-color:transparent!important;' : ''
