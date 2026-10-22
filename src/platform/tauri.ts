@@ -1,7 +1,8 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
-import type { AppSettings, OpenedFile, Platform, ThemeConfig } from './types'
+import { DEFAULT_SETTINGS, type AppSettings, type OpenedFile, type Platform, type ThemeConfig } from './types'
+import { checkForUpdate, downloadAndInstall, relaunch } from './update'
 
 /**
  * Tauri 2 のコマンドを呼ぶ実装。
@@ -34,12 +35,22 @@ export const tauriPlatform: Platform = {
   },
 
   settingsGet(): Promise<AppSettings> {
-    return invoke<AppSettings>('settings_get')
+    // Rust側がまだ知らない設定項目があっても既定値で埋める
+    return invoke<Partial<AppSettings>>('settings_get').then((loaded) => ({
+      ...DEFAULT_SETTINGS,
+      ...loaded,
+    }))
   },
 
   settingsSet(settings: AppSettings): Promise<void> {
     return invoke<void>('settings_set', { settings })
   },
+
+  checkForUpdate,
+
+  downloadAndInstall,
+
+  relaunch,
 
   convertFileSrc(absolutePath: string): string {
     return convertFileSrc(absolutePath)
