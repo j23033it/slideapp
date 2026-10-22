@@ -15,6 +15,7 @@ export interface ToolbarProps {
   onToggleSidebar: () => void
   onCycleTheme: () => void
   onOpenSettings: () => void
+  onCheckUpdates: () => void
 }
 
 const THEME_ICON: Record<ThemePreference, string> = {
@@ -37,6 +38,7 @@ export function Toolbar({
   onToggleSidebar,
   onCycleTheme,
   onOpenSettings,
+  onCheckUpdates,
 }: ToolbarProps) {
   const sidebarTitle = sidebarCollapsed
     ? strings.toolbar.sidebarToggleShow
@@ -98,6 +100,14 @@ export function Toolbar({
 
       <button type="button" class="toolbar-button" title={strings.toolbar.exportPptxTitle} disabled>
         {strings.toolbar.exportPptx}
+      </button>
+      <button
+        type="button"
+        class="toolbar-button"
+        title={strings.toolbar.checkUpdatesTitle}
+        onClick={onCheckUpdates}
+      >
+        {strings.toolbar.checkUpdates}
       </button>
 
       <div class="toolbar-spacer" />

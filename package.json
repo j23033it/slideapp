@@ -31,6 +31,7 @@
     "happy-dom": "20.14.6"
   },
   "overrides": {
-    "markdown-it": "14.3.3"
+    "markdown-it": "14.3.3",
+    "@xmldom/xmldom": "0.9.12"
   }
 }

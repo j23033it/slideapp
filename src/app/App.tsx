@@ -9,6 +9,7 @@ import {
   DEFAULT_SETTINGS,
   platform,
   type AppSettings,
+  type ThemeConfig,
   type ThemePreference,
 } from '../platform'
 import { basename, dirname } from '../platform/paths'
@@ -21,6 +22,7 @@ import { SlideStage, type SlideStageCallbacks } from './SlideStage'
 import type { EditSuccess, EditingCursors, StageFocus } from './stageEditor'
 import { StatusBar } from './StatusBar'
 import { strings } from './strings'
+import { UPDATE_CHECK_EVENT, UpdateNotice } from './UpdateNotice'
 import {
   decideExternalChange,
   diskChangedSinceBanner,
@@ -46,6 +48,7 @@ type Banner =
   | { kind: 'conflict'; text: string; hasBom: boolean; hash: string }
   | { kind: 'removed'; path: string }
   | { kind: 'unreadable'; path: string; message: string }
+  | { kind: 'themeWarnings'; warnings: string[] }
   | { kind: 'info'; message: string }
 
 type PendingAction = { kind: 'open'; path: string } | { kind: 'close' }
@@ -95,6 +98,23 @@ function errorMessage(error: unknown): string {
   return strings.errors.unknown
 }
 
+async function readThemeConfig(path: string): Promise<ThemeConfig> {
+  try {
+    return await platform.readThemeConfig(path)
+  } catch (reason) {
+    return { themes: [], warnings: [strings.banner.themeConfigReadFailed(errorMessage(reason))] }
+  }
+}
+
+function registerThemeConfig(renderer: MarpRenderer, config: ThemeConfig): string[] {
+  const registration = renderer.setThemes(config.themes)
+  return [...config.warnings, ...registration.warnings]
+}
+
+function themeWarningsBanner(warnings: string[]): Banner | null {
+  return warnings.length > 0 ? { kind: 'themeWarnings', warnings } : null
+}
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   if (target.isContentEditable) return true
@@ -110,6 +130,8 @@ function bannerMessage(banner: Banner): string {
       return strings.banner.removed(basename(banner.path))
     case 'unreadable':
       return strings.banner.unreadable(basename(banner.path), banner.message)
+    case 'themeWarnings':
+      return strings.banner.themeWarnings(banner.warnings)
     case 'info':
       return banner.message
   }
@@ -134,6 +156,7 @@ export function App() {
   const bannerRef = useRef<Banner | null>(null)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
+  const externalChangeRequest = useRef(0)
 
   rendererRef.current = renderer
   currentRef.current = view.current
@@ -316,6 +339,7 @@ export function App() {
         // Rust の open_file は成功時に監視を新しいファイルへ切り替える。
         // ここで stopWatching すると、開くのに失敗したとき元の監視が止まったままになる。
         const file = await platform.openFile(path)
+        const themeConfig = await readThemeConfig(path)
         await waitForComposition()
         const existing = sessionRef.current
         if (existing) {
@@ -338,6 +362,7 @@ export function App() {
         }
         const baseDir = dirname(path)
         const model = new DocumentModel(file.text, { hasBom: file.hasBom, diskHash: file.hash })
+        const themeWarnings = registerThemeConfig(rendererRef.current, themeConfig)
         const { analysis, deck } = rendererRef.current.analyze(model.text, baseDir)
         const nextSession: EditorSession = {
           path,
@@ -359,7 +384,7 @@ export function App() {
           current: 0,
           total: deck.slides.length,
           detail: null,
-          banner: null,
+          banner: themeWarningsBanner(themeWarnings),
           error: null,
           busy: false,
           canUndo: false,
@@ -519,9 +544,15 @@ export function App() {
   )
 
   const applyReload = useCallback(
-    (raw: string, hash: string, hasBom: boolean) => {
-      const session = sessionRef.current
-      if (!session) return
+    (
+      session: EditorSession,
+      raw: string,
+      hash: string,
+      hasBom: boolean,
+      themeConfig: ThemeConfig,
+    ): string[] | null => {
+      if (sessionRef.current !== session) return null
+      const themeWarnings = registerThemeConfig(session.renderer, themeConfig)
       session.model.reload(raw, hash, hasBom)
       session.savedSnapshot = { text: raw, hasBom }
       session.conflict = false
@@ -530,7 +561,13 @@ export function App() {
       session.deck = deck
       session.focus = undefined
       const current = slideAfterReload(currentRef.current, deck.slides.length)
-      syncDeck({ current, detail: null, banner: null, error: null })
+      syncDeck({
+        current,
+        detail: null,
+        banner: themeWarningsBanner(themeWarnings),
+        error: null,
+      })
+      return themeWarnings
     },
     [syncDeck],
   )
@@ -568,6 +605,13 @@ export function App() {
       })
       const plan = planConflictChoice(choice, { hash: disk.hash })
 
+      // テーマ設定の読み込み中に編集が進む可能性があるため、設定取得後に再確認する。
+      const themeConfig = plan.reloadDisk ? await readThemeConfig(session.path) : null
+      if (plan.reloadDisk) {
+        await waitForComposition()
+        if (sessionRef.current !== session) return
+      }
+
       // 読み込み待ちの間に確定した入力があれば、選択時点の内容を
       // 別名保存・再読み込みで上書きしない。最新の競合状態を残して選び直してもらう。
       if (
@@ -601,8 +645,15 @@ export function App() {
             sync({ busy: false, banner: conflictBanner() })
             return
           }
-          applyReload(disk.text, disk.hash, disk.hasBom)
-          sync({ banner: { kind: 'info', message: strings.banner.mineSaved(saved) }, busy: false })
+          if (!themeConfig) return
+          const themeWarnings = applyReload(session, disk.text, disk.hash, disk.hasBom, themeConfig)
+          if (themeWarnings === null) return
+          sync({
+            banner:
+              themeWarningsBanner(themeWarnings) ??
+              { kind: 'info', message: strings.banner.mineSaved(saved) },
+            busy: false,
+          })
         }
         return
       }
@@ -617,7 +668,9 @@ export function App() {
           sync({ busy: false, banner: conflictBanner() })
           return
         }
-        applyReload(disk.text, disk.hash, disk.hasBom)
+        if (!themeConfig) return
+        const themeWarnings = applyReload(session, disk.text, disk.hash, disk.hasBom, themeConfig)
+        if (themeWarnings === null) return
         sync({ busy: false })
         return
       }
@@ -693,9 +746,10 @@ export function App() {
   )
 
   const handleExternalNow = useCallback(
-    (change: ExternalChange) => {
+    async (change: ExternalChange) => {
       const session = sessionRef.current
       if (!session || session.path !== change.path) return
+      const requestId = ++externalChangeRequest.current
       if (change.type === 'changed') {
         // 読み直せたので、削除・読み取り不能の帯は用済み
         setView((previous) =>
@@ -705,17 +759,29 @@ export function App() {
         )
       }
       if (editingRef.current) stageApi.current?.endEditing()
-      const state = editorSessionSaveState(session)
-      const decision = decideExternalChange(
-        {
+
+      const decide = () => {
+        const state = editorSessionSaveState(session)
+        return decideExternalChange({
           path: session.path,
           dirty: hasUnsavedChanges(state),
           conflict: state === 'conflict',
           currentText: session.model.serialize(),
           diskHash: session.model.diskHash,
-        },
-        change,
-      )
+        }, change)
+      }
+
+      let decision = decide()
+      let themeConfig: ThemeConfig | null = null
+      if (decision.type === 'reload') {
+        themeConfig = await readThemeConfig(session.path)
+        await waitForComposition()
+        if (sessionRef.current !== session || requestId !== externalChangeRequest.current) return
+        if (editingRef.current) stageApi.current?.endEditing()
+        // テーマ設定を読んでいる間に編集や新しいファイル通知があれば、現在状態で判断し直す。
+        decision = decide()
+      }
+
       switch (decision.type) {
         case 'ignore':
           return
@@ -727,7 +793,8 @@ export function App() {
           sync()
           return
         case 'reload':
-          applyReload(decision.text, decision.hash, decision.hasBom)
+          if (!themeConfig) return
+          applyReload(session, decision.text, decision.hash, decision.hasBom, themeConfig)
           return
         case 'conflict':
           session.model.markConflict()
@@ -744,14 +811,14 @@ export function App() {
           return
       }
     },
-    [applyReload, sync],
+    [applyReload, sync, waitForComposition],
   )
 
   /** IME変換中は確定とコミットの後に外部変更を反映する */
   const handleExternal = useCallback(
     (change: ExternalChange) => {
       if (deferIfComposing(() => handleExternalNow(change))) return
-      handleExternalNow(change)
+      void handleExternalNow(change)
     },
     [deferIfComposing, handleExternalNow],
   )
@@ -1003,6 +1070,11 @@ export function App() {
         onToggleSidebar={() => updateSettings({ sidebarCollapsed: !sidebarCollapsed })}
         onCycleTheme={cycleTheme}
         onOpenSettings={() => setSettingsOpen((open) => !open)}
+        onCheckUpdates={() => window.dispatchEvent(new Event(UPDATE_CHECK_EVENT))}
+      />
+
+      <UpdateNotice
+        checkOnStartup={settingsLoaded ? settings.checkUpdatesOnStartup : null}
       />
 
       {view.error ? (
@@ -1089,6 +1161,9 @@ export function App() {
         <SettingsPanel
           settings={settings}
           onThemeChange={(theme) => updateSettings({ theme })}
+          onCheckUpdatesOnStartupChange={(checkUpdatesOnStartup) =>
+            updateSettings({ checkUpdatesOnStartup })
+          }
           onResetSidebarWidth={() => updateSettings({ sidebarWidth: DEFAULT_SETTINGS.sidebarWidth })}
           onClose={() => setSettingsOpen(false)}
         />

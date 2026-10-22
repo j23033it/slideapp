@@ -93,13 +93,17 @@ describe('chooseConflictNow', () => {
     const read = body.indexOf('const disk = await platform.openFile(session.path)')
     const wait = body.indexOf('await waitForComposition()', read)
     const check = body.indexOf('planMineCopyReload(snapshot', wait)
-    const reload = body.indexOf('applyReload(disk.text, disk.hash, disk.hasBom)')
+    const themeConfig = body.indexOf('await readThemeConfig(session.path)')
+    const reload = body.indexOf('applyReload(session, disk.text, disk.hash, disk.hasBom, themeConfig)')
+    const write = body.indexOf('await writeMineCopy(session, snapshot)')
+    const waitAfterWrite = body.indexOf('await waitForComposition()', write)
 
     expect(wait).toBeGreaterThan(read)
+    expect(themeConfig).toBeGreaterThan(wait)
     expect(check).toBeGreaterThan(wait)
+    expect(reload).toBeGreaterThan(themeConfig)
     expect(check).toBeLessThan(reload)
-    expect(body.indexOf('await writeMineCopy(session, snapshot)')).toBeLessThan(
-      body.indexOf('await waitForComposition()', wait + 1),
-    )
+    expect(write).toBeGreaterThan(themeConfig)
+    expect(waitAfterWrite).toBeGreaterThan(write)
   })
 })

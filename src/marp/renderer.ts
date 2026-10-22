@@ -2,6 +2,7 @@ import { Marp } from '@marp-team/marp-core'
 
 import { createEngine, type Analysis, type EditingEngine } from '../editing'
 import { installImagePathRule, rewriteCssUrls, type MarkdownItLike } from './urls'
+import { registerThemes, type ThemeCss, type ThemeRegistrationResult } from './themes'
 
 /** 1デッキ分の描画結果 */
 export interface RenderedDeck {
@@ -110,6 +111,14 @@ export class MarpRenderer {
   /** 編集エンジン（`applyRunEdit` はこのインスタンスの最新解析に対して動く） */
   get editing(): EditingEngine {
     return this.engine
+  }
+
+  /** 現在のファイル用のカスタムテーマを登録し、描画キャッシュを無効にする */
+  setThemes(themes: readonly ThemeCss[]): ThemeRegistrationResult {
+    const result = registerThemes(this.marp, themes, this.toAssetUrl)
+    this.lastKey = null
+    this.last = null
+    return result
   }
 
   /** 解析と描画を同時に行う。同じ入力・基準フォルダなら前回の結果を返す */
