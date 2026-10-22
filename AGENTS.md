@@ -1,4 +1,4 @@
-# Slidemark（仮称）
+# SlideApp
 
 Marp形式のMarkdownを、スライドのプレビュー上で直接編集するWindows向けデスクトップアプリ。Tauri 2で作る。
 

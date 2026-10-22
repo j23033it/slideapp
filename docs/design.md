@@ -110,7 +110,7 @@ slideapp/
 
 ### 5.2 原子的保存
 
-1. 同じフォルダに一時ファイル `.<元の名前>.slidemark.tmp` を作って書き込み、`flush` する
+1. 同じフォルダに一時ファイル `.<元の名前>.slideapp.tmp` を作って書き込み、`flush` する
 2. Windowsの `ReplaceFileW` で元ファイルと置き換える（元ファイルの属性・ACLを引き継ぐ）
 3. 置き換えに失敗した場合は一時ファイルを消し、エラーを表示する。元ファイルは変わらない
 
@@ -286,7 +286,7 @@ PowerPointの部品で再現できない要素（数式、絵文字、SVG、グ�
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- ウィンドウのタイトル：`deck.md ● — Slidemark`（未保存時に `●`）
+- ウィンドウのタイトル：`deck.md ● — SlideApp`（未保存時に `●`）
 - スライド一覧：幅180px（ドラッグで変更可、折りたたみ時は0px）。クリックで移動、選択中は枠で強調
 - スライド表示：余白16pxを残して、縦横比を保ったまま最大に表示
 - ステータスバー：ファイルのパス（クリックでエクスプローラーで表示）、保存状態、ページ番号、編集中の要素の種類または読み取り専用の理由
@@ -310,8 +310,9 @@ PowerPointの部品で再現できない要素（数式、絵文字、SVG、グ�
 
 ## 10. 配布と更新
 
+- アプリ識別子は `io.github.j23033it.slideapp`、リポジトリは https://github.com/j23033it/slideapp（公開）
 - GitHub Actionsで、タグ `v*` のpush時に `tauri-action` でNSISインストーラー（`currentUser` インストール）、更新用の署名、`latest.json` を作り、GitHub Releasesの下書きとして公開する
-- アプリは `https://github.com/<owner>/<repo>/releases/latest/download/latest.json` を見て更新を確認する
+- アプリは `https://github.com/j23033it/slideapp/releases/latest/download/latest.json` を見て更新を確認する
 - 更新の署名鍵（`TAURI_SIGNING_PRIVATE_KEY`）はGitHubのシークレットに置き、リポジトリには入れない
 - Windowsのコード署名（Authenticode）は当面行わない。初回インストール時にSmartScreenの警告が出ることをREADMEに書く
 - 版番号は `package.json`、`Cargo.toml`、`tauri.conf.json` で一致させ、確認スクリプトでCIが検査する
