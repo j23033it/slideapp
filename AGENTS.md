@@ -19,6 +19,7 @@ Marp形式のMarkdownを、スライドのプレビュー上で直接編集す�
 - 開発起動：`npm run tauri dev`
 - テスト：`npm test`（Vitest）、`cargo test --manifest-path src-tauri/Cargo.toml`
 - 型検査：`npm run typecheck`
+- 画面上の編集（改行・削除・選択・IME）を直したら、`node scripts/webview2-editing.mjs --launch`で実機のWebView2でも確かめる
 
 ## 並列開発
 
