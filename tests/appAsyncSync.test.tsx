@@ -236,6 +236,64 @@ describe('App asynchronous disk callbacks', () => {
     },
   )
 
+  it.each(['read-pending', 'composition-wait'] as const)(
+    'keeps the newest disk version during watch restoration after a failed open (%s)', async (timing) => {
+      await flush(() => captured.stage!.callbacks.onHistory('undo'))
+      expect(editorSessionSaveState(session())).toBe('clean')
+      const nextPath = 'C:\\deck\\next.md'
+      const restored = deferred<ReturnType<typeof disk>>()
+      vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
+      vi.mocked(platform.openFile)
+        .mockRejectedValueOnce(new Error('cannot open next file'))
+        .mockReturnValueOnce(restored.promise)
+      await flush(() => click(strings.toolbar.open))
+      expect(platform.openFile).toHaveBeenLastCalledWith(path)
+
+      const compositionActions: (() => void)[] = []
+      if (timing === 'composition-wait') {
+        captured.stage!.apiRef.current = {
+          endEditing: () => {},
+          isComposing: () => true,
+          deferWhileComposing: (action) => { compositionActions.push(action); return true },
+        }
+        await flush(() => restored.resolve(disk('external-v1')))
+        expect(compositionActions).toHaveLength(1)
+      }
+      await flush(() => events.changed({ path, ...disk('external-v2'), hasBom: true }))
+      if (timing === 'composition-wait') {
+        captured.stage!.apiRef.current = null
+        await flush(() => compositionActions.forEach((action) => action()))
+      } else {
+        expect(session().model.serialize()).toBe('external-v2')
+        await flush(() => restored.resolve(disk('external-v1')))
+      }
+
+      expect(session().path).toBe(path)
+      expect(session().model.serialize()).toBe('external-v2')
+      expect(session().model.hasBom).toBe(true)
+      expect(session().model.diskHash).toBe('external-v2')
+      expect(session().savedSnapshot).toEqual({ text: 'external-v2', hasBom: true })
+      expect(editorSessionSaveState(session())).toBe('clean')
+    },
+  )
+
+  it('applies the restored watch read after a failed open when no newer observation arrived', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    vi.mocked(platform.pickMarkdownFile).mockResolvedValue('C:\\deck\\next.md')
+    vi.mocked(platform.openFile)
+      .mockRejectedValueOnce(new Error('cannot open next file'))
+      .mockResolvedValueOnce(disk('external-v1'))
+
+    await flush(() => click(strings.toolbar.open))
+
+    expect(platform.openFile).toHaveBeenLastCalledWith(path)
+    expect(session().path).toBe(path)
+    expect(session().model.serialize()).toBe('external-v1')
+    expect(session().model.diskHash).toBe('external-v1')
+    expect(session().savedSnapshot).toEqual({ text: 'external-v1', hasBom: false })
+    expect(editorSessionSaveState(session())).toBe('clean')
+  })
+
   it.each(['changed', 'removed', 'unreadable'] as const)(
     'preserves a newer %s notification delivered before save success', async (type) => {
       const save = deferred<SaveOutcome>()
