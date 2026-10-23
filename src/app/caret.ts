@@ -136,8 +136,20 @@ export function selectionInRun(root: ShadowRoot, run: HTMLElement): RunSelection
   return { runId: run.dataset.smRun ?? '', offset, collapsed: range.collapsed }
 }
 
+/**
+ * テキストノードが無いラン（末尾の空ラン）に空のテキストノードを足す。
+ * WebView2 は要素そのものを指すキャレットをブロック境界へ正規化することがあり、
+ * そのままでは空ランに入力できないため、必ず文字位置へ置けるようにする。
+ * 空のテキストノードは `innerHTML` にも `textContent` にも現れない。
+ */
+function ensureCaretTextNode(run: HTMLElement): void {
+  const walker = run.ownerDocument.createTreeWalker(run, NodeFilter.SHOW_TEXT)
+  if (!walker.nextNode()) run.append(run.ownerDocument.createTextNode(''))
+}
+
 /** ランの `offset` 文字目にキャレットを置く */
 export function setCaretInRun(run: HTMLElement, offset: number): void {
+  ensureCaretTextNode(run)
   const point = pointInRun(run, offset)
   if (!point) return
   run.ownerDocument.getSelection()?.setBaseAndExtent(point.node, point.offset, point.node, point.offset)

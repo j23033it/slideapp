@@ -74,6 +74,12 @@ export class StageEditor {
   private compositionEndToken: number | null = null
   private suppressEnterUntil = 0
   private recoveringDraftSelection = false
+  private pointerSelection: Range | null | undefined
+
+  private readonly onPointerDown = (): void => {
+    const selection = this.root.ownerDocument.getSelection()
+    this.pointerSelection = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null
+  }
 
   private readonly suppressConfirmationEnter = (): void => {
     this.suppressEnterUntil = performance.now() + 100
@@ -102,9 +108,14 @@ export class StageEditor {
     if (token !== null) queueMicrotask(() => this.composition.flush(token))
   }
 
-  private readonly onBlur = (): void => {
+  private readonly onBlur = (event: Event): void => {
     this.settleComposition()
-    if (this.analysis.draft) this.adapter?.finish()
+    if (!this.analysis.draft) return
+    // 同じ空行ブロック内でのフォーカス移動では下書きを取り消さない
+    const next = (event as FocusEvent).relatedTarget
+    const draftBlock = this.runElement(this.analysis.draft.runId)?.closest('[data-sm-block]')
+    if (next instanceof Node && draftBlock?.contains(next)) return
+    this.adapter?.finish()
   }
 
   /** Commit the retained DOM before releasing save/navigation waiters. */
@@ -124,6 +135,11 @@ export class StageEditor {
     const target = event.composedPath()[0]
     const element = target instanceof Element ? target : null
     if (!element || !this.root.contains(element)) return
+    // ドラッグやダブルクリックで作った選択を、その直後の click で崩さない。
+    // 選択の置換は今回の対象外なので、編集を始めずそのまま残す。
+    const previousSelection = this.pointerSelection
+    this.pointerSelection = undefined
+    if (this.clickEndsSelection(element, event, previousSelection)) return
 
     let runElement = element.closest<HTMLElement>('[data-sm-run]')
     const clickedId = runElement?.dataset.smRun
@@ -147,7 +163,7 @@ export class StageEditor {
       block?.focus({ preventScroll: true })
       this.options.onBegin(labelForBlock(block))
       const existing = selectionInRun(this.root, fresh)
-      if (!existing || existing.collapsed) {
+      if (!existing || existing.collapsed || previousSelection !== undefined) {
         const point = caretInRun(fresh, event.clientX, event.clientY, this.root)
         if (point) {
           this.root.ownerDocument
@@ -174,6 +190,29 @@ export class StageEditor {
     this.options.onNotice(code)
   }
 
+  /**
+   * click がドラッグ・ダブルクリックによる選択の終わりかどうか。
+   * 選択がこの編集面の中で新しく作られた場合に、選択を保つ。
+   */
+  private clickEndsSelection(element: Element, event: MouseEvent, previousSelection: Range | null | undefined): boolean {
+    const selection = this.root.ownerDocument.getSelection()
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return false
+    const range = selection.getRangeAt(0)
+    // A click can leave an old selection visible (especially across editing hosts).
+    // Only a newly-created range or a multi-click should bypass normal caret placement.
+    if (event.detail < 2 && previousSelection &&
+        range.startContainer === previousSelection.startContainer && range.startOffset === previousSelection.startOffset &&
+        range.endContainer === previousSelection.endContainer && range.endOffset === previousSelection.endOffset) return false
+    const inside = (node: Node | null): boolean =>
+      !!node && (node === this.root || this.root.contains(node))
+    if (!inside(range.startContainer) || !inside(range.endContainer)) return false
+    if (previousSelection === undefined && event.detail < 2) {
+      const block = element.closest('[data-sm-block]')
+      if (!block || !range.intersectsNode(block)) return false
+    }
+    return true
+  }
+
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
     if (event.isComposing || event.keyCode === 229) return
@@ -186,6 +225,12 @@ export class StageEditor {
     this.settleComposition()
     this.cancelAbandonedDraft()
     if (!this.editing) return
+    // 未入力の空行（段落・softbreak）の先頭での Backspace は、改行の仮編集を取り消す。
+    if (event.key === 'Backspace' && !event.ctrlKey && !event.metaKey && !event.altKey && this.cancelDraftAtLineStart()) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault()
       event.stopPropagation()
@@ -262,6 +307,19 @@ export class StageEditor {
 
   private readonly onSelectionChange = (): void => { this.cancelAbandonedDraft() }
 
+  /**
+   * 選択位置がランの直前・直後（要素の境界）を指しているか。
+   * WebView2 が空のインライン要素へのキャレットを親要素の位置へ正規化した場合に使う。
+   */
+  private pointAtRunBoundary(node: Node | null, offset: number, runId: string): boolean {
+    const run = this.runElement(runId)
+    if (!run || !node) return false
+    const parent = run.parentNode
+    if (node !== parent) return false
+    const index = [...parent.childNodes].indexOf(run)
+    return offset === index || offset === index + 1
+  }
+
   /** Roll back an unfilled line after navigation, retaining the actual selection. */
   private cancelAbandonedDraft(): boolean {
     const draft = this.analysis.draft
@@ -276,7 +334,14 @@ export class StageEditor {
     }
     const anchor = capture(selection.anchorNode, selection.anchorOffset)
     const focus = capture(selection.focusNode, selection.focusOffset)
+    // WebView2 は空のインライン要素を指すキャレットを要素の境界へ正規化することがある。
+    // 下書きの空ラン自身・その直前直後を指しているなら、まだ空行にいるとみなす。
     if (anchor?.runId === draft.runId && focus?.runId === draft.runId) return false
+    if (selection.isCollapsed && this.pointAtRunBoundary(selection.anchorNode, selection.anchorOffset, draft.runId)) {
+      const empty = this.runElement(draft.runId)
+      if (empty) setCaretInRun(empty, 0)
+      return false
+    }
     const oldRuns = this.analysis.runs
     this.recoveringDraftSelection = true
     try {
@@ -298,6 +363,30 @@ export class StageEditor {
         if (a && f) selection.setBaseAndExtent(a.node, a.offset, f.node, f.offset)
       }
     } finally { this.recoveringDraftSelection = false }
+    return true
+  }
+
+  /**
+   * 未入力の空行の先頭で Backspace を押したら、改行の仮編集だけを取り消す。
+   * 段落・softbreak のどちらも、改行を消して元のキャレットへ戻す。
+   */
+  private cancelDraftAtLineStart(): boolean {
+    const draft = this.analysis.draft
+    if (!draft || !this.adapter) return false
+    const selection = this.root.ownerDocument.getSelection()
+    if (!selection || selection.rangeCount !== 1 || !selection.isCollapsed) return false
+    const range = selection.getRangeAt(0)
+    const runElement = runElementOf(range.startContainer)
+    const block = this.runElement(draft.runId)?.closest<HTMLElement>('[data-sm-block]') ?? null
+    const atStart = runElement
+      ? runElement.dataset.smRun === draft.runId && offsetInRun(runElement, range.startContainer, range.startOffset) === 0
+      : !!block && range.startContainer === block && range.startOffset === 0
+    if (!atStart) return false
+    const result = this.engine.cancelDraft(this.analysis.text)
+    if (!result.ok) { this.options.onNotice(result.reason.code); return true }
+    this.analysis = result.analysis
+    this.endEditingSilently()
+    this.options.onCrossRun(result, result.cursor)
     return true
   }
 
@@ -324,6 +413,7 @@ export class StageEditor {
     this.analysis = latest.analysis
     this.deck = latest.deck
     const root = this.root
+    root.addEventListener('pointerdown', this.onPointerDown)
     root.addEventListener('click', this.onClick)
     root.addEventListener('keydown', this.onKeyDown, true)
     root.addEventListener('beforeinput', this.onBeforeInputCapture, true)
@@ -371,6 +461,7 @@ export class StageEditor {
 
   dispose(): void {
     const root = this.root
+    root.removeEventListener('pointerdown', this.onPointerDown)
     root.removeEventListener('click', this.onClick)
     root.removeEventListener('keydown', this.onKeyDown, true)
     root.removeEventListener('beforeinput', this.onBeforeInputCapture, true)
