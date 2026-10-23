@@ -1,6 +1,6 @@
 import browser, { type MarpCoreBrowser } from '@marp-team/marp-core/browser'
 
-import { ensureDocumentImports, splitCssImports } from './fonts'
+import { applyJapaneseFonts, ensureDocumentImports, splitCssImports } from './fonts'
 import type { RenderedDeck } from './renderer'
 
 export type SurfaceLayout = 'single' | 'list'
@@ -141,6 +141,7 @@ export class SlideSurface {
       changed = true
     }
 
+    applyJapaneseFonts(this.shadow)
     if (changed) this.browserHandle.update()
 
     this.setActive(activeIndex, { scroll: true })

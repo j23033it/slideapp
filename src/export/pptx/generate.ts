@@ -1,6 +1,7 @@
 import PptxGenJS from 'pptxgenjs'
 import JSZip from 'jszip'
 import { toPosition, toRun, toTextOptions, type MeasuredSlide, type Paragraph, type Part } from './model'
+import { isJapaneseCharacter, JAPANESE_FONT } from '../../marp/fonts'
 
 // Use DrawingML soft breaks for BRs and preserved newlines, including empty lines.
 const textRuns = (runs: Paragraph['runs']) => runs.flatMap(run => run.text.split('\n').map((text, i) => ({ ...toRun({ ...run, text }), options: { ...toRun(run).options, softBreakBefore: i > 0 } })))
@@ -87,7 +88,7 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
   pptx.author = 'SlideApp'
   pptx.subject = 'Editable Marp export'
   const firstText = slides.flatMap(slide => slide.parts).find(part => part.kind === 'text')
-  const defaultFont = firstText?.kind === 'text' ? firstText.paragraph.runs[0]?.style.fontFace ?? 'Yu Gothic' : 'Yu Gothic'
+  const defaultFont = firstText?.kind === 'text' ? firstText.paragraph.runs[0]?.style.fontFace ?? 'Segoe UI' : 'Segoe UI'
   pptx.theme = { headFontFace: defaultFont, bodyFontFace: defaultFont }
   const slideLists: Map<string, Extract<Part, { kind: 'list' }>>[] = []
   const slidePaths: Map<string, Extract<Part, { kind: 'path' }>>[] = []
@@ -157,6 +158,24 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
     const path = `ppt/slides/slide${index + 1}.xml`
     let xml = correctListIndents(await zip.file(path)!.async('string'), lists)
     xml = correctPathJoins(xml, slidePaths[index]!)
+    // PptxGenJS 4.0.1 copies fontFace to latin/ea/cs. Split rich runs at the
+    // preview's Unicode boundaries, preserving ea for Bopomofo/Hangul etc.
+    // The generator emits literal Unicode and escapes only XML punctuation;
+    // those ASCII entities remain together in the non-Japanese segment.
+    xml = xml.replace(/<a:r>.*?<\/a:r>/gs, run => {
+      const match = /<a:t>(.*?)<\/a:t>/s.exec(run)
+      if (!match) return run
+      const groups: { text: string; japanese: boolean }[] = []
+      for (const character of match[1]!) {
+        const japanese = isJapaneseCharacter(character), last = groups.at(-1)
+        if (last?.japanese === japanese) last.text += character
+        else groups.push({ text: character, japanese })
+      }
+      return groups.length ? groups.map(group => {
+        const split = run.slice(0, match.index) + `<a:t>${group.text}</a:t>` + run.slice(match.index + match[0].length)
+        return group.japanese ? split.replace(/<a:ea\b[^>]*\/>/g, `<a:ea typeface="${JAPANESE_FONT}"/>`) : split
+      }).join('') : run
+    })
     // PptxGenJS 4.0.1 repeats pPr for rich runs in every text/table paragraph.
     // DrawingML permits exactly one. Also make no-stroke independent of themes.
     xml = xml.replace(/<a:ln>\s*<\/a:ln>/g, '<a:ln><a:noFill/></a:ln>').replace(/<a:p>.*?<\/a:p>/gs, paragraph => {

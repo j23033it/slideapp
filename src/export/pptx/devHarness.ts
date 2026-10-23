@@ -4,11 +4,14 @@ import { toSvg } from 'html-to-image'
 import { exportPptx, measureDeck } from './index'
 import { generatePptx } from './generate'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { splitRenderedSlides } from '../../marp/renderer'
+import { MarpRenderer, splitRenderedSlides } from '../../marp/renderer'
 import { rewriteCssUrls, resolveAssetPath } from '../../marp/urls'
 import { loadImage } from './raster'
 import type { Part } from './model'
 import { svgHtmlAllowlist } from './svgAllowlist'
+import { applyJapaneseFonts, JAPANESE_RANGES } from '../../marp/fonts'
+import { SlideSurface } from '../../marp/surface'
+import { splitEols } from '../../document'
 
 /** Pixel regression for unsupported content, independent of its measured-model assertions. */
 export async function compareRasterForCDP(reference: string, parts: Part[]) {
@@ -62,6 +65,7 @@ export async function showFixtureForCDP(markdown: string, baseDir: string, index
   marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
   const rendered = marp.render(markdown), deck = splitRenderedSlides(rendered.html)
   const host = document.createElement('div')
+  host.dataset.pptxPreview = 'true'
   host.style.cssText = `position:fixed;left:0;top:0;width:${deck.width}px;height:${deck.height}px;z-index:2147483647;background:white;`
   const root = host.attachShadow({ mode: 'open' })
   root.innerHTML = `<style>${rewriteCssUrls(rendered.css, baseDir, convertFileSrc)}\n.marpit{width:${deck.width}px;height:${deck.height}px}.marpit>svg{display:block;width:100%;height:100%}</style>${deck.slides[index]}`
@@ -71,6 +75,7 @@ export async function showFixtureForCDP(markdown: string, baseDir: string, index
   }
   for (const element of root.querySelectorAll<HTMLElement>('[style]')) element.setAttribute('style', rewriteCssUrls(element.getAttribute('style')!, baseDir, convertFileSrc))
   document.body.append(host)
+  applyJapaneseFonts(root)
   const handle = browser(root)
   previewCleanup = () => { handle.cleanup(); host.remove() }
   // Keep the visible reference independent of export asset inlining.
@@ -83,6 +88,41 @@ export async function showFixtureForCDP(markdown: string, baseDir: string, index
 }
 
 export function hideFixtureForCDP() { previewCleanup?.(); previewCleanup = undefined }
+
+/** Exercise the actual preview surface and return browser-measured line contents. */
+export async function showFontFixtureForCDP(markdown: string, index: number) {
+  previewCleanup?.()
+  const deck = new MarpRenderer(path => path).render(splitEols(markdown.replace(/^\uFEFF/, '')).text, null)
+  const host = document.createElement('div')
+  host.dataset.pptxPreview = 'true'
+  host.style.cssText = `position:fixed;left:0;top:0;width:${deck.width + 32}px;height:${deck.height + 32}px;z-index:2147483647;background:white;`
+  document.body.append(host)
+  const surface = new SlideSurface(host, { layout: 'single' })
+  surface.update(deck, index)
+  if ([...surface.root.querySelectorAll('[data-sm-run]')].some(run => run.hasAttribute('style') || run.hasAttribute('data-marp-font'))) throw new Error('Font policy modified editing run DOM')
+  previewCleanup = () => { surface.dispose(); host.remove() }
+  const paragraphs = [...surface.root.querySelectorAll<HTMLElement>(`.slot[data-index="${index}"] :is(p, code)`)]
+  await Promise.all(paragraphs.map(p => { const s = getComputedStyle(p); return document.fonts.load(`${s.fontWeight} ${s.fontSize} ${s.fontFamily}`, p.textContent ?? '') }))
+  await document.fonts.ready
+  await new Promise(resolve => setTimeout(resolve, 300))
+  return paragraphs.map(p => {
+    const lines: { y: number; text: string }[] = []
+    const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT)
+    let node: Node | null
+    while ((node = walker.nextNode())) {
+      let offset = 0
+      for (const character of node.textContent ?? '') {
+        const range = document.createRange()
+        range.setStart(node, offset); offset += character.length; range.setEnd(node, offset)
+        const y = range.getBoundingClientRect().top
+        let line = lines.find(line => Math.abs(line.y - y) < Number.parseFloat(getComputedStyle(p).fontSize) / 2)
+        if (!line) { line = { y, text: '' }; lines.push(line) }
+        line.text += character
+      }
+    }
+    return { text: p.textContent, family: getComputedStyle(p).fontFamily, lines: lines.map(line => line.text.trim()) }
+  })
+}
 
 const fixtures = import.meta.glob('../../../tests/fixtures/export/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
 export async function exportFixtureForCDP(markdown: string, baseDir: string, fontEmbedCSS?: string, diagrams = false) {
@@ -114,7 +154,7 @@ export async function inspectFixtureForCDP(markdown: string, baseDir: string) {
   const bytes = await generatePptx(measured.slides)
   let binary = ''
   for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
-  return { base64: btoa(binary), ...measured, inspection }
+  return { base64: btoa(binary), ...measured, inspection, japaneseRanges: JAPANESE_RANGES }
 }
 export async function exportFixtures() {
   const info = await fetch('/__export_info').then(response => response.json()) as { baseDir: string; outputDir: string }
