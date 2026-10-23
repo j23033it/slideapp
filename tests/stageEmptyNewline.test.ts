@@ -131,10 +131,10 @@ describe.each(['\n', '\r\n'])('empty target events with %j', eol => {
     const s = setup(source, eol)
     try {
       const empty = s.enter('A', shift)
-      // キャレットは空ランの中のテキストノードへ置く（要素の境界へ正規化されないように）
+      // 空ラン自身の位置を使い、表示用の文字は作らない。
       expect(empty).toBeDefined()
       const anchor = document.getSelection()?.anchorNode
-      expect(anchor?.nodeType).toBe(3)
+      expect(anchor).toBe(empty)
       expect(empty.contains(anchor ?? null)).toBe(true)
       s.type(empty, '次')
       expect(s.notices).toEqual([]); expect(s.model.serialize()).toBe(expected.split('\n').join(eol))

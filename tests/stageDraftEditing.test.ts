@@ -7,6 +7,7 @@ import { createEngine, resolveCursor } from '../src/editing'
 import { splitRenderedSlides } from '../src/marp/renderer'
 import type { RenderedDeck } from '../src/marp/renderer'
 import type { SlideSurface } from '../src/marp/surface'
+import { nativeShadowSelection } from './nativeShadowSelection'
 
 function setup(source: string) {
   const model = new DocumentModel(source)
@@ -64,29 +65,31 @@ function setup(source: string) {
 afterEach(() => { document.body.innerHTML = ''; document.getSelection()?.removeAllRanges(); vi.restoreAllMocks() })
 
 describe('paragraph-end Enter keeps a usable empty line', () => {
-  it('places the caret inside a text node of the empty run', () => {
+  it('places the caret on the empty run without an artificial text node', () => {
     const s = setup('# before\n\nA')
     try {
       const empty = s.enter('A')
       expect(s.model.text).toBe('# before\n\nA\n\n')
-      expect(document.getSelection()?.anchorNode).not.toBe(empty)
-      expect(document.getSelection()?.anchorNode?.nodeType).toBe(3)
-      expect(empty.contains(document.getSelection()?.anchorNode ?? null)).toBe(true)
+      expect(document.getSelection()?.anchorNode).toBe(empty)
+      expect(document.getSelection()?.anchorOffset).toBe(0)
+      expect(empty.childNodes).toHaveLength(0)
     } finally { s.editor.dispose() }
   })
 
-  it('does not roll back the draft when WebView2 reports the caret on the new block', () => {
+  it('keeps an empty draft when native input rescopes the document selection to the host', () => {
     const s = setup('# before\n\nA')
     try {
       const empty = s.enter('A')
-      const block = empty.closest('[data-sm-block]')!
-      // WebView2 can normalise a caret in an empty inline-block run to the block boundary.
-      document.getSelection()!.setBaseAndExtent(block, 0, block, 0)
+      const scoped = nativeShadowSelection(s.root)
       document.dispatchEvent(new Event('selectionchange'))
       expect(s.model.text).toBe('# before\n\nA\n\n')
-      expect(empty.contains(document.getSelection()!.anchorNode)).toBe(true)
-      // Input must work immediately, without manually moving the caret back.
-      s.type(empty, '次')
+      expect(scoped.anchorNode).toBe(empty)
+      const before = new InputEvent('beforeinput', { bubbles: true, composed: true, cancelable: true, inputType: 'insertText', data: '次' })
+      empty.dispatchEvent(before)
+      expect(before.defaultPrevented).toBe(false)
+      empty.textContent = '次'
+      scoped.setBaseAndExtent(empty.firstChild!, 1, empty.firstChild!, 1)
+      empty.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: '次' }))
       expect(s.model.text).toBe('# before\n\nA\n\n次')
       expect(s.notices).toEqual([])
     } finally { s.editor.dispose() }
@@ -149,6 +152,54 @@ describe('paragraph-end Enter keeps a usable empty line', () => {
       expect(s.model.text).toBe('# before\n\nA\n')
       s.key(empty, 'Backspace')
       expect(s.model.text).toBe('# before\n\nA')
+      expect(s.notices).toEqual([])
+    } finally { s.editor.dispose() }
+  })
+})
+
+describe('native WebView2 selection after caret movement', () => {
+  it('handles ArrowLeft → End → Enter, then cancels the draft and deletes text', () => {
+    const s = setup('# before\n\nAB')
+    try {
+      const target = s.click('AB')
+      const scoped = nativeShadowSelection(s.root)
+      s.key(target, 'ArrowLeft')
+      scoped.setBaseAndExtent(target.firstChild!, 1, target.firstChild!, 1)
+      document.dispatchEvent(new Event('selectionchange'))
+      s.key(target, 'End')
+      scoped.setBaseAndExtent(target.firstChild!, 2, target.firstChild!, 2)
+      document.dispatchEvent(new Event('selectionchange'))
+      s.key(target, 'Enter')
+      expect(s.model.text).toBe('# before\n\nAB\n\n')
+      expect(s.startsWith().draft).toBeDefined()
+      s.key(s.run(''), 'Backspace')
+      expect(s.model.text).toBe('# before\n\nAB')
+      const fresh = s.run('AB')
+      s.key(fresh, 'Backspace')
+      const before = new InputEvent('beforeinput', { bubbles: true, composed: true, cancelable: true, inputType: 'deleteContentBackward' })
+      fresh.dispatchEvent(before)
+      expect(before.defaultPrevented).toBe(false)
+      fresh.textContent = 'A'
+      scoped.setBaseAndExtent(fresh.firstChild!, 1, fresh.firstChild!, 1)
+      fresh.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }))
+      expect(s.model.text).toBe('# before\n\nA')
+      expect(s.notices).toEqual([])
+    } finally { s.editor.dispose() }
+  })
+
+  it('rolls back only an abandoned draft and restores a native selection in the earlier run', () => {
+    const s = setup('AB')
+    try {
+      const empty = s.enter('AB', true)
+      const scoped = nativeShadowSelection(s.root)
+      s.key(empty, 'ArrowUp')
+      const earlier = s.run('AB')
+      scoped.setBaseAndExtent(earlier.firstChild!, 1, earlier.firstChild!, 1)
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(s.model.text).toBe('AB')
+      expect(s.startsWith().draft).toBeUndefined()
+      expect(scoped.anchorNode?.textContent).toBe('AB')
+      expect(scoped.anchorOffset).toBe(1)
       expect(s.notices).toEqual([])
     } finally { s.editor.dispose() }
   })

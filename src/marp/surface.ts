@@ -32,6 +32,11 @@ const BASE_CSS = `
 .surface[data-layout='list'] .slot { cursor: pointer; }
 .surface[data-layout='list'] .slot[data-active='true'] { outline: 2px solid var(--sm-accent, #0f6cbd); outline-offset: -2px; }
 .surface[data-layout='list'] .slot:focus-visible { outline: 2px solid var(--sm-accent, #0f6cbd); outline-offset: -2px; }
+/* 閲覧中も本文をドラッグ選択・コピーできるようにする。 */
+.surface[data-layout='single'] .frame {
+  -webkit-user-select: text;
+  user-select: text;
+}
 /* 編集状態: 編集中のブロックは細い枠、カーソルは文字用にする */
 .surface[data-layout='single'] .frame [data-sm-block][contenteditable='true'] {
   outline: 1px solid var(--sm-accent, #0f6cbd);
