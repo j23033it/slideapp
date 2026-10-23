@@ -157,10 +157,25 @@ Solid block backgrounds and straight solid borders become native shapes behind c
 Equal circular CSS corners with uniform borders use a native `roundRect`, with
 the measured radius and the CSS border inset. Elliptical/asymmetric corners and
 complex decoration remain images behind editable content. Complex separable backgrounds and generated decoration become independent image layers. Code highlighting that can be represented as runs remains text.
-Native tables use measured columns and rows with auto-paging disabled.
-Cell padding is passed in inches (text-box padding uses points). Columns reserve
-space beyond the measured text lines for Office's font metrics, preventing row
-growth over the next block. Flat lists place each item at its measured position. A nested list uses one text box with a paragraph per
+Native tables specify the DOM's measured row heights
+with auto-paging disabled. Cell padding is passed in inches (text-box padding uses points).
+Each column keeps at least its DOM width and requests space beyond the measured
+text lines for Office's font metrics, preserving the existing export behavior.
+The table may expand beyond its DOM width and ancestor content area. Only when
+the expanded table would cross the slide's right edge does spare width in other
+columns supply that reserve; any remaining reserve shortage is shared
+proportionally. Reserve shortage alone never rasterizes a table. Rectangular
+solid cell backgrounds (including alpha) use the native cell's fill, so text,
+borders and fill share the final grid. If a table contains independently painted
+descendant backgrounds, borders or generated decoration, all its cells instead
+stay transparent. Structural and cell background shapes use the same final grid
+and precede descendant decoration, followed by the transparent editable table.
+Solid table/row/column/group backgrounds map their horizontal edges to those same
+output column boundaries. Complex cell decoration (gradient, radius, shadow,
+etc.) retains its separate browser-painted image. If the original DOM table itself
+exceeds the slide's horizontal bounds, the table rasterizes with a
+reported reason.
+Flat lists place each item at its measured position. A nested list uses one text box with a paragraph per
 item; an OOXML pass sets exact measured text/marker indents independently of its
 `lvl`. The existing JSZip dependency is used at runtime for that correction.
 Single-line Marp-fitted headings and CSS `nowrap` disable Office wrapping.
@@ -264,6 +279,56 @@ Numbered marker indentation uses the measured font's number/period/space advance
   table heights, notes, background splits and image transparency. PowerPoint
   itself is not required for export or automated checks.
 
+Issue #20's eight-slide regression is `table-background-width.md`: English and
+Japanese cell fills, row and row-group fills, reserve-only bounds cases, and
+actual slide/parent overflow. Ancestor overflow remains native; actual slide
+clipping keeps its existing raster route. The three `table-width-wrapped-{default,gaia,uncover}.md`
+fixtures cover full-width tables with wrapped English and Japanese descriptions.
+Run `inspect-chrome.mjs tests/fixtures/export/table-background-width.md
+--inspect-dir <temporary-directory>`, then `audit-powerpoint.ps1 -InputDir
+<temporary-directory> -All`. The COM audit checks output column widths, native
+cell colors/alpha, unchanged row heights, cell text and in-memory editing. For
+these fixtures and the supplied `probe-*` review slides with blue headers, it
+also samples every final header's right edge in the rendered PowerPoint PNG and
+verifies white text. `com-metrics.json` retains these checks under `tableMetrics`.
+Seven background tables remain editable; only slide 7's actual clipping uses
+raster fallback. Default COM auditing rejects row-height changes. Explicit
+`-AllowTableRowGrowth` continues through increased heights with warnings and
+records each row's expected/actual height and delta under `rowHeightChanges`;
+column widths, cell editing, fill and header paint checks remain strict. This
+option records DOM/Office differences; comparison with main is a separate check.
+On 2026-10-24 Chrome 156.0.8078.48 and installed PowerPoint verified all 71 decks /
+128 slides / 43 native tables / 116 table rows against main (e5fec9d). Every row
+height matched main within the audit's 0.02pt tolerance. The prior fixed-DOM-width
+attempt's seven new row increases across six tables (29.30–38.215pt) returned to
+main's heights. The remaining `probe-default` slide 7 header is 60.32504pt in both
+versions (23.57504pt above the DOM height), an existing main difference, so the
+whole-suite COM runs use `-AllowTableRowGrowth` and compare actual Office heights.
+All column, cell-edit and fill checks passed; all 90 sampled blue header edges
+retained white text. Only `table-background-width`
+slide 5 needed reserve reduction: its right edge moved from 1291.80625px to
+1280px, with unchanged Office row heights and editable cells. The other 42 tables
+kept main's column widths. The deliberately missing-image review case retains its
+expected isolated asset error.
+
+PR #29's inline-decoration regression is `table-inline-decoration.md`: default
+theme code on white cells, a yellow span on blue cells, and an outlined span.
+The fixture uses the default code background/font/radius, with `white-space:inherit`
+and zero code padding to stay within existing native inline-layout support.
+Unmodified default code's `break-spaces`/padding still takes the existing table
+raster route; this change does not broaden native layout eligibility.
+Export with `inspect-chrome.mjs`, then run `audit-powerpoint.ps1 -All`. The audit
+requires an editable table on every slide, transparent cell fills, decoration
+below the table, visible gray/yellow/outline pixels and blue paint at every final
+header edge. It also changes/restores decorated cell text in memory.
+Chrome 156.0.8078.48 and installed PowerPoint passed all three slides on
+2026-10-24: only the four inline decorations are images; all three tables remain
+editable. The code background samples retain RGB(240,241,242), the yellow span
+RGB(255,255,0), and the outline RGB(234,179,8). The complete 72-deck / 131-slide
+COM run also passed. All 116 existing rows across 43 native tables (71 decks /
+128 slides) matched main e5fec9d within 0.02pt, with zero row-height increases;
+the pre-existing `probe-default` slide 7 DOM/Office difference remains unchanged.
+
 `src/app/**` is deliberately outside this implementation's scope. Changes to the
 `Platform` interface require adding the two new methods to any UI test mocks.
 
@@ -298,7 +363,7 @@ children; direct wrapper text is collected or explicitly rasterized, never skipp
 | `ul`, `ol`, `li` | Nested lists use one native list box; flat lists position each item separately. Paragraph level/start/indent/glyph and independent list/item/continuation box paint are retained | Typography and marker typography rules, with `li::marker` attribution | Unsupported marker/content, reversed/inside list, overlapping items, nested positioned content or complex list structure captures whole list |
 | `blockquote` | Own box; native child blocks | Native child rules | Inseparable block effects/layout captures quote; child images/unsupported units stay local |
 | `table`, `thead`, `tbody`, `tfoot`, `tr` | Table grid; separate column/group/row/table fills; collapsed solid borders resolved at cells | Numeric features and alpha cell/row borders | Hidden/merged/ragged grid, visible caption, nonzero separate border spacing, changed table flow captures table |
-| `th`, `td` | Native cell runs, measured padding/width/height, vertical alignment, transparent native cell over separated fill | Numeric features/border compositing | Cell gradient/rounding/outline is decoration only; unsupported text/inline images captures table |
+| `th`, `td` | Native cell runs, measured padding/width/height, vertical alignment and solid cell fill (including alpha) on the output column grid | Numeric features/border compositing | Cell gradient/rounding/outline is separate decoration only; unsupported text/inline images captures table |
 | `pre`, Marp code hosts, `code` | Runs when Marp layout is representable; decoration is independent | Font/typography rules | Preserved tabs, unsupported shadow-host/math layout or typography captures code block |
 | `img`, `figure`, `figcaption` | Image appearance; figure box and native caption/child content | Font rules for caption | Image CSS is browser-painted in its image surface; wrapper effects/clip capture figure; SVG image is reported |
 | `a`, `strong`, `em`, `s`, `mark`, inline `code`, `span` | Rich runs including link/alpha/size/weight/italic/underline/strike; independent inline decoration raster | Bounded typography/font rules | Padding/margins/inline-block/float/position or in-flow generated content that changes internal run positions captures containing block/list/table |
@@ -312,7 +377,7 @@ children; direct wrapper text is collected or explicitly rasterized, never skipp
 
 | CSS concern | ネイティブ | 近似 | 画像化 / 該当なし |
 | --- | --- | --- | --- |
-| Background color / alpha | Independent solid block/group/row/cell rectangles, section background, exact alpha | None | Inline fragmented paint, gradients, images, background-clip/origin/size/repeat/position/attachment/blend are painted as decoration; transparent/no background: 該当なし |
+| Background color / alpha | Independent solid block/group/row/column rectangles, native table cell fills, section background, exact alpha; table layers share output column boundaries | None | Inline fragmented paint, gradients, images, background-clip/origin/size/repeat/position/attachment/blend are painted as decoration; transparent/no background: 該当なし |
 | Borders / radius / outline | Straight opaque solid edges, native cell borders; uniform circular block corners use `roundRect` | Cell/row alpha border over solid ancestors, reported | Dashed/double/image borders, translucent standalone edges, asymmetric/elliptical corners, outline/offset and box shadows paint decoration only. Radius without visible paint or clipping: 該当なし |
 | Margin / padding / dimensions / gaps | DOM positions, textbox/cell padding and list indentation; external margins are not reapplied | Existing font metric reserve for Office line wrapping | Inline margins/padding/inline-block and unrepresentable mixed layout capture containing unit; zero/default spacing: 該当なし |
 | Color / transparency | Run, fill and bullet alpha in DrawingML | Only allowlisted border compositing | Unsupported CSS color spaces in text capture native unit; box colors browser-paint as decoration; opacity 0 / invisible subtree: 該当なし |

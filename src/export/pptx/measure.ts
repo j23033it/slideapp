@@ -292,26 +292,77 @@ function cellBorder(cell: HTMLTableCellElement, side: string, table: HTMLTableEl
   return result
 }
 
+/** An opaque native cell would cover independent inline decoration below the table. */
+function tableHasLayeredDecoration(table: HTMLTableElement): boolean {
+  return [table, ...table.querySelectorAll('*')].some(node => isPainted(node) && (
+    (!node.matches('table,thead,tbody,tfoot,tr,td,th,col,colgroup') && separateBackground(node)) ||
+    ['::before', '::after'].some(pseudo => isPainted(node, pseudo) && pseudoNeedsRaster(pseudoFacts(node, pseudo)))
+  ))
+}
+
 export function measureTable(table: HTMLTableElement, origin: DOMRect, fonts: Map<string, string>): Extract<Part, { kind: 'table' }> {
   const reason = tableShapeReason(table)
   if (reason) throw new Error(reason)
   const rows = [...table.rows]
+  const layeredDecoration = tableHasLayeredDecoration(table)
   const result: TableCell[][] = rows.map(row => [...row.cells].map(cell => {
     const style = getComputedStyle(cell)
     const borders = ['top', 'right', 'bottom', 'left'].map(side => cellBorder(cell, side, table)) as TableCell['border']
-    const fill = separateBackground(cell) ? { color: 'FFFFFF', transparency: 100 } : cssColor(style.backgroundColor)
-    // Row and group paint is separated beneath the native table. Cells retain their own alpha.
+    // Simple fills belong to the grid unless they would cover descendant paint.
+    // Complex decoration keeps its existing independent browser-painted layer.
+    const fill = layeredDecoration || rasterBox(style, true) ? { color: 'FFFFFF', transparency: 100 } : cssColor(style.backgroundColor)
     return { runs: collectRuns(cell, fonts), style: paragraph(cell, origin, fonts), fill, border: borders, valign: requiredCellAlignment(style.verticalAlign) }
   }))
-  const columnWidths = [...rows[0]!.cells].map((cell, column) => Math.max(cell.getBoundingClientRect().width,
-    ...rows.map((row, index) => {
-      const measured = result[index]![column]!
-      // Keep the browser's existing wraps, reserving space for Office's glyph metrics.
-      const reserve = Math.max(3, ...measured.runs.map(run => run.style.fontSize * .2))
-      return ownTextRect(row.cells[column]!).width + measured.style.padding[1] + measured.style.padding[3] + reserve + 2
-    })))
-  return { kind: 'table', rect: { ...relativeRect(table.getBoundingClientRect(), origin), width: columnWidths.reduce((sum, width) => sum + width, 0) }, rows: result,
+  const rect = relativeRect(table.getBoundingClientRect(), origin)
+  const domWidths = [...rows[0]!.cells].map(cell => cell.getBoundingClientRect().width)
+  const content = domWidths.map((_, column) => rows.map((row, index) => {
+    const measured = result[index]![column]!
+    return { width: ownTextRect(row.cells[column]!).width + measured.style.padding[1] + measured.style.padding[3],
+      reserve: Math.max(3, ...measured.runs.map(run => run.style.fontSize * .2)) + 2 }
+  }))
+  // Preserve the existing Office reserve, including harmless ancestor overflow.
+  let columnWidths = domWidths.map((width, column) => Math.max(width, ...content[column]!.map(cell => cell.width + cell.reserve)))
+  if (origin.width > 0 && (rect.x < -.5 || rect.x + rect.width > origin.width + .5)) throw new Error('Table DOM width exceeds slide bounds')
+  const budget = origin.width - rect.x
+  if (origin.width > 0 && columnWidths.reduce((sum, width) => sum + width, 0) > budget) {
+    // Only the slide edge constrains reserves. Normalize collapsed border edges
+    // to the DOM width, then borrow spare column space before reducing reserves.
+    const gridWidth = domWidths.reduce((sum, width) => sum + width, 0)
+    const widths = domWidths.map(width => width * Math.min(rect.width, budget) / gridWidth)
+    const minimums = widths.map((width, i) => Math.min(width, Math.max(...content[i]!.map(cell => cell.width))))
+    const reserves = minimums.map((width, i) => Math.max(...content[i]!.map(cell => cell.width + cell.reserve)) - width)
+    const available = Math.max(0, budget - minimums.reduce((sum, width) => sum + width, 0))
+    const reserveTotal = reserves.reduce((sum, width) => sum + width, 0)
+    const scale = reserveTotal > 0 ? Math.min(1, available / reserveTotal) : 0
+    const targets = minimums.map((width, i) => width + reserves[i]! * scale)
+    const spare = widths.map((width, i) => Math.max(0, width - targets[i]!))
+    const needed = widths.map((width, i) => Math.max(0, targets[i]! - width))
+    const spareTotal = spare.reduce((sum, width) => sum + width, 0)
+    const excess = Math.max(0, widths.reduce((sum, width) => sum + width, 0) + needed.reduce((sum, width) => sum + width, 0) - budget)
+    columnWidths = widths.map((width, i) => width + needed[i]! - (spareTotal ? spare[i]! * excess / spareTotal : 0))
+  }
+  return { kind: 'table', rect: { ...rect, width: columnWidths.reduce((sum, width) => sum + width, 0) }, rows: result,
     columnWidths, rowHeights: rows.map(row => row.getBoundingClientRect().height) }
+}
+
+/** Map structural background edges to the same column boundaries used by addTable.
+ * Collapsed borders can put the outer DOM edge half a pixel outside the cell grid. */
+function tableBackgroundRect(node: Element, table: HTMLTableElement, part: Extract<Part, { kind: 'table' }>, origin: DOMRect): Rect {
+  const rect = relativeRect(node.getBoundingClientRect(), origin)
+  if (node === table) return { ...rect, x: part.rect.x, width: part.rect.width }
+  const cells = [...table.rows[0]!.cells]
+  const edges = [cells[0]!.getBoundingClientRect().left - origin.left, ...cells.map(cell => cell.getBoundingClientRect().right - origin.left)]
+  const output = [part.rect.x]
+  for (const width of part.columnWidths) output.push(output.at(-1)! + width)
+  const map = (x: number): number => {
+    const edge = edges.findIndex(value => Math.abs(value - x) <= .75)
+    if (edge >= 0) return output[edge]!
+    const next = edges.findIndex(value => value > x)
+    const column = next < 0 ? part.columnWidths.length - 1 : Math.max(0, next - 1)
+    return output[column]! + (x - edges[column]!) / (edges[column + 1]! - edges[column]!) * part.columnWidths[column]!
+  }
+  const x = map(rect.x)
+  return { ...rect, x, width: map(rect.x + rect.width) - x }
 }
 
 /** A whole list shares one available width; nested items only change paragraph indentation. */
@@ -622,14 +673,26 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       if (!rasterFallback && parts.slice(start).some(part => ['text', 'table', 'list'].includes(part.kind))) recordApproximations(element)
       if (!rasterFallback && isPainted(element)) {
         const nativeEnd = parts.length
+        const nativeTable = element.matches('table') ? parts.slice(start).find(part => part.kind === 'table') : undefined
+        const layeredTable = nativeTable && tableHasLayeredDecoration(element as HTMLTableElement)
         const backgroundNodes = element.matches(`${BLOCKS},ul,ol,table`) ? [element, ...element.querySelectorAll('*')] : [element]
+        // All cell/structural paint must precede inline paint, including decorations
+        // that extend into a later cell in DOM order.
+        if (layeredTable) {
+          const structural = (node: Element) => node.matches('table,thead,tbody,tfoot,tr,td,th,col,colgroup')
+          backgroundNodes.sort((a, b) => Number(!structural(a)) - Number(!structural(b)))
+        }
         for (const node of backgroundNodes.filter(separateBackground)) {
           if (rasterized.has(node) || decorationSeen.get(node)?.has('background')) continue
           const seen = decorationSeen.get(node) ?? new Set<string>()
           seen.add('background'); decorationSeen.set(node, seen)
           try {
             if (!rasterBox(getComputedStyle(node), node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup')) && getComputedStyle(node).display !== 'inline') {
-              const box = nativeBox(node, relativeRect(node.getBoundingClientRect(), origin))
+              if (nativeTable && !layeredTable && node.matches('td,th')) continue // Already painted by a:tcPr.
+              const rect = nativeTable && node.matches('table,thead,tbody,tfoot,tr,td,th,col,colgroup')
+                ? tableBackgroundRect(node, element as HTMLTableElement, nativeTable, origin)
+                : relativeRect(node.getBoundingClientRect(), origin)
+              const box = nativeBox(node, rect)
               parts.push(...(node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup') ? box.filter(p => p.kind === 'box') : box))
               continue
             }
