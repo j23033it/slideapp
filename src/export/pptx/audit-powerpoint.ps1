@@ -39,6 +39,29 @@ try {
         }
         $textShapes = @($slide.Shapes | Where-Object { $_.HasTextFrame -eq -1 -and $_.TextFrame.HasText -eq -1 })
         $tableShapes = @($slide.Shapes | Where-Object HasTable -EQ -1)
+        $defaultFillMetrics = $null
+        if ($file.BaseName -eq 'path-default-fill') {
+          $pictures = @($slide.Shapes | Where-Object Type -EQ 13)
+          $lines = @($slide.Shapes | Where-Object Type -EQ 9)
+          $expectedPictures = if ($index -le 3) { 0 } else { 1 }
+          $expectedTexts = if ($index -le 3) { 2 } else { 0 }
+          $expectedLines = @($model.slides[$index - 1].parts | Where-Object kind -EQ 'line').Count
+          if ($pictures.Count -ne $expectedPictures -or $textShapes.Count -ne $expectedTexts -or $lines.Count -ne $expectedLines) {
+            throw "Default fill regression: slide $index, pictures=$($pictures.Count), texts=$($textShapes.Count), lines=$($lines.Count)"
+          }
+          foreach ($lineShape in $lines) {
+            $left = [double]$lineShape.Left
+            $lineShape.Left = $left + 1
+            if ([Math]::Abs($lineShape.Left - $left - 1) -gt .02) { throw 'Native line edit failed' }
+            $lineShape.Left = $left
+          }
+          if ($index -eq 2) {
+            $defaultHash = (Get-FileHash -LiteralPath (Join-Path $OutputDir ($file.BaseName + '-1.png'))).Hash
+            $noneHash = (Get-FileHash -LiteralPath (Join-Path $OutputDir ($file.BaseName + '-2.png'))).Hash
+            if ($defaultHash -ne $noneHash) { throw 'Omitted fill and fill:none changed visible PowerPoint paint' }
+          }
+          $defaultFillMetrics = @{ pictures=$pictures.Count; lines=$lines.Count; inMemoryLineEditVerified=$true; matchesFillNone=($index -eq 2) }
+        }
         $markerMetrics = @()
         $tableIndex = 0
         $pathIndex = 0
@@ -104,7 +127,7 @@ try {
           if (!$shape.TextFrame.TextRange.Text.Contains('編集確認')) { throw 'Native text edit failed' }
           $shape.TextFrame.TextRange.Text = $original
         }
-        $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; markers=$markerMetrics; paths=$pathMetrics; strokeColors=$strokeColors; inMemoryEditVerified=$true }
+        $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; markers=$markerMetrics; paths=$pathMetrics; strokeColors=$strokeColors; defaultFill=$defaultFillMetrics; inMemoryEditVerified=$true }
       }
     } finally {
       if ($null -ne $presentation) { $presentation.Saved = -1; $presentation.Close(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($presentation) }

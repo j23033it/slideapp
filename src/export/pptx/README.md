@@ -293,6 +293,15 @@ their native line shapes. A path with multiple subpaths and a translucent stroke
 reported reason: splitting one stroke across shapes compounds alpha at overlaps.
 Separate path elements retain independent native alpha, so their overlaps remain
 darker as in SVG. Opaque strokes retain the native conversion above.
+Default or explicit path fill is ignored only when every subpath's vertices are
+collinear, proving zero fill area even after implicit closure. This also covers
+backtracking, point-only and closed collinear paths. Open elbows, filled polygons
+and self-intersections still rasterize the entire SVG; zero total signed area
+alone is insufficient. Before screen transforms, finite parsed IEEE 754 coordinates
+are expressed exactly as BigInt multiples of 2^-1074 and their cross products are
+compared without an epsilon. Cancellation, underflow or a tiny deviation cannot
+turn nonzero area into an accepted zero; decimal inputs that are only nearly
+collinear in their parsed binary representation conservatively rasterize.
 PptxGenJS 4.0.1 has no shape join/cap API, so the existing
 JSZip/OOXML pass adds explicit flat caps and `a:miter` (with `lim` in 1/1000 percent),
 `a:round` or `a:bevel` only to named SVG path shapes. Miter limits use the SVG ratio
@@ -326,6 +335,18 @@ RGB(255,127,127) at both single and overlapping strokes; separate path elements
 produce RGB(255,63,63) at the overlap. Installed PowerPoint confirmed these colors,
 including the supplied `alpha-probe.md` reproduction, and retained the existing
 fixture's 12 editable freeforms and 5 editable text shapes.
+
+`tests/fixtures/export/path-default-fill.md` covers issue #22's omitted-fill line,
+an identical `fill="none"` control, collinear/backtracking/closed/multiple subpaths,
+and the atomic raster fallback for an open elbow and a zero-signed-area bow tie.
+Export it with `inspect-chrome.mjs`, then run `audit-powerpoint.ps1 -All`.
+The audit requires zero pictures and two editable labels on each of the first
+three slides, changes/restores native lines and freeform nodes as well as labels,
+and requires identical PowerPoint PNGs for the omitted-fill and `none` controls.
+Installed PowerPoint passed these checks: the third slide retains three editable
+freeforms and two native lines. The final two slides each retain one picture,
+preserving their visible fill. `com-metrics.json` records the edit checks/counts
+and the control comparison under `defaultFill`.
 
 Comparison with the supplied reference converter's existing 8-slide PPTX used
 installed PowerPoint COM (2560×1440 PNG) and the reference converter's Marp DOM

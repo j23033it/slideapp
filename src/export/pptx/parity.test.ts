@@ -105,6 +105,61 @@ describe('editable diagram parity', () => {
     expect(measureSvg(svg, origin, fonts)).toHaveLength(1)
   })
   it.each([
+    ['single horizontal line', 'M230 90 L350 90', ['line']],
+    ['vertical polyline', 'M230 40 V90 V150', ['path']],
+    ['collinear polyline with repeated start', 'M100 100 L100 100 L200 200 L300 300', ['path']],
+    ['decimal diagonal', 'M0.125 0.25 L0.25 0.5 L0.5 1', ['path']],
+    ['nonbinary decimal diagonal', 'M0.1 0.1 L0.2 0.2 L0.3 0.3', ['path']],
+    ['negative coordinates and signed zero', 'M-100 -100 L-50 -50 L-0 0', ['path']],
+    ['point-only subpath', 'M100 100 L100 100 Z', []],
+    ['backtracking polyline', 'M100 90 H300 H200 H350', ['path']],
+    ['closed collinear path', 'M100 90 H300 H200 Z', ['path']],
+    ['independent subpaths', 'M100 90 H300 M400 40 V150 M500 50', ['line', 'line']],
+  ])('ignores area-free default fill on %s and preserves editable labels', async (_name, d, kinds) => {
+    const inner = graphic(`<svg><text>Source</text><path d="${d}" style="stroke:rgb(37,99,235);stroke-width:4px"/><text>Target</text></svg>`)
+    // happy-dom has no SVG UA fill default or text positioning geometry.
+    inner.querySelector('path')!.style.fill = 'rgb(0,0,0)'
+    for (const text of inner.querySelectorAll('text')) {
+      text.style.whiteSpace = 'normal'
+      for (const name of ['x', 'y']) Object.defineProperty(text, name, {value:{baseVal:{numberOfItems:1}}})
+      vi.spyOn(text, 'getBBox').mockReturnValue(new DOMRect(20,30,100,20))
+    }
+    const outer = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), foreign = document.createElementNS(outer.namespaceURI, 'foreignObject'), section = document.createElement('section')
+    section.append(inner); foreign.append(section); outer.append(foreign); document.body.append(outer)
+    Object.defineProperty(outer, 'viewBox', {value:{baseVal:{width:1280,height:720}}}); vi.spyOn(outer, 'getBoundingClientRect').mockReturnValue(origin)
+    const capture = vi.spyOn(raster, 'rasterize').mockResolvedValue('data:image/png;base64,AA==')
+    const state = report(), slide = await measureSlide(outer, [], fonts, '', state, 0)
+    expect(state.rasterizedElements).toEqual([])
+    expect(state.errors).toBeUndefined()
+    expect(capture).not.toHaveBeenCalled()
+    expect(slide.parts.map(p => p.kind)).toEqual(['text', ...kinds, 'text'])
+    const zip = await JSZip.loadAsync(await generatePptx([slide])), xml = await zip.file('ppt/slides/slide1.xml')!.async('string')
+    expect(xml).toContain('<a:t>Source</a:t>'); expect(xml).toContain('<a:t>Target</a:t>')
+    expect(xml).not.toContain('<p:pic>')
+    expect(Object.keys(zip.files).filter(path => path.startsWith('ppt/media/') && !zip.files[path]!.dir)).toEqual([])
+  })
+  it.each([
+    ['open elbow', 'M100 100 H300 V200'],
+    ['closed triangle', 'M100 100 H300 V200 Z'],
+    ['self-intersection with zero signed area', 'M100 100 L300 300 L100 300 L300 100'],
+    ['oppositely wound subpaths', 'M100 100 H300 V200 Z M100 100 V200 H300 Z'],
+    ['collinear then filled subpath', 'M100 90 H300 M100 100 H300 V200'],
+    ['almost collinear decimal coordinates', 'M0 0 L1 1 L2 2.0000000000000004'],
+    ['determinant rounded to zero in Number arithmetic', 'M0 0 L100000000 99999999 L100000001 100000000'],
+    ['determinant underflow in Number arithmetic', 'M0 0 L1e-200 0 L0 1e-200'],
+  ])('still rasterizes default fill on %s atomically', async (_name, d) => {
+    const inner = graphic(`<svg><rect width="20" height="20"/><path d="${d}" style="fill:rgb(0,0,0);stroke:rgb(37,99,235)"/></svg>`)
+    const outer = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), foreign = document.createElementNS(outer.namespaceURI, 'foreignObject'), section = document.createElement('section')
+    section.innerHTML = '<p>Editable neighbor</p>'; section.append(inner); foreign.append(section); outer.append(foreign); document.body.append(outer)
+    Object.defineProperty(outer, 'viewBox', {value:{baseVal:{width:1280,height:720}}}); vi.spyOn(outer, 'getBoundingClientRect').mockReturnValue(origin)
+    const capture = vi.spyOn(raster, 'rasterize').mockResolvedValue('data:image/png;base64,AA==')
+    const state = report(), slide = await measureSlide(outer, [], fonts, '', state, 0)
+    expect(slide.parts.map(p => p.kind)).toEqual(['text', 'image'])
+    expect(capture).toHaveBeenCalledOnce()
+    expect(state.rasterizedElements).toEqual([{slide:1,element:'svg',reason:'Unsupported SVG filled path'}])
+    expect(state.errors).toBeUndefined()
+  })
+  it.each([
     ['overlapping closed subpaths', 'M100 100 H300 V300 H100 Z M200 100 H400 V300 H200 Z', 'stroke:rgb(255,0,0);stroke-opacity:.5'],
     ['mixed closed/open subpaths', 'M100 100 H300 V300 H100 Z M200 100 H400 V300', 'stroke:rgb(255,0,0);stroke-opacity:.5'],
     ['overlapping straight subpaths', 'M100 100 H300 M200 100 H400', 'stroke:rgb(255,0,0);stroke-opacity:.5'],

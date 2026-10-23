@@ -47,6 +47,27 @@ export function straightPath(d: string): Segment[] {
   return straightSubpaths(d).flatMap(subpath => subpath.segments)
 }
 
+/** Collinearity proves that even implicit closure cannot paint any fill area. */
+function hasNoFillArea({ segments }: Subpath): boolean {
+  const start = segments[0]?.from
+  if (!start) return true
+  const end = segments.find(({ to }) => to.x !== start.x || to.y !== start.y)?.to
+  if (!end) return true
+  // Every parsed coordinate is finite. Express its exact IEEE 754 value in
+  // units of 2^-1074, so determinant cancellation/underflow cannot hide area.
+  // No epsilon: nearly collinear decimal inputs conservatively rasterize.
+  const view = new DataView(new ArrayBuffer(8))
+  const exact = (value: number): bigint => {
+    view.setFloat64(0, value)
+    const bits = view.getBigUint64(0), exponent = Number((bits >> 52n) & 0x7ffn)
+    const fraction = bits & 0xfffffffffffffn
+    const magnitude = exponent === 0 ? fraction : (fraction | 0x10000000000000n) << BigInt(exponent - 1)
+    return bits >> 63n ? -magnitude : magnitude
+  }
+  const x = exact(start.x), y = exact(start.y), dx = exact(end.x) - x, dy = exact(end.y) - y
+  return segments.every(({ to }) => dx * (exact(to.y) - y) === dy * (exact(to.x) - x))
+}
+
 const paint = (value: string) => value === 'none' ? { color: 'FFFFFF', transparency: 100 } : cssColor(value)
 function pathData(element: Element): string {
   const attribute = element.getAttribute('d') ?? ''
@@ -152,9 +173,10 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
         align: 'left', valign: 'middle', sizeTolerance: [2, 0], wrap: false, lineHeight: bounds.height * scale, spaceBefore: 0, spaceAfter: 0, padding: [0, 0, 0, 0] }
       parts.push({ kind: 'text', paragraph })
     } else if (el.localName === 'path') {
-      if (fill.transparency < 100) throw new Error('Unsupported SVG filled path')
+      const parsed = straightSubpaths(pathData(el))
+      if (fill.transparency < 100 && !parsed.every(hasNoFillArea)) throw new Error('Unsupported SVG filled path')
       if (s.markerStart !== 'none' || s.markerMid !== 'none') throw new Error('Unsupported SVG start/mid marker')
-      const subpaths = straightSubpaths(pathData(el)).map(subpath => ({ ...subpath,
+      const subpaths = parsed.map(subpath => ({ ...subpath,
         segments: subpath.segments.map(segment => ({ from: point(segment.from), to: point(segment.to) })) }))
       // SVG paints one path's stroke once, including overlapping subpaths.
       // Separate Office shapes would apply alpha again at each overlap. Reject
