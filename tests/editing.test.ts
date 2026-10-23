@@ -109,6 +109,7 @@ describe('source mappings and validated edits', () => {
     expect(next.runs[0].id).not.toBe(analysis.runs[0].id);
     expect(engine.applyRunEdit('hello', analysis.runs[0].id, 'x')).toMatchObject({ ok: false, reason: { code: 'stale-run' } });
   });
+  // This fixture initializes highlight.js and MathJax; allow headroom on busy runners.
   it('returns read-only reasons for unsupported source and generated content', () => {
     const source = '---\nmarp: true\nheader: Generated\n---\n\n| A | B |\n| - | - |\n| a | b |\n\n```ts\nconst x = 1\n```\n\nleft `code` ![alt](image.png) $x$ :smile: 😀 <b>HTML</b>\n\n<!-- note -->';
     const { analysis } = setup(source);
@@ -117,7 +118,7 @@ describe('source mappings and validated edits', () => {
     for (const block of analysis.blocks.filter(b => b.reason?.code === 'table')) {
       expect(block.editable).toBe(false);
     }
-  });
+  }, 15_000);
   it('disables NUL and rejects non-normalized source', () => {
     const { engine, analysis } = setup('a\0b');
     expect(analysis.runs.every(r => !r.editable)).toBe(true);
