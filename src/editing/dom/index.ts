@@ -84,6 +84,8 @@ export interface DomEditingOptions {
   onReject(reason: ReadonlyReason): void;
   onHistory?(direction: 'undo' | 'redo'): void;
   onFinish?(): void;
+  /** Explicit or fallback composition completion, after settling retained DOM. */
+  onCompositionSettled?(): void;
 }
 
 /** Small DOM adapter. The host owns file state, undo/redo, click caret placement and final rerender. */
@@ -229,16 +231,19 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
   function paste(event: ClipboardEvent): void {
     event.preventDefault();
     if (composing || provisionalInput) { options.onReject(reason('unsupported-input', 'Finish composition before pasting')); return; }
+    if (event.clipboardData) insertText(plainPaste(event.clipboardData.getData('text/plain')));
+  }
+  function insertText(text: string): void {
     const why = inputGuard({ inputType: 'insertFromPaste' }, selection(), root);
     if (why) { options.onReject(why); return; }
     const currentSelection = selection();
-    if (!event.clipboardData || !currentSelection?.rangeCount) return;
+    if (!currentSelection?.rangeCount) return;
     const selected = runElement(currentSelection.getRangeAt(0).startContainer);
     if (selected !== active && selected && !begin(selected)) return;
     beforeSelection = captureSelection(root);
     const range = currentSelection.getRangeAt(0);
     range.deleteContents();
-    const node = root.ownerDocument.createTextNode(plainPaste(event.clipboardData.getData('text/plain')));
+    const node = root.ownerDocument.createTextNode(text);
     range.insertNode(node); range.setStartAfter(node); range.collapse(true);
     currentSelection.removeAllRanges(); currentSelection.addRange(range);
     commit();
@@ -251,11 +256,14 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
     } else if (event.key === 'Escape') { event.preventDefault(); finish(); }
   }
   function settleComposition(): void {
-    if (composing || provisionalInput) compositionEnded = true;
+    const pending = composing || provisionalInput;
+    if (pending) compositionEnded = true;
     composing = false; provisionalInput = false; commit();
+    if (pending && !composing) options.onCompositionSettled?.();
   }
   const onInput = (event: Event) => {
     if ((event as InputEvent).isComposing && !compositionEnded) { provisionalInput = true; return; }
+    if (!(event as InputEvent).isComposing && provisionalInput && !composing) { settleComposition(); return; }
     commit();
   };
   const onCompositionStart = () => { composing = true; compositionEnded = false; };
@@ -268,7 +276,7 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
   root.addEventListener('compositionstart', onCompositionStart);
   root.addEventListener('compositionend', onCompositionEnd);
   root.addEventListener('blur', onBlur, true);
-  return { begin, finish, settleComposition, getAnalysis: () => analysis, dispose() {
+  return { begin, finish, insertText, settleComposition, hasPendingComposition: () => composing || provisionalInput, getAnalysis: () => analysis, dispose() {
     finish();
     root.removeEventListener('beforeinput', beforeinput); root.removeEventListener('input', onInput);
     root.removeEventListener('paste', paste); root.removeEventListener('keydown', keydown);

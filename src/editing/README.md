@@ -35,6 +35,10 @@ Newline edits form a separate history entry from typing before and after them. S
 
 `bindEditing(root, engine, { analysis, onCommit, onReject, onHistory, onFinish })` returns `begin(runElement)`, `finish()`, `getAnalysis()` and `dispose()`.
 
+`hasPendingComposition()` includes provisional input whose compositionstart was missing. StageEditor consults it for confirmation Enter, without reopening the save gate from input flags. `onCompositionSettled` reports explicit and fallback completion after retained DOM has been settled; both start the same 100ms replay guard after commit work completes. `insertText(text)` shares the adapter's selection validation and range insertion with plain paste, and lets the host replay a text beforeinput whose original DOM target was removed by draft rollback.
+
+StageEditor also cancels an unfilled paragraph/line when selectionchange leaves its empty run, restoring source-mapped anchor/focus offsets and selection direction. Keydown and beforeinput cover delayed selection notifications; the latter prevents native mutation of a detached target and replays text into the restored run. Composition still suppresses this selection-driven DOM replacement.
+
 - The host handles clicks and caret placement, then calls `begin` on a verified run.
 - The adapter enables the containing block, freezes read-only islands, restricts `beforeinput`, flattens pasted plain text, waits for IME composition end, validates input and restores rejected DOM changes.
 - Rejected input restores the selection and block focus from run IDs and UTF-16 offsets captured before the browser mutation. Inline HTML contents are read-only; unmatched or uncertain HTML boundaries make the whole block read-only.
@@ -53,5 +57,6 @@ Newline edits form a separate history entry from typing before and after them. S
 - A token's enumerable symbol metadata survives Marp's unchanged Unicode-token clones. Split/transformed content fails the equality check and loses editability.
 - Lone CR line endings are rejected by the document boundary. LF, CRLF, mixed EOLs, final-newline presence, and BOM metadata are retained.
 - Happy DOM covers event flow and DOM restoration. Actual WebView2 click caret behavior, native Japanese IME, browser `beforeinput` variations, and Shadow DOM selection still require the application's integration checks.
+- A final IME DOM update delivered after the compositionend completion microtask can still arrive after a queued save has finished editing and replaced the run. The current save gate cannot await an unobserved future input; checking the current DOM before finish only covers updates that have already arrived. This ordering was reproduced with synthetic events and remains unresolved.
 
 The source model, engine and DOM adapter have Vitest coverage; `npx vitest run` and `npx tsc --noEmit` are the required checks. Markdown-it is explicitly pinned/overridden to 14.3.3, shared by Marp Core 4.4.0 through Marpit. Re-run the full editing suite for dependency upgrades. Vitest 5 requires Node 22.12+, Node 24, or Node 26+.

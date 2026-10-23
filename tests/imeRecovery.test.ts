@@ -7,9 +7,9 @@ import { createEngine } from '../src/editing'
 import type { RenderedDeck } from '../src/marp/renderer'
 import type { SlideSurface } from '../src/marp/surface'
 
-function setup() {
+function setup(source = '日本語') {
   const engine = createEngine(new Marp({ script: false }))
-  const model = new DocumentModel('日本語')
+  const model = new DocumentModel(source)
   let analysis = engine.analyze(model.text)
   let deck = { slides: [analysis.html] } as RenderedDeck
   const host = document.createElement('div')
@@ -17,7 +17,10 @@ function setup() {
   const root = host.attachShadow({ mode: 'open' })
   let crossRuns = 0
   const editor = new StageEditor({ root, update: (next: RenderedDeck) => { root.innerHTML = next.slides[0] } } as unknown as SlideSurface, engine, {
-    latest: () => ({ analysis, deck }), onBegin() {}, onEnd() {}, onNotice() {}, onHistory() {}, onCrossRun() { crossRuns++ },
+    latest: () => ({ analysis, deck }), onBegin() {}, onEnd() {}, onNotice() {}, onHistory() {},
+    onCrossRun(result, after, before) {
+      crossRuns++; model.edit(result.edit, { before, after }); analysis = result.analysis; deck = { slides: [analysis.html] } as RenderedDeck
+    },
     onCommit(result, cursors) {
       model.edit(result.edit, cursors)
       analysis = result.analysis
@@ -40,6 +43,41 @@ function setup() {
 afterEach(() => { document.body.innerHTML = ''; document.getSelection()?.removeAllRanges() })
 
 describe('WebView2 composition recovery', () => {
+  it.each(['beforeinput', 'input'])('an ordinary Enter after a provisional %s without compositionstart only confirms text, including a replay', input => {
+    const s = setup('AB')
+    try {
+      s.select(1)
+      if (input === 'beforeinput') s.send('beforeinput', { isComposing: true, inputType: 'insertCompositionText' })
+      s.run.textContent = 'A日本語B'; s.select(4)
+      if (input === 'input') s.send('input', { isComposing: true, inputType: 'insertCompositionText' })
+      s.key('Enter'); s.key('Enter'); s.send('beforeinput', { inputType: 'insertParagraph' })
+      expect(s.model.text).toBe('A日本語B'); expect(s.crossRuns()).toBe(0)
+    } finally { s.editor.dispose() }
+  })
+
+  it('a replayed Enter after ordinary-Enter recovery from a missing compositionend only confirms', () => {
+    const s = setup('AB')
+    try {
+      s.start(); s.run.textContent = 'A日本語B'; s.send('input', { isComposing: true }); s.select(4)
+      s.key('Enter'); s.key('Enter'); s.send('beforeinput', { inputType: 'insertParagraph' })
+      expect(s.model.text).toBe('A日本語B'); expect(s.crossRuns()).toBe(0)
+    } finally { s.editor.dispose() }
+  })
+
+  it.each(['Backspace', 'blur', 'finish', 'input', 'beforeinput'])('the %s fallback completion also suppresses a replayed confirmation Enter', action => {
+    const s = setup('AB')
+    try {
+      s.select(1); s.run.textContent = 'A日本語B'; s.send('input', { isComposing: true }); s.select(4)
+      if (action === 'blur') s.run.closest('[data-sm-block]')!.dispatchEvent(new FocusEvent('blur', { composed: true }))
+      else if (action === 'finish') s.editor.endEditing()
+      else if (action === 'input') s.send('input', { isComposing: false, inputType: 'insertFromComposition' })
+      else if (action === 'beforeinput') s.send('beforeinput', { inputType: 'insertParagraph' })
+      else s.key(action)
+      s.key('Enter')
+      expect(s.model.text).toBe('A日本語B'); expect(s.crossRuns()).toBe(0)
+    } finally { s.editor.dispose() }
+  })
+
   it.each(['input', 'beforeinput'])('late composing %s after compositionend cannot block deletion or saving', async late => {
     const s = setup()
     try {

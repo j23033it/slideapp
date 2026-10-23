@@ -4,13 +4,14 @@
  * 編集終了時のスライド単位の再描画を持つ。
  */
 import type { Cursor } from '../document'
-import { type Analysis, type EditingEngine, type EditResult, type ReadonlyCode } from '../editing'
+import { resolveCursor, type Analysis, type EditingEngine, type EditResult, type ReadonlyCode } from '../editing'
 import { bindEditing } from '../editing/dom'
 import type { RenderedDeck } from '../marp/renderer'
 import type { SlideSurface } from '../marp/surface'
 import {
   caretInRun,
   offsetInRun,
+  pointInRun,
   runElementOf,
   selectionInRun,
   setCaretInRun,
@@ -72,6 +73,15 @@ export class StageEditor {
   private readonly composition = new CompositionGate()
   private compositionEndToken: number | null = null
   private suppressEnterUntil = 0
+  private recoveringDraftSelection = false
+
+  private readonly suppressConfirmationEnter = (): void => {
+    this.suppressEnterUntil = performance.now() + 100
+  }
+
+  private hasPendingComposition(): boolean {
+    return this.composition.isComposing || (this.adapter?.hasPendingComposition() ?? false)
+  }
 
   private readonly onCompositionStart = (): void => {
     this.suppressEnterUntil = 0
@@ -80,7 +90,7 @@ export class StageEditor {
 
   private readonly onCompositionEnd = (): void => {
     // Some TSF IMEs replay the confirmation Enter as an ordinary keydown.
-    this.suppressEnterUntil = performance.now() + 100
+    this.suppressConfirmationEnter()
     // WebView2 では capture 側のマイクロタスクが、アダプタの bubble 側
     // compositionend より先に実行されることがある。解除はアダプタの後で行う。
     this.compositionEndToken = this.composition.markEnded()
@@ -99,8 +109,10 @@ export class StageEditor {
 
   /** Commit the retained DOM before releasing save/navigation waiters. */
   private settleComposition(): void {
+    const pending = this.hasPendingComposition()
     const token = this.composition.markEnded()
     this.adapter?.settleComposition()
+    if (pending && token === this.composition.markEnded()) this.suppressConfirmationEnter()
     this.composition.flush(token)
   }
 
@@ -165,13 +177,14 @@ export class StageEditor {
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
     if (event.isComposing || event.keyCode === 229) return
-    const wasComposing = this.composition.isComposing
+    const wasComposing = this.hasPendingComposition()
     if (event.key === 'Enter' && performance.now() <= this.suppressEnterUntil) {
       event.preventDefault()
       event.stopPropagation()
       return
     }
     this.settleComposition()
+    this.cancelAbandonedDraft()
     if (!this.editing) return
     if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault()
@@ -222,16 +235,70 @@ export class StageEditor {
 
   private readonly onBeforeInputCapture = (event: Event): void => {
     if (!this.editing) return
+    if (!(event instanceof InputEvent && event.isComposing) && this.cancelAbandonedDraft() && event instanceof InputEvent) {
+      // The event's original target was removed by rollback. Replay text into the
+      // restored selection rather than letting a native edit mutate detached DOM.
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      this.pendingBefore = this.currentCursor(false)
+      if (event.inputType === 'insertText' && event.data !== null) this.adapter?.insertText(event.data)
+      else if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') this.insertNewline(event.inputType === 'insertLineBreak' ? 'line' : 'paragraph')
+      else this.options.onNotice('unsupported-input')
+      return
+    }
     if (event instanceof InputEvent && ['insertParagraph', 'insertLineBreak'].includes(event.inputType)) {
       event.preventDefault()
       event.stopImmediatePropagation()
-      if (event.isComposing || this.composition.isComposing || performance.now() <= this.suppressEnterUntil) return
+      if (event.isComposing) return
+      if (this.hasPendingComposition()) { this.settleComposition(); return }
+      if (performance.now() <= this.suppressEnterUntil) return
       this.insertNewline(event.inputType === 'insertLineBreak' ? 'line' : 'paragraph')
       return
     }
     // IME変換中は最初の beforeinput の位置を履歴の起点にする
     if (this.pendingBefore && event instanceof InputEvent && event.isComposing) return
     if (!this.pendingBefore) this.pendingBefore = this.currentCursor(false)
+  }
+
+  private readonly onSelectionChange = (): void => { this.cancelAbandonedDraft() }
+
+  /** Roll back an unfilled line after navigation, retaining the actual selection. */
+  private cancelAbandonedDraft(): boolean {
+    const draft = this.analysis.draft
+    if (!draft || !this.editing || !this.adapter || this.recoveringDraftSelection || this.hasPendingComposition()) return false
+    const selection = this.root.ownerDocument.getSelection()
+    if (!selection?.rangeCount) return false
+    const capture = (node: Node | null, offset: number): Cursor | undefined => {
+      const element = runElementOf(node)
+      if (!element || !this.root.contains(element)) return
+      const position = offsetInRun(element, node, offset)
+      if (position !== null) return { runId: element.dataset.smRun!, offset: position }
+    }
+    const anchor = capture(selection.anchorNode, selection.anchorOffset)
+    const focus = capture(selection.focusNode, selection.focusOffset)
+    if (anchor?.runId === draft.runId && focus?.runId === draft.runId) return false
+    const oldRuns = this.analysis.runs
+    this.recoveringDraftSelection = true
+    try {
+      this.endEditing()
+      const restore = (cursor: Cursor | undefined): Cursor | undefined => {
+        if (!cursor) return
+        if (cursor.runId === draft.runId) return resolveCursor(this.analysis, draft.before)
+        const start = oldRuns.find(run => run.id === cursor.runId)?.segments[0]?.start
+        if (start === undefined) return
+        const source = start >= draft.edit.start + draft.edit.insert.length ? start - draft.edit.insert.length : start
+        const run = this.analysis.runs.find(run => run.editable && run.segments[0]?.start === source)
+        return run ? { runId: run.id, offset: cursor.offset } : undefined
+      }
+      const nextAnchor = restore(anchor), nextFocus = restore(focus)
+      if (nextAnchor && nextFocus) {
+        this.focusRun(nextAnchor)
+        const anchorElement = this.runElement(nextAnchor.runId), focusElement = this.runElement(nextFocus.runId)
+        const a = anchorElement && pointInRun(anchorElement, nextAnchor.offset), f = focusElement && pointInRun(focusElement, nextFocus.offset)
+        if (a && f) selection.setBaseAndExtent(a.node, a.offset, f.node, f.offset)
+      }
+    } finally { this.recoveringDraftSelection = false }
+    return true
   }
 
   private insertNewline(kind: 'line' | 'paragraph'): void {
@@ -264,6 +331,7 @@ export class StageEditor {
     root.addEventListener('compositionstart', this.onCompositionStart, true)
     root.addEventListener('compositionend', this.onCompositionEnd, true)
     root.addEventListener('blur', this.onBlur, true)
+    root.ownerDocument.addEventListener('selectionchange', this.onSelectionChange)
   }
 
   get root(): ShadowRoot {
@@ -310,12 +378,14 @@ export class StageEditor {
     root.removeEventListener('compositionstart', this.onCompositionStart, true)
     root.removeEventListener('compositionend', this.onCompositionEnd, true)
     root.removeEventListener('blur', this.onBlur, true)
+    root.ownerDocument.removeEventListener('selectionchange', this.onSelectionChange)
     this.endEditingSilently()
   }
 
   private bindEditingSession(analysis: Analysis): void {
     this.adapter = bindEditing(this.root as unknown as HTMLElement, this.engine, {
       analysis,
+      onCompositionSettled: this.suppressConfirmationEnter,
       onCommit: (result) => {
         this.analysis = result.analysis
         const before = this.pendingBefore

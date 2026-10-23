@@ -59,6 +59,67 @@ function setup(source: string, eol = '\n') {
 afterEach(() => { document.body.innerHTML = ''; document.getSelection()?.removeAllRanges() })
 
 describe.each(['\n', '\r\n'])('empty target events with %j', eol => {
+  it.each(['ArrowUp', 'ArrowLeft', 'Home', 'End', 'Tab', 'selectionchange', 'beforeinput'])('leaving an empty line through %s cancels the draft and permits typing at the restored caret', movement => {
+    const source = '# untouched\n\nA'
+    const s = setup(source, eol)
+    try {
+      const empty = s.enter('A', true)
+      if (movement !== 'selectionchange' && movement !== 'beforeinput') s.key(empty, movement)
+      const original = s.run('A')
+      document.getSelection()!.setBaseAndExtent(original.firstChild!, 1, original.firstChild!, 1)
+      if (movement !== 'beforeinput') document.dispatchEvent(new Event('selectionchange'))
+      // The event and its DOM mutation must target the fresh run after rollback.
+      let target = s.run('A')
+      if (movement === 'beforeinput') {
+        const event = new InputEvent('beforeinput', { bubbles: true, composed: true, cancelable: true, inputType: 'insertText', data: 'B' })
+        target.dispatchEvent(event)
+        if (!event.defaultPrevented) {
+          target = s.run('A'); target.textContent = 'AB'
+          document.getSelection()!.setBaseAndExtent(target.firstChild!, 2, target.firstChild!, 2)
+          target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: 'B' }))
+        } else target = s.run('AB')
+      } else {
+        expect(document.getSelection()?.anchorNode).toBe(target.firstChild)
+        expect(document.getSelection()?.anchorOffset).toBe(1)
+        s.type(target, 'AB')
+      }
+      expect(s.notices).toEqual([]); expect(s.model.serialize()).toBe((source + 'B').split('\n').join(eol))
+      expect(s.model.hasBom).toBe(true)
+      s.key(target, 'z', { ctrlKey: true })
+      expect(s.model.serialize()).toBe(source.split('\n').join(eol)); expect(s.model.canUndo).toBe(false)
+    } finally { s.editor.dispose() }
+  })
+
+  it('restores a caret after the cancelled paragraph, retaining backward selection and surrounding bytes', () => {
+    const source = '# untouched\n\nA\n\nXYZ'
+    const s = setup(source, eol)
+    try {
+      s.enter('A')
+      const other = s.run('XYZ')
+      document.getSelection()!.setBaseAndExtent(other.firstChild!, 2, other.firstChild!, 1)
+      document.dispatchEvent(new Event('selectionchange'))
+      const fresh = s.run('XYZ')
+      expect(document.getSelection()?.anchorNode).toBe(fresh.firstChild)
+      expect(document.getSelection()?.anchorOffset).toBe(2); expect(document.getSelection()?.focusOffset).toBe(1)
+      s.type(fresh, 'X!Z')
+      expect(s.model.serialize()).toBe('# untouched\n\nA\n\nX!Z'.split('\n').join(eol))
+      expect(s.notices).toEqual([])
+    } finally { s.editor.dispose() }
+  })
+
+  it('preserves a cross-run selection after rollback and still rejects typing across it', () => {
+    const s = setup('A\n\nOther', eol)
+    try {
+      s.enter('A')
+      document.getSelection()!.setBaseAndExtent(s.run('Other').firstChild!, 2, s.run('A').firstChild!, 0)
+      document.dispatchEvent(new Event('selectionchange'))
+      const event = new InputEvent('beforeinput', { bubbles: true, composed: true, cancelable: true, inputType: 'insertText', data: 'X' })
+      s.run('A').dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true); expect(s.notices).toEqual(['cross-run'])
+      expect(s.model.serialize()).toBe('A\n\nOther'.split('\n').join(eol)); expect(s.model.canUndo).toBe(false)
+    } finally { s.editor.dispose() }
+  })
+
   it.each([
     ['# before\n\n- A', false, '# before\n\n- A\n- 次', true],
     ['- parent\n  - A', false, '- parent\n  - A\n  - 次', true],
