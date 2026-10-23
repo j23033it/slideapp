@@ -161,21 +161,28 @@ export const strings = {
   },
 
   export: {
-    succeeded: (path: string) => `${path} に書き出しました`,
-    partial: (path: string) => `${path} に書き出しましたが、一部の要素を出力できませんでした。`,
-    failed: (message: string) => `PowerPointに書き出せませんでした: ${message}`,
-    writeFailed: (path: string, message: string) => `${path} に書き込めませんでした: ${message}`,
+    succeeded: (fileName: string) => `PowerPointに書き出しました：${fileName}`,
+    partial: (fileName: string) => `「${fileName}」に書き出しましたが、一部の内容を出力できませんでした。ファイルを確認してください。`,
+    failed: 'PowerPointに書き出せませんでした。もう一度お試しください。',
+    writeFailed: (fileName: string) => `「${fileName}」を保存できませんでした。保存先を確認してください。`,
     reportTitle: '書き出しレポート',
-    rasterized: (count: number) => `画像化した要素（${count}件）`,
-    rasterizedItem: (slide: number, element: string, reason: string) => `スライド ${slide} / ${element}: ${reason}`,
-    approximated: (count: number) => `近似した要素（${count}件）`,
-    approximatedItem: (slide: number, element: string, property: string, value: string, replacement: string) =>
-      `スライド ${slide} / ${element}: ${property}=${value} → ${replacement}`,
-    substitutedFonts: (count: number) => `代替フォント（${count}件）`,
-    substitutedFont: (requested: string, replacement: string) => `${requested} → ${replacement}`,
-    warnings: (count: number) => `警告（${count}件）`,
-    errors: (count: number) => `エラー（${count}件）`,
-    errorItem: (slide: number, element: string, reason: string) => `スライド ${slide} / ${element}: ${reason}`,
+    rasterizedTitle: '画像として書き出した部分',
+    rasterizedSlide: (slide: number, count: number) =>
+      `スライド${slide}の一部${count}か所は、見た目を保つため画像として書き出しました。`,
+    rasterizedUnassigned: (count: number) =>
+      `${count}か所は、見た目を保つため画像として書き出しました。`,
+    rasterizedEditingLimit: '画像内の文字はPowerPointで編集できません。',
+    substitutedFontsTitle: '代用したフォント',
+    substitutedFont: (requested: string, replacement: string) =>
+      `このPCにないフォント『${requested}』は『${replacement}』で代用しました。`,
+    warningTitle: '確認してください',
+    webFontUnavailable: 'Webフォントを読み込めなかったため、利用可能なフォントで書き出しました。',
+    fontLoadFailed: 'フォントを読み込めませんでした。表示が異なる場合があります。',
+    genericWarning: '書き出し時に確認が必要な項目があります。詳しくは「詳細」を確認してください。',
+    errorsTitle: '書き出せなかった内容',
+    errorSlide: (slide: number, count: number) => `スライド${slide}の一部${count}か所を書き出せませんでした。`,
+    details: '詳細',
+    errorDetail: (slide: number, element: string, reason: string) => `スライド${slide} / ${element}: ${reason}`,
     close: '閉じる',
   },
 

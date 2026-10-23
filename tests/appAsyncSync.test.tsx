@@ -272,15 +272,20 @@ describe('PowerPoint export', () => {
     expect(host.textContent).not.toContain(strings.status.exporting)
   })
 
-  it('exports unsaved Markdown and presents all successful report details', async () => {
+  it('exports unsaved Markdown and presents a plain-language report', async () => {
     const bytes = new Uint8Array([9, 8, 7])
+    const warning = 'Web font stylesheet could not be embedded: https://example.invalid/fonts.css. Local fallback fonts were used.'
     const report: ExportReport = {
       ...cleanExportReport,
-      rasterizedCount: 1,
-      rasterizedElements: [{ slide: 1, element: 'math', reason: 'MathJax' }],
+      rasterizedCount: 3,
+      rasterizedElements: [
+        { slide: 3, element: 'math', reason: 'MathJax internals' },
+        { slide: 3, element: 'svg', reason: 'Unsupported SVG path' },
+        { slide: 4, element: 'border', reason: 'Unsupported border style' },
+      ],
       approximatedElements: [{ slide: 1, element: 'h1', property: 'letter-spacing', value: '1px', replacement: 'PowerPoint spacing' }],
       substitutedFonts: [{ requested: 'Noto Sans JP', replacement: 'Yu Gothic' }],
-      warnings: ['Web font unavailable'],
+      warnings: [warning],
     }
     vi.mocked(exportPptx).mockResolvedValue({ bytes, report })
 
@@ -293,22 +298,52 @@ describe('PowerPoint export', () => {
     expect(source.marp).toBeDefined()
     expect(platform.saveFile).not.toHaveBeenCalled()
     expect(platform.writeBinary).toHaveBeenCalledWith('C:\\deck\\deck.pptx', bytes)
-    expect(host.textContent).toContain(strings.export.rasterized(1))
-    expect(host.textContent).toContain('MathJax')
-    expect(host.textContent).toContain('PowerPoint spacing')
-    expect(host.textContent).toContain('Noto Sans JP → Yu Gothic')
-    expect(host.textContent).toContain('Web font unavailable')
-    expect(host.querySelector('[role="dialog"]')).not.toBeNull()
+    const dialog = host.querySelector('[role="dialog"]')!
+    expect(dialog).not.toBeNull()
+    const sections = [...dialog.querySelectorAll('.export-report-section')]
+    const visibleReport = sections.map((section) => section.textContent).join(' ')
+    expect(visibleReport).toContain(strings.export.rasterizedSlide(3, 2))
+    expect(visibleReport).toContain(strings.export.rasterizedSlide(4, 1))
+    expect(visibleReport).toContain(strings.export.rasterizedEditingLimit)
+    expect(visibleReport).toContain(strings.export.substitutedFont('Noto Sans JP', 'Yu Gothic'))
+    expect(visibleReport).toContain(strings.export.webFontUnavailable)
+    expect(visibleReport).not.toContain('math')
+    expect(visibleReport).not.toContain('MathJax')
+    expect(visibleReport).not.toContain('letter-spacing')
+    expect(visibleReport).not.toContain('PowerPoint spacing')
+    const details = dialog.querySelector('details')!
+    expect(details.open).toBe(false)
+    expect(details.textContent).toContain(warning)
 
     await flush(() => click(strings.export.close))
     expect(host.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('does not show a dialog or approximation details when approximations are the only report items', async () => {
+    vi.mocked(exportPptx).mockResolvedValue({
+      bytes: new Uint8Array([1]),
+      report: {
+        ...cleanExportReport,
+        approximatedElements: [
+          { slide: 2, element: 'li::marker', property: 'list-style-type', value: 'disc', replacement: 'Verdana U+2022 at 110%' },
+        ],
+      },
+    })
+
+    await flush(() => click(strings.toolbar.exportPptx))
+
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('[role="status"]')?.textContent).toContain(strings.export.succeeded('deck.pptx'))
+    expect(host.textContent).not.toContain('近似した要素')
+    expect(host.textContent).not.toContain('list-style-type')
+    expect(host.textContent).not.toContain('Verdana U+2022')
   })
 
   it('shows a concise success message when the report has no issues', async () => {
     await flush(() => click(strings.toolbar.exportPptx))
 
     expect(host.querySelector('[role="status"]')?.textContent)
-      .toContain(strings.export.succeeded('C:\\deck\\deck.pptx'))
+      .toContain(strings.export.succeeded('deck.pptx'))
     expect(host.querySelector('[role="dialog"]')).toBeNull()
   })
 
@@ -316,7 +351,10 @@ describe('PowerPoint export', () => {
     vi.mocked(exportPptx).mockRejectedValue(new Error('renderer failed'))
     await flush(() => click(strings.toolbar.exportPptx))
 
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain(strings.export.failed('renderer failed'))
+    expect(host.querySelector('[role="alert"] .banner-message')?.textContent).toContain(strings.export.failed)
+    expect(host.querySelector('[role="alert"] .banner-message')?.textContent).not.toContain('renderer failed')
+    expect(host.querySelector<HTMLDetailsElement>('[role="alert"] details')?.open).toBe(false)
+    expect(host.querySelector('[role="alert"] details')?.textContent).toContain('renderer failed')
     expect(platform.writeBinary).not.toHaveBeenCalled()
   })
 
@@ -333,9 +371,14 @@ describe('PowerPoint export', () => {
     await flush(() => click(strings.toolbar.exportPptx))
 
     expect(platform.writeBinary).toHaveBeenCalledTimes(1)
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain(strings.export.partial('C:\\deck\\deck.pptx'))
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain('asset unavailable')
-    expect(host.querySelector('[role="dialog"]')?.textContent).toContain(strings.export.errors(1))
+    expect(host.querySelector('[role="alert"] .banner-message')?.textContent).toContain(strings.export.partial('deck.pptx'))
+    const dialog = host.querySelector('[role="dialog"]')!
+    expect(dialog.textContent).toContain(strings.export.errorSlide(2, 1))
+    expect([...dialog.querySelectorAll('.export-report-section')].map((section) => section.textContent).join(' '))
+      .not.toContain('asset unavailable')
+    const details = dialog.querySelector('details')!
+    expect(details.open).toBe(false)
+    expect(details.textContent).toContain('asset unavailable')
     const closeReport = [...host.querySelector('[role="dialog"]')!.querySelectorAll('button')]
       .find((item) => item.textContent === strings.export.close)
     await flush(() => closeReport!.click())
@@ -346,9 +389,12 @@ describe('PowerPoint export', () => {
     vi.mocked(platform.writeBinary).mockRejectedValue(new Error('disk full'))
     await flush(() => click(strings.toolbar.exportPptx))
 
-    expect(host.querySelector('[role="alert"]')?.textContent)
-      .toContain(strings.export.writeFailed('C:\\deck\\deck.pptx', 'disk full'))
-    expect(host.textContent).not.toContain(strings.export.succeeded('C:\\deck\\deck.pptx'))
+    expect(host.querySelector('[role="alert"] .banner-message')?.textContent)
+      .toContain(strings.export.writeFailed('deck.pptx'))
+    expect(host.querySelector('[role="alert"] .banner-message')?.textContent).not.toContain('disk full')
+    expect(host.querySelector<HTMLDetailsElement>('[role="alert"] details')?.open).toBe(false)
+    expect(host.querySelector('[role="alert"] details')?.textContent).toContain('disk full')
+    expect(host.textContent).not.toContain(strings.export.succeeded('deck.pptx'))
   })
 
   it('waits for IME composition and blocks duplicate exports until completion', async () => {
