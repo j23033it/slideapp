@@ -2,6 +2,8 @@ import { replaceRange, type Cursor, type SourceEdit } from '../document/model';
 import { mapBlockLines, sourceRange } from './blocks';
 import type { MarpLike, Markdown, Token } from './markdown-types';
 import { getSegments, installTracking } from './tracking';
+import { planNewline, type NewlineKind } from './newline';
+import { emptyItemPositions, tokenSignature, withoutEmptyItemShells } from './empty';
 import { reason, type Analysis, type Block, type EditResult, type ReadonlyReason, type Run } from './types';
 
 const engines = new WeakMap<object, EditingEngine>();
@@ -21,7 +23,8 @@ function tokenReason(token: Token): ReadonlyReason | undefined {
 }
 function attributes(token: Token): [string, string][] | null {
   // Slugs are a rendering derivative of heading text, not source structure.
-  return token.attrs?.filter(([name]) => !name.startsWith('data-sm-') && !(name === 'id' && /^h[1-6]$/.test(token.tag))) ?? null;
+  const kept = token.attrs?.filter(([name]) => !name.startsWith('data-sm-') && !(name === 'id' && /^h[1-6]$/.test(token.tag)));
+  return kept?.length ? kept : null;
 }
 function shape(token: Token): unknown {
   return [token.type, token.tag, token.nesting, token.markup, token.info, token.hidden, attributes(token),
@@ -64,7 +67,11 @@ export interface EditingEngine {
   analyze(text: string): Analysis;
   /** Uses only the latest analysis; old IDs are rejected, never silently rebound. */
   applyRunEdit(text: string, runId: string, newRunText: string): EditResult;
+  applyNewline(text: string, runId: string, offset: number, kind: NewlineKind): NewlineResult;
+  cancelDraft(text: string): NewlineResult;
 }
+
+export type NewlineResult = (Extract<EditResult, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
 
 export function createEngine(marp: MarpLike): EditingEngine {
   const existing = engines.get(marp);
@@ -75,29 +82,74 @@ export function createEngine(marp: MarpLike): EditingEngine {
   let pending: Analysis | undefined;
   let reuseIds: Analysis | undefined;
   let revision = 0;
+  const analysisTokens = new WeakMap<Analysis, Token[]>();
+  const rawTokens = new WeakMap<Analysis, Token[]>();
+  let emptyPositions: number[] = [];
   wrapRenderers(md);
 
   md.core.ruler.push('sm_source_map', state => {
     if (!pending) return;
     collect(state.src, state.tokens, pending, ++revision, reuseIds);
+    if (emptyPositions.length) {
+      const probePositions = emptyPositions.map((position, index) => position + index);
+      for (const token of state.tokens) {
+        if (token.type !== 'inline') continue;
+        for (const child of token.children ?? []) {
+          const run = tokenRuns.get(child);
+          if (!run) continue;
+          const first = run.segments[0];
+          const anchor = first && probePositions.indexOf(first.start);
+          if (anchor !== undefined && anchor >= 0 && run.text === 'x' && first.end === first.start + 1) {
+            const traceStart = getSegments(child)?.[0]?.start;
+            if (traceStart !== undefined) token.content = token.content.slice(0, traceStart) + token.content.slice(traceStart + 1);
+            child.content = ''; run.text = '';
+            run.segments = [{ start: emptyPositions[anchor], end: emptyPositions[anchor], text: '', kind: 'literal' }];
+          } else {
+            for (const segment of run.segments) {
+              segment.start -= probePositions.filter(position => position < segment.start).length;
+              segment.end -= probePositions.filter(position => position < segment.end).length;
+            }
+          }
+        }
+      }
+    }
+    analysisTokens.set(pending, state.tokens);
   });
 
-  function renderAnalysis(text: string, reuse?: Analysis): Analysis {
+  function renderAnalysis(text: string, reuse?: Analysis, extraEmpty?: number, probes?: number[]): Analysis {
     if (text.includes('\r') || text.startsWith('\uFEFF')) throw new Error('Engine requires LF normalized, BOM-free text');
     const analysis: Analysis = { text, html: '', css: '', runs: [], blocks: [], readonly: [], structure: '', inlineStructure: [] };
     pending = analysis;
     reuseIds = reuse;
+    emptyPositions = probes ?? [];
     try {
-      const result = marp.render(text);
+      let renderText = text;
+      for (const position of [...emptyPositions].reverse()) renderText = replaceRange(renderText, { start: position, end: position, insert: 'x' });
+      const result = marp.render(renderText);
       analysis.html = result.html; analysis.css = result.css;
       // Renderer wrappers may have discovered additional read-only transforms.
       for (const run of analysis.runs) if (run.reason && !analysis.readonly.some(r => r.runId === run.id)) {
         analysis.readonly.push({ blockId: run.blockId, runId: run.id, tokenType: 'text', reason: run.reason });
       }
       for (const block of analysis.blocks) block.editable = block.runs.some(id => analysis.runs.find(run => run.id === id)?.editable);
+      if (!probes) {
+        const actual = analysisTokens.get(analysis) ?? [];
+        const positions = emptyItemPositions(text, actual);
+        if (extraEmpty !== undefined) positions.push(extraEmpty);
+        if (positions.length) {
+          const editable = renderAnalysis(text, reuse, undefined, [...new Set(positions)].sort((a, b) => a - b));
+          // Permanent empty items may gain only their editable paragraph shell.
+          if (extraEmpty === undefined && tokenSignature(withoutEmptyItemShells(actual), shape) !==
+              tokenSignature(withoutEmptyItemShells(analysisTokens.get(editable) ?? []), shape)) {
+            current = analysis; return analysis;
+          }
+          rawTokens.set(editable, actual);
+          return editable;
+        }
+      }
       current = analysis;
       return analysis;
-    } finally { pending = undefined; reuseIds = undefined; }
+    } finally { pending = undefined; reuseIds = undefined; emptyPositions = []; }
   }
   function analyze(text: string): Analysis { return renderAnalysis(text); }
 
@@ -106,6 +158,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     const run = before?.runs.find(run => run.id === runId);
     const fail = (why: ReadonlyReason): EditResult => { current = before; return { ok: false, reason: why }; };
     if (!before || before.text !== text || !run) return fail(reason('stale-run', 'Analyze this document revision before editing'));
+    if (before.draft && before.draft.runId !== runId) return fail(reason('cross-run', 'Finish the empty-line draft before editing another run'));
     if (!run.editable) return fail(run.reason ?? reason('ambiguous-source', 'Run has no verified source map'));
     if (/[\r\n\0]/.test(newRunText)) return fail(reason('newline', 'Run edits cannot insert newlines or NUL'));
     const edit = makeRunEdit(run, newRunText);
@@ -117,6 +170,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
       try { after = renderAnalysis(newText, before); }
       catch { parseFailed = true; return; }
       if (!validEdit(before, after, run, newRunText)) return;
+      if (before.draft) candidate = { ...candidate, draft: 'accept' };
       return { ok: true, edit: candidate, newText, analysis: after, escaped };
     };
     const direct = tryEdit(edit, false);
@@ -130,7 +184,41 @@ export function createEngine(marp: MarpLike): EditingEngine {
       reason('structure-changed', 'Edit changes Markdown structure or other displayed text'));
   }
 
-  const engine = { analyze, applyRunEdit };
+  function applyNewline(text: string, runId: string, offset: number, kind: NewlineKind): NewlineResult {
+    const before = current;
+    const run = before?.runs.find(entry => entry.id === runId);
+    const fail = (why: ReadonlyReason): NewlineResult => { current = before; return { ok: false, reason: why }; };
+    if (!before || before.text !== text || !run) return fail(reason('stale-run', 'Analyze this document revision before editing'));
+    if (before.draft) return fail(reason('structure-changed', 'Fill or finish the pending empty line before inserting another newline'));
+    if (!run.editable) return fail(run.reason ?? reason('ambiguous-source', 'Run has no verified source map'));
+    const tokens = analysisTokens.get(before);
+    const plan = tokens && planNewline(text, tokens, run, offset, kind, token => tokenRuns.get(token), shape);
+    if (!plan) return fail(reason('structure-changed', 'A newline cannot safely split this location or its decoration'));
+    const newText = replaceRange(text, plan.edit);
+    let after: Analysis;
+    try { after = renderAnalysis(newText, undefined, plan.empty && plan.empty !== 'item' ? plan.caretSource : undefined); }
+    catch { return fail(reason('invalid-source', 'Parser could not validate the newline')); }
+    if (!plan.validate(analysisTokens.get(after) ?? [])) return fail(reason('structure-changed', 'Newline changes other content or Markdown structure'));
+    if (plan.validateRaw && !plan.validateRaw(rawTokens.get(after) ?? analysisTokens.get(after) ?? [])) return fail(reason('structure-changed', 'Empty item changes other Markdown structure'));
+    const target = after.runs.find(entry => entry.editable && entry.segments[0]?.start === plan.caretSource);
+    if (!target) return fail(reason('ambiguous-source', 'The new line has no verified editable caret position'));
+    if (plan.edit.draft === 'begin') after.draft = { runId: target.id, edit: plan.edit, before: { runId, offset } };
+    return { ok: true, edit: plan.edit, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset: 0 } };
+  }
+
+  function cancelDraft(text: string): NewlineResult {
+    const before = current;
+    if (!before?.draft || before.text !== text) return { ok: false, reason: reason('stale-run', 'There is no current empty-line draft') };
+    const original = before.draft.edit;
+    const edit: SourceEdit = { start: original.start, end: original.start + original.insert.length, insert: '', draft: 'cancel' };
+    const newText = replaceRange(text, edit);
+    const analysis = renderAnalysis(newText);
+    const cursor = resolveCursor(analysis, before.draft.before);
+    if (!cursor) { current = before; return { ok: false, reason: reason('ambiguous-source', 'The original caret cannot be restored') }; }
+    return { ok: true, edit, newText, analysis, escaped: false, cursor };
+  }
+
+  const engine = { analyze, applyRunEdit, applyNewline, cancelDraft };
   engines.set(marp, engine);
   return engine;
 }
@@ -201,7 +289,7 @@ function wrapRenderers(md: Markdown): void {
     if (html !== md.utils.escapeHtml(token.content)) {
       run.editable = false; run.reason = reason('renderer-transform', 'Renderer changed the token text');
     }
-    return `<span data-sm-run="${run.id}">${html}</span>`;
+    return `<span data-sm-run="${run.id}"${run.text === '' ? ' data-sm-empty="" style="display:inline-block;min-width:0.5em;min-height:1em"' : ''}>${html}</span>`;
   };
 }
 
@@ -249,7 +337,7 @@ export function makeRunEdit(run: Run, newText: string): SourceEdit | undefined {
   return { start: sourceStart, end: sourceEnd, insert };
 }
 
-/** Validated P0 edits preserve run order. Restore history cursors after a fresh analysis. */
+/** Restore an ordinal recorded for this history revision after a fresh analysis. */
 export function resolveCursor(analysis: Analysis, cursor: Cursor): Cursor | undefined {
   const ordinal = /^r\d+-(\d+)$/.exec(cursor.runId)?.[1];
   const run = ordinal === undefined ? undefined : analysis.runs[Number(ordinal)];

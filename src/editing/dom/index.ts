@@ -93,9 +93,22 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
   let block: HTMLElement | null = null;
   let snapshot = '';
   let composing = false;
+  // A late isComposing input after compositionend belongs to the ended session.
+  let compositionEnded = false;
+  let provisionalInput = false;
+  let enabledBlock: HTMLElement | null = null;
+  const blockSnapshots = new Map<HTMLElement, string>();
   let beforeSelection: RunSelection | undefined;
   const selection = () => root.ownerDocument.getSelection();
   verifyRenderedRuns(root, analysis);
+
+  function refreshSnapshots(): void {
+    const container = enabledBlock ?? block;
+    blockSnapshots.clear();
+    if (!container) return;
+    blockSnapshots.set(container, container.innerHTML);
+    for (const nested of container.querySelectorAll<HTMLElement>('[data-sm-block]')) blockSnapshots.set(nested, nested.innerHTML);
+  }
 
   function prepare(): void {
     if (!block) return;
@@ -114,16 +127,22 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
       }
     }
   }
-  function begin(run: HTMLElement): boolean {
+  function begin(run: HTMLElement, provisional = false): boolean {
     const id = run.dataset.smRun;
     let entry = analysis.runs.find(r => r.id === id);
     if (!root.contains(run) || !entry?.editable) { options.onReject(entry?.reason ?? reason('ambiguous-source', 'Run is not editable')); return false; }
     let nextBlock = run.closest<HTMLElement>('[data-sm-block]');
+    if (composing || provisional) {
+      // Do not toggle attributes, verify provisional text, or snapshot mutated
+      // markup during IME. Nested blocks inherit the already-enabled container.
+      const saved = nextBlock ? blockSnapshots.get(nextBlock) : undefined;
+      if (!nextBlock || saved === undefined) { options.onReject(reason('cross-run', 'Finish composition before switching blocks')); return false; }
+      active = run; block = nextBlock; snapshot = saved;
+      return true;
+    }
     if (active !== run && block !== nextBlock) {
       const savedSelection = captureSelection(root);
-      // A host rerender during composition would destroy the browser's provisional text.
-      if (composing) deactivate();
-      else finish();
+      finish();
       verifyRenderedRuns(root, analysis);
       const currentRun = root.querySelector<HTMLElement>(`[data-sm-run="${id}"]`);
       entry = analysis.runs.find(r => r.id === id);
@@ -143,14 +162,19 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
     block = nextBlock;
     if (!block) { active = null; options.onReject(reason('dom-mismatch', 'Editable block is missing')); return false; }
     prepare(); snapshot = block.innerHTML;
+    enabledBlock = block;
+    refreshSnapshots();
     return true;
   }
   function deactivate(): void {
     block?.removeAttribute('contenteditable');
+    enabledBlock?.removeAttribute('contenteditable');
+    enabledBlock = null; blockSnapshots.clear();
     active = null; block = null; beforeSelection = undefined;
   }
   function finish(): void {
     if (!active) return;
+    settleComposition();
     deactivate();
     options.onFinish?.();
   }
@@ -186,20 +210,25 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
       root.querySelector<HTMLElement>(`[data-sm-block="${analysis.blocks[i].id}"]`)?.setAttribute('data-sm-block', result.analysis.blocks[i].id);
     }
     analysis = result.analysis;
+    if (active.hasAttribute('data-sm-empty')) {
+      active.removeAttribute('data-sm-empty'); active.removeAttribute('style');
+    }
     verifyRenderedRuns(root, analysis); prepare(); snapshot = block?.innerHTML ?? '';
+    refreshSnapshots();
     beforeSelection = undefined;
     options.onCommit(result);
   }
   function beforeinput(event: InputEvent): void {
-    if (event.isComposing) composing = true;
+    if (event.isComposing && !compositionEnded) provisionalInput = true;
     const why = inputGuard(event, selection(), root);
     if (why) { event.preventDefault(); options.onReject(why); return; }
     const selected = runElement(selection()?.getRangeAt(0).startContainer ?? null);
-    if (selected !== active && selected && !begin(selected)) { event.preventDefault(); return; }
+    if (selected !== active && selected && !begin(selected, event.isComposing && !compositionEnded)) { event.preventDefault(); return; }
     if (!composing || !beforeSelection) beforeSelection = captureSelection(root);
   }
   function paste(event: ClipboardEvent): void {
     event.preventDefault();
+    if (composing || provisionalInput) { options.onReject(reason('unsupported-input', 'Finish composition before pasting')); return; }
     const why = inputGuard({ inputType: 'insertFromPaste' }, selection(), root);
     if (why) { options.onReject(why); return; }
     const currentSelection = selection();
@@ -215,24 +244,35 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
     commit();
   }
   function keydown(event: KeyboardEvent): void {
-    if (event.isComposing || composing) return;
+    if (event.isComposing || event.keyCode === 229) return;
+    settleComposition();
     if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
       event.preventDefault(); options.onHistory?.(event.key.toLowerCase() === 'y' || event.shiftKey ? 'redo' : 'undo');
     } else if (event.key === 'Escape') { event.preventDefault(); finish(); }
   }
-  const onInput = (event: Event) => { if ((event as InputEvent).isComposing) composing = true; commit(); };
-  const onCompositionStart = () => { composing = true; };
-  const onCompositionEnd = () => { composing = false; commit(); };
+  function settleComposition(): void {
+    if (composing || provisionalInput) compositionEnded = true;
+    composing = false; provisionalInput = false; commit();
+  }
+  const onInput = (event: Event) => {
+    if ((event as InputEvent).isComposing && !compositionEnded) { provisionalInput = true; return; }
+    commit();
+  };
+  const onCompositionStart = () => { composing = true; compositionEnded = false; };
+  const onCompositionEnd = () => { compositionEnded = true; settleComposition(); };
+  const onBlur = () => { if (composing || provisionalInput) settleComposition(); };
   root.addEventListener('beforeinput', beforeinput);
   root.addEventListener('input', onInput);
   root.addEventListener('paste', paste);
   root.addEventListener('keydown', keydown);
   root.addEventListener('compositionstart', onCompositionStart);
   root.addEventListener('compositionend', onCompositionEnd);
-  return { begin, finish, getAnalysis: () => analysis, dispose() {
+  root.addEventListener('blur', onBlur, true);
+  return { begin, finish, settleComposition, getAnalysis: () => analysis, dispose() {
     finish();
     root.removeEventListener('beforeinput', beforeinput); root.removeEventListener('input', onInput);
     root.removeEventListener('paste', paste); root.removeEventListener('keydown', keydown);
     root.removeEventListener('compositionstart', onCompositionStart); root.removeEventListener('compositionend', onCompositionEnd);
+    root.removeEventListener('blur', onBlur, true);
   } };
 }

@@ -71,12 +71,16 @@ export class StageEditor {
   private lastFocusSeq = -1
   private readonly composition = new CompositionGate()
   private compositionEndToken: number | null = null
+  private suppressEnterUntil = 0
 
   private readonly onCompositionStart = (): void => {
+    this.suppressEnterUntil = 0
     this.composition.start()
   }
 
   private readonly onCompositionEnd = (): void => {
+    // Some TSF IMEs replay the confirmation Enter as an ordinary keydown.
+    this.suppressEnterUntil = performance.now() + 100
     // WebView2 では capture 側のマイクロタスクが、アダプタの bubble 側
     // compositionend より先に実行されることがある。解除はアダプタの後で行う。
     this.compositionEndToken = this.composition.markEnded()
@@ -85,24 +89,41 @@ export class StageEditor {
   private readonly onCompositionEndSettled = (): void => {
     const token = this.compositionEndToken
     this.compositionEndToken = null
-    if (token !== null) this.composition.flush(token)
+    if (token !== null) queueMicrotask(() => this.composition.flush(token))
   }
 
-  private readonly onCompositionInput = (raw: Event): void => {
-    if (raw instanceof InputEvent && raw.isComposing) this.composition.start()
+  private readonly onBlur = (): void => {
+    this.settleComposition()
+    if (this.analysis.draft) this.adapter?.finish()
+  }
+
+  /** Commit the retained DOM before releasing save/navigation waiters. */
+  private settleComposition(): void {
+    const token = this.composition.markEnded()
+    this.adapter?.settleComposition()
+    this.composition.flush(token)
   }
 
   private readonly onClick = (raw: Event): void => {
     const event = raw as MouseEvent
     if (event.button !== 0) return
+    this.suppressEnterUntil = 0
+    this.settleComposition()
     const target = event.composedPath()[0]
     const element = target instanceof Element ? target : null
     if (!element || !this.root.contains(element)) return
 
-    const runElement = element.closest<HTMLElement>('[data-sm-run]')
-    const run = runElement
-      ? this.analysis.runs.find((entry) => entry.id === runElement.dataset.smRun)
-      : undefined
+    let runElement = element.closest<HTMLElement>('[data-sm-run]')
+    const clickedId = runElement?.dataset.smRun
+    let run = this.analysis.runs.find((entry) => entry.id === clickedId)
+    if (this.analysis.draft && run?.id !== this.analysis.draft.runId) {
+      const insertion = this.analysis.draft.edit
+      const oldSource = run?.segments[0]?.start
+      const source = oldSource === undefined ? undefined : oldSource >= insertion.start + insertion.insert.length ? oldSource - insertion.insert.length : oldSource
+      this.endEditing()
+      run = source === undefined ? undefined : this.analysis.runs.find(entry => entry.segments[0]?.start === source)
+      runElement = run ? this.runElement(run.id) : null
+    }
 
     if (runElement && run?.editable) {
       const id = run.id
@@ -143,7 +164,22 @@ export class StageEditor {
 
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
-    if (event.isComposing || !this.editing) return
+    if (event.isComposing || event.keyCode === 229) return
+    const wasComposing = this.composition.isComposing
+    if (event.key === 'Enter' && performance.now() <= this.suppressEnterUntil) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    this.settleComposition()
+    if (!this.editing) return
+    if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (wasComposing) return
+      this.insertNewline(event.shiftKey ? 'line' : 'paragraph')
+      return
+    }
     if (event.key !== 'Backspace' && event.key !== 'Delete') return
     const selection = this.root.ownerDocument.getSelection()
     if (!selection || selection.rangeCount !== 1) return
@@ -186,10 +222,30 @@ export class StageEditor {
 
   private readonly onBeforeInputCapture = (event: Event): void => {
     if (!this.editing) return
+    if (event instanceof InputEvent && ['insertParagraph', 'insertLineBreak'].includes(event.inputType)) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      if (event.isComposing || this.composition.isComposing || performance.now() <= this.suppressEnterUntil) return
+      this.insertNewline(event.inputType === 'insertLineBreak' ? 'line' : 'paragraph')
+      return
+    }
     // IME変換中は最初の beforeinput の位置を履歴の起点にする
     if (this.pendingBefore && event instanceof InputEvent && event.isComposing) return
-    if (event instanceof InputEvent && event.isComposing) this.composition.start()
     if (!this.pendingBefore) this.pendingBefore = this.currentCursor(false)
+  }
+
+  private insertNewline(kind: 'line' | 'paragraph'): void {
+    const selection = this.root.ownerDocument.getSelection()
+    const before = this.currentCursor(false)
+    if (!selection?.isCollapsed || !before) {
+      this.options.onNotice('cross-run')
+      return
+    }
+    const result = this.engine.applyNewline(this.analysis.text, before.runId, before.offset, kind)
+    if (!result.ok) { this.options.onNotice(result.reason.code); return }
+    this.analysis = result.analysis
+    this.endEditingSilently()
+    this.options.onCrossRun(result, result.cursor, before)
   }
 
   constructor(
@@ -207,7 +263,7 @@ export class StageEditor {
     root.addEventListener('paste', this.onBeforeInputCapture, true)
     root.addEventListener('compositionstart', this.onCompositionStart, true)
     root.addEventListener('compositionend', this.onCompositionEnd, true)
-    root.addEventListener('input', this.onCompositionInput, true)
+    root.addEventListener('blur', this.onBlur, true)
   }
 
   get root(): ShadowRoot {
@@ -229,9 +285,9 @@ export class StageEditor {
     }
   }
 
-  /** 編集中なら終了する（再描画は onFinish 経由）。IME変換中は確定を待つ */
+  /** 編集中なら残ったDOMをコミットして終了する（再描画は onFinish 経由）。 */
   endEditing(): void {
-    if (this.composition.isComposing) return
+    this.settleComposition()
     this.adapter?.finish()
   }
 
@@ -253,7 +309,7 @@ export class StageEditor {
     root.removeEventListener('paste', this.onBeforeInputCapture, true)
     root.removeEventListener('compositionstart', this.onCompositionStart, true)
     root.removeEventListener('compositionend', this.onCompositionEnd, true)
-    root.removeEventListener('input', this.onCompositionInput, true)
+    root.removeEventListener('blur', this.onBlur, true)
     this.endEditingSilently()
   }
 
@@ -272,6 +328,15 @@ export class StageEditor {
       },
       onHistory: (direction) => {
         this.pendingBefore = undefined
+        if (this.analysis.draft) {
+          if (direction === 'redo') { this.endEditing(); this.options.onHistory(direction); return }
+          const result = this.engine.cancelDraft(this.analysis.text)
+          if (!result.ok) { this.options.onNotice(result.reason.code); return }
+          this.analysis = result.analysis
+          this.endEditingSilently()
+          this.options.onCrossRun(result, result.cursor)
+          return
+        }
         this.options.onHistory(direction)
       },
       onFinish: () => this.handleFinish(),
@@ -284,10 +349,21 @@ export class StageEditor {
   /** 編集終了: 最新の解析結果でスライドだけを差し替え、サムネイル更新を依頼する */
   private handleFinish(): void {
     if (this.suppressFinish) return
+    const cancelled = !!this.analysis.draft
+    if (this.analysis.draft) {
+      const result = this.engine.cancelDraft(this.analysis.text)
+      if (!result.ok) { this.options.onNotice(result.reason.code); return }
+      this.analysis = result.analysis
+      this.options.onCommit(result, {})
+    }
     const latest = this.options.latest()
     this.analysis = latest.analysis
     this.deck = latest.deck
     this.surface.update(this.deck, this.current)
+    if (cancelled) {
+      this.endEditingSilently()
+      this.bindEditingSession(this.analysis)
+    }
     this.decorate(this.analysis)
     this.editing = false
     this.pendingBefore = undefined
