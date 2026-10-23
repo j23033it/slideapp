@@ -25,6 +25,7 @@ function surface(html: string): SVGSVGElement {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   const foreign = document.createElementNS(svg.namespaceURI, 'foreignObject')
   const section = document.createElement('section')
+  setRect(section, new DOMRect(0, 0, 1280, 720))
   section.innerHTML = html
   foreign.append(section); svg.append(foreign)
   Object.defineProperty(svg, 'viewBox', { value: { baseVal: { width: 1280, height: 720 } } })
@@ -442,6 +443,7 @@ describe('export DOM text collection', () => {
     for (const el of host.querySelectorAll<HTMLElement>('td')) el.style.border = '1px solid rgb(0,0,0)'
     document.body.append(host)
     const table = host.firstElementChild as HTMLTableElement
+    setRect(host, new DOMRect(0, 0, 1280, 720))
     setRect(table, new DOMRect(78, 200, 59, 112))
     for (const [i, row] of [...table.rows].entries()) {
       const rect = new DOMRect(78, 200 + i * 56, 59, 56)
@@ -465,5 +467,165 @@ describe('export DOM text collection', () => {
       expect(xml).toContain('marL="38100" marR="123825" marT="0" marB="57150"')
       expect(xml).toContain('marL="123825" marR="123825" marT="57150" marB="57150"')
     } finally { vi.restoreAllMocks(); host.remove() }
+  })
+  it.each(['cell', 'row', 'group', 'column', 'table'])('keeps %s backgrounds on the final native table grid (#20)', async layer => {
+    const svg = surface(`<table style="font:24px Arial;line-height:29px;border-collapse:collapse;${layer === 'table' ? 'background-color:#1d4ed8' : ''}"><colgroup><col><col><col></colgroup><thead><tr><th>Channel</th><th>Users</th><th>CAC</th></tr></thead><tbody><tr><td>Search</td><td>4,200</td><td>820</td></tr></tbody></table>`)
+    const table = svg.querySelector('table')!, widths = [121.69, 93.72, 79], total = widths.reduce((a, b) => a + b)
+    setRect(table, new DOMRect(60, 200, total, 80))
+    for (const [index, row] of [...table.rows].entries()) {
+      setRect(row, new DOMRect(60, 200 + index * 40, total, 40))
+      let x = 60
+      for (const [column, cell] of [...row.cells].entries()) {
+        setRect(cell, new DOMRect(x, 200 + index * 40, widths[column]!, 40))
+        cell.style.padding = '6px 12px'
+        if (layer === 'cell') cell.style.backgroundColor = index ? 'rgb(255,255,255)' : '#1d4ed8'
+        if (!index) cell.style.color = 'rgb(255,255,255)'
+        x += widths[column]!
+      }
+      if (layer === 'row') row.style.backgroundColor = index ? 'rgb(255,255,255)' : '#1d4ed8'
+    }
+    for (const group of table.querySelectorAll<HTMLElement>('thead,tbody,colgroup')) {
+      const header = group.tagName === 'THEAD'
+      setRect(group, new DOMRect(60, header ? 200 : group.tagName === 'TBODY' ? 240 : 200, total, group.tagName === 'COLGROUP' ? 80 : 40))
+      if (layer === 'group' && group.tagName !== 'COLGROUP') group.style.backgroundColor = header ? '#1d4ed8' : 'rgb(255,255,255)'
+    }
+    let x = 60
+    for (const [column, col] of [...table.querySelectorAll('col')].entries()) {
+      setRect(col, new DOMRect(x, 200, widths[column]!, 80)); x += widths[column]!
+      if (layer === 'column') col.style.backgroundColor = '#1d4ed8'
+    }
+    vi.spyOn(Range.prototype, 'getClientRects').mockImplementation(function (this: Range) {
+      const box = this.startContainer.parentElement!.getBoundingClientRect()
+      return [new DOMRect(box.x + 12, box.y + 6, box.width - (box.width === widths[2] ? 60 : 25), 29)] as unknown as DOMRectList
+    })
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      expect(state.errors).toBeUndefined()
+      expect(state.rasterizedElements).toEqual([])
+      const native = slide.parts.find(p => p.kind === 'table')!
+      expect(native.columnWidths[0]).toBeGreaterThan(widths[0]!)
+      expect(native.columnWidths[1]).toBeGreaterThan(widths[1]!)
+      expect(native.columnWidths[2]).toBeCloseTo(widths[2]!)
+      expect(native.columnWidths.reduce((a, b) => a + b)).toBeGreaterThan(total)
+      expect(native.rect.width).toBeCloseTo(native.columnWidths.reduce((a, b) => a + b))
+      expect(native.rect.x + native.rect.width).toBeLessThan(1280)
+      const blue = slide.parts.filter(p => p.kind === 'box').filter(p => p.fill.color === '1D4ED8')
+      if (layer === 'cell') {
+        expect(blue).toEqual([])
+        expect(native.rows[0]!.map(c => c.fill)).toEqual(widths.map(() => ({ color: '1D4ED8', transparency: 0 })))
+      } else if (layer === 'column') {
+        let left = native.rect.x
+        for (const [column, box] of blue.entries()) {
+          expect(box.rect.x).toBeCloseTo(left)
+          expect(box.rect.width).toBeCloseTo(native.columnWidths[column]!)
+          left += native.columnWidths[column]!
+        }
+        expect(blue).toHaveLength(3)
+      } else {
+        expect(blue).toHaveLength(1)
+        expect(blue[0]!.rect.x).toBeCloseTo(native.rect.x)
+        expect(blue[0]!.rect.width).toBeCloseTo(native.rect.width)
+      }
+      const xml = await (await JSZip.loadAsync(await generatePptx([slide]))).file('ppt/slides/slide1.xml')!.async('string')
+      expect([...xml.matchAll(/<a:gridCol w="(\d+)"/g)].map(m => Number(m[1]))).toEqual(native.columnWidths.map(w => Math.round(w * 9525)))
+      if (layer === 'cell') {
+        const cells = [...xml.matchAll(/<a:tc>.*?<\/a:tc>/gs)].map(m => m[0])
+        expect(cells).toHaveLength(6)
+        for (const cell of cells.slice(0, 3)) {
+          expect(cell).toMatch(/<a:tcPr\b[^>]*>.*?<a:solidFill><a:srgbClr val="1D4ED8"/s)
+          expect(cell).toContain('<a:srgbClr val="FFFFFF"')
+        }
+      }
+    } finally { svg.remove() }
+  })
+  it.each([false, true])('only constrains Office reserves at the slide edge (spare column=%s) (#20)', spare => {
+    const svg = surface('<table style="font:24px Arial"><tbody><tr><td>A</td><td>B</td><td>C</td></tr></tbody></table>')
+    const table = svg.querySelector('table')!, widths = [200, 100, 100], textWidths = [179, 79, spare ? 20 : 72]
+    setRect(table, new DOMRect(880, 200, 400, 40))
+    let left = 880
+    for (const [column, cell] of [...table.rows[0]!.cells].entries()) {
+      cell.style.padding = '0 10px'
+      setRect(cell, new DOMRect(left, 200, widths[column]!, 40)); left += widths[column]!
+    }
+    vi.spyOn(Range.prototype, 'getClientRects').mockImplementation(function (this: Range) {
+      const cell = this.startContainer.parentElement as HTMLTableCellElement
+      const box = cell.getBoundingClientRect()
+      return [new DOMRect(box.x + 10, box.y, textWidths[cell.cellIndex]!, 29)] as unknown as DOMRectList
+    })
+    try {
+      const measured = measureTable(table, new DOMRect(0, 0, 1280, 720), fonts())
+      expect(measured.rect.width).toBe(400)
+      expect(measured.columnWidths.reduce((a, b) => a + b)).toBeCloseTo(400)
+      if (spare) {
+        // Borrow from the last column without reducing the first two reserves.
+        expect(measured.columnWidths[0]).toBeCloseTo(205.8)
+        expect(measured.columnWidths[1]).toBeCloseTo(105.8)
+        expect(measured.columnWidths[2]).toBeCloseTo(88.4)
+      } else {
+        // Only 10px remain for three requested 6.8px reserves.
+        measured.columnWidths.forEach((width, i) => expect(width - textWidths[i]! - 20).toBeCloseTo(10 / 3))
+      }
+    } finally { svg.remove() }
+  })
+  it.each([
+    ['default', 78.5, 1123, 13], ['gaia', 70, 1140, 9.6], ['uncover', 70, 1140, 12],
+  ] as const)('keeps a full-width wrapped English/Japanese table editable in %s (#20)', async (_theme, x, width, padding) => {
+    // Geometry supplied explicitly: happy-dom does not perform theme layout.
+    // Matching fixtures exercise the real pinned themes in Chrome and PowerPoint.
+    const svg = surface('<table style="width:100%;font:24px Arial;line-height:36px"><thead><tr><th>Feature</th><th>Description</th><th>Status</th></tr></thead><tbody><tr><td>Search</td><td>Improves customer acquisition with a clear strategy and measurable success metrics for the team</td><td>Active</td></tr><tr><td>Referral</td><td>既存顧客の紹介を増やすために利用者にとって分かりやすい仕組みと効果の測定を進めます</td><td>Planned</td></tr></tbody></table>')
+    const table = svg.querySelector('table')!, widths = [120, width - 240, 120]
+    const section = svg.querySelector('section')!
+    section.style.padding = `0 ${x}px`
+    setRect(table, new DOMRect(x, 200, width, 220))
+    for (const [rowIndex, row] of [...table.rows].entries()) {
+      const height = rowIndex ? 85 : 50, y = rowIndex ? 250 + (rowIndex - 1) * 85 : 200
+      setRect(row, new DOMRect(x, y, width, height))
+      let left = x
+      for (const [column, cell] of [...row.cells].entries()) {
+        cell.style.padding = `6px ${padding}px`
+        setRect(cell, new DOMRect(left, y, widths[column]!, height)); left += widths[column]!
+      }
+    }
+    vi.spyOn(Range.prototype, 'getClientRects').mockImplementation(function (this: Range) {
+      const box = this.startContainer.parentElement!.getBoundingClientRect()
+      const line = new DOMRect(box.x + padding, box.y + 6, box.width - 2 * padding - 1, 30)
+      return (box.height > 50 ? [line, new DOMRect(line.x, line.y + 36, line.width * .8, 30)] : [line]) as unknown as DOMRectList
+    })
+    vi.spyOn(raster, 'rasterize').mockResolvedValue(png)
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      expect(state.rasterizedElements).toEqual([])
+      const native = slide.parts.find(p => p.kind === 'table')!
+      expect(native.rect.width).toBeGreaterThan(width)
+      expect(native.columnWidths.reduce((a, b) => a + b)).toBeCloseTo(native.rect.width)
+      expect(native.rect.x + native.rect.width).toBeLessThanOrEqual(1280)
+      expect(native.rowHeights).toEqual([50, 85, 85])
+    } finally { svg.remove() }
+  })
+  it.each([
+    ['parent', false], ['slide', false], ['parent', true], ['slide', true],
+  ] as const)('checks the original DOM bounds of the %s (overflow=%s) (#20)', async (limit, overflow) => {
+    const svg = surface('<div style="padding-right:12px;border-right:2px solid black"><table style="font:24px Arial"><tbody><tr><td>Channel</td></tr></tbody></table></div>')
+    const table = svg.querySelector('table')!, parent = table.parentElement!
+    const x = limit === 'slide' ? (overflow ? 1182 : 1180) : 60
+    setRect(parent, new DOMRect(x, 200, limit === 'parent' ? (overflow ? 112 : 114) : 200, 80))
+    setRect(table, new DOMRect(x, 200, 100, 40))
+    setRect(table.rows[0]!, new DOMRect(x, 200, 100, 40))
+    setRect(table.rows[0]!.cells[0]!, new DOMRect(x, 200, 100, 40))
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(x, 200, 99, 29)] as unknown as DOMRectList)
+    vi.spyOn(raster, 'rasterize').mockResolvedValue(png)
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      if (overflow && limit === 'slide') {
+        expect(slide.parts.some(p => p.kind === 'table')).toBe(false)
+        expect(state.rasterizedElements).toContainEqual(expect.objectContaining({ element: 'table', reason: expect.stringContaining('Table DOM width exceeds') }))
+      } else {
+        const native = slide.parts.find(p => p.kind === 'table')!
+        // A parent content boundary does not consume the existing Office reserve.
+        expect(native.rect.width).toBeCloseTo(limit === 'slide' ? 100 : 105.8)
+        expect(native.columnWidths).toHaveLength(1)
+        expect(state.rasterizedElements).toEqual([])
+      }
+    } finally { svg.remove() }
   })
 })

@@ -66,12 +66,22 @@ describe('CSS audit routing', () => {
     expect(slide.parts.filter(p=>p.kind==='box')).toHaveLength(2)
     expect(slide.parts.map(p=>p.kind)).toEqual(['box','box','text'])
   })
-  it('keeps table group and cell fills as layers and its table editable', async () => {
+  it('keeps group backgrounds as layers and translucent cell fills on the editable table', async () => {
     const svg=surface('<table><thead style="background-color:rgb(34,34,34)"><tr><th>Heading</th></tr></thead><tbody style="background-color:rgb(240,240,240)"><tr><td style="background-color:rgba(255,0,0,.5)">Cell</td></tr></tbody></table>'),r=report()
     const slide=await measureSlide(svg,[],fonts,'',r,0)
-    expect(slide.parts.filter(p=>p.kind==='box')).toHaveLength(3)
+    expect(slide.parts.filter(p=>p.kind==='box')).toHaveLength(2)
     const table=slide.parts.find(p=>p.kind==='table')!
-    expect(table.rows.flat().every(c=>c.fill?.transparency===100)).toBe(true)
+    expect(table.rows[0]![0]!.fill?.transparency).toBe(100)
+    expect(table.rows[1]![0]!.fill).toEqual({color:'FF0000',transparency:50})
+    expect(r.errors).toBeUndefined()
+  })
+  it.each(['border-radius:12px','box-shadow:3px 4px 5px black','background-image:linear-gradient(red,blue)'])('keeps complex table cell %s as a separate decoration', async css => {
+    const svg=surface(`<table><tbody><tr><td style="background-color:rgb(34,34,34);${css}">Cell</td></tr></tbody></table>`),r=report()
+    const slide=await measureSlide(svg,[],fonts,'',r,0)
+    expect(slide.parts.map(p=>p.kind)).toEqual(['image','table'])
+    const table=slide.parts.find(p=>p.kind==='table')!
+    expect(table.rows[0]![0]!.fill?.transparency).toBe(100)
+    expect(r.rasterizedElements).toEqual([{slide:1,element:'td background',reason:'CSS background decoration'}])
     expect(r.errors).toBeUndefined()
   })
   it.each(['border-radius:0px 12px','outline:4px dashed red','box-shadow:3px 4px 5px black','background-image:linear-gradient(red,blue)'])('separates %s as decoration only', async css => {
