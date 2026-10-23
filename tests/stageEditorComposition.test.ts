@@ -95,6 +95,7 @@ describe('StageEditor IME composition', () => {
       await dispatchNativeCompositionEnd(root, run!, compositionEndListeners)
       run!.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertFromComposition' }))
 
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
       expect(order).toEqual(['commit', 'deferred', 'end'])
       expect(analysis.text).toBe('Second')
     } finally {
@@ -139,6 +140,7 @@ describe('StageEditor IME composition', () => {
 
       await dispatchNativeCompositionEnd(root, run!, compositionEndListeners)
 
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
       expect(order).toEqual(['deferred', 'end'])
     } finally {
       editor.dispose()

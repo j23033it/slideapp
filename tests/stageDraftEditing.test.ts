@@ -239,7 +239,7 @@ describe('paragraph newline regressions', () => {
       s.key(run, 'Enter', { keyCode: 229 })
       expect(s.model.text).toBe('# before\n\nA')
       run.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, composed: true }))
-      await Promise.resolve()
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
       expect(s.model.text).toBe('# before\n\nあ')
       expect(s.editor.isComposing()).toBe(false)
     } finally { s.editor.dispose() }

@@ -73,6 +73,7 @@ export class StageEditor {
   private lastFocusSeq = -1
   private readonly composition = new CompositionGate()
   private compositionEndToken: number | null = null
+  private compositionEndTimer: ReturnType<typeof setTimeout> | null = null
   private suppressEnterUntil = 0
   private recoveringDraftSelection = false
   private pointerSelection: Range | null | undefined
@@ -91,6 +92,7 @@ export class StageEditor {
   }
 
   private readonly onCompositionStart = (): void => {
+    this.clearCompositionEndTimer()
     this.suppressEnterUntil = 0
     this.composition.start()
   }
@@ -106,7 +108,23 @@ export class StageEditor {
   private readonly onCompositionEndSettled = (): void => {
     const token = this.compositionEndToken
     this.compositionEndToken = null
-    if (token !== null) queueMicrotask(() => this.composition.flush(token))
+    if (token === null) return
+    this.clearCompositionEndTimer()
+    // Native dispatch can checkpoint microtasks between compositionend and the
+    // final input. Keep the save gate closed until the next task, even if no
+    // final input is sent. A new composition invalidates this completion.
+    this.compositionEndTimer = setTimeout(() => {
+      this.compositionEndTimer = null
+      if (token !== this.composition.markEnded()) return
+      this.adapter?.settleComposition()
+      this.composition.flush(token)
+    }, 0)
+  }
+
+  private clearCompositionEndTimer(): void {
+    if (this.compositionEndTimer === null) return
+    clearTimeout(this.compositionEndTimer)
+    this.compositionEndTimer = null
   }
 
   private readonly onBlur = (event: Event): void => {
@@ -125,7 +143,9 @@ export class StageEditor {
     const token = this.composition.markEnded()
     this.adapter?.settleComposition()
     if (pending && token === this.composition.markEnded()) this.suppressConfirmationEnter()
-    this.composition.flush(token)
+    // A save shortcut or blur during compositionend settlement must not bypass
+    // the task boundary reserved for the final input.
+    if (this.compositionEndTimer === null) this.composition.flush(token)
   }
 
   private readonly onClick = (raw: Event): void => {
@@ -440,6 +460,7 @@ export class StageEditor {
   }
 
   dispose(): void {
+    this.clearCompositionEndTimer()
     const root = this.root
     root.removeEventListener('pointerdown', this.onPointerDown)
     root.removeEventListener('click', this.onClick)

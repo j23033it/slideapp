@@ -184,7 +184,7 @@ it('commits Japanese composition into an empty paragraph before releasing save w
     let saved = ''
     s.editor.deferWhileComposing(() => { s.editor.endEditing(); saved = s.model.serialize() })
     empty.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, composed: true }))
-    await Promise.resolve()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
     expect(s.editor.isComposing()).toBe(false); expect(saved).toBe('A\n\n日本語')
     expect(s.notices).toEqual([])
   } finally { s.editor.dispose() }
