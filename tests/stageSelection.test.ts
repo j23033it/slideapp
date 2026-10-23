@@ -7,6 +7,7 @@ import { createEngine } from '../src/editing'
 import { splitRenderedSlides } from '../src/marp/renderer'
 import type { RenderedDeck } from '../src/marp/renderer'
 import type { SlideSurface } from '../src/marp/surface'
+import { nativeShadowSelection } from './nativeShadowSelection'
 
 function setup(source: string) {
   const model = new DocumentModel(source)
@@ -46,6 +47,31 @@ function setup(source: string) {
 afterEach(() => { document.body.innerHTML = ''; document.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); Reflect.deleteProperty(document, 'caretPositionFromPoint') })
 
 describe('selection survives the click that ends a drag', () => {
+  it.each([false, true])('preserves a native drag when document selection is collapsed (editing: %s)', editing => {
+    const s = setup('alpha **beta**')
+    try {
+      const alpha = s.run('alpha '), beta = s.run('beta')
+      if (editing) s.click(alpha)
+      s.caret(alpha, 1)
+      const scoped = nativeShadowSelection(s.root)
+      alpha.dispatchEvent(new Event('pointerdown', { bubbles: true, composed: true }))
+      scoped.setBaseAndExtent(alpha.firstChild!, 1, beta.firstChild!, 3)
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(document.getSelection()!.isCollapsed).toBe(true)
+      expect(scoped.isCollapsed).toBe(false)
+      const before = s.events.length
+      s.click(beta)
+      expect(scoped.anchorNode).toBe(alpha.firstChild)
+      expect(scoped.anchorOffset).toBe(1)
+      expect(scoped.focusNode).toBe(beta.firstChild)
+      expect(scoped.focusOffset).toBe(3)
+      expect(s.events).toHaveLength(before)
+      expect(s.model.state).toBe('clean')
+      const copy = new Event('copy', { bubbles: true, composed: true, cancelable: true })
+      beta.dispatchEvent(copy)
+      expect(copy.defaultPrevented).toBe(false)
+    } finally { s.editor.dispose() }
+  })
   it('keeps a multi-run selection inside one paragraph while editing', () => {
     const s = setup('alpha **beta** gamma')
     try {

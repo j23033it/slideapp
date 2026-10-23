@@ -1,5 +1,6 @@
 import type { EditingEngine } from '../engine';
 import { reason, type Analysis, type EditResult, type ReadonlyReason } from '../types';
+import { selectionFor } from './selection';
 
 function runElement(node: Node | null): HTMLElement | null {
   return (node?.nodeType === 1 ? node as Element : node?.parentElement)?.closest<HTMLElement>('[data-sm-run]') ?? null;
@@ -9,7 +10,7 @@ interface SelectionPoint { runId: string; offset: number }
 interface RunSelection { anchor: SelectionPoint; focus: SelectionPoint }
 
 function captureSelection(root: HTMLElement): RunSelection | undefined {
-  const selection = root.ownerDocument.getSelection();
+  const selection = selectionFor(root);
   function point(node: Node | null, offset: number): SelectionPoint | undefined {
     const run = runElement(node);
     if (!node || !run || !root.contains(run)) return;
@@ -36,7 +37,7 @@ function restoreSelection(root: HTMLElement, saved: RunSelection): void {
     return { node: run, offset: 0 };
   }
   const anchor = point(saved.anchor), focus = point(saved.focus);
-  if (anchor && focus) root.ownerDocument.getSelection()?.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+  if (anchor && focus) selectionFor(root)?.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
 }
 
 export function verifyRenderedRuns(root: ParentNode, analysis: Analysis): void {
@@ -101,7 +102,7 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
   let enabledBlock: HTMLElement | null = null;
   const blockSnapshots = new Map<HTMLElement, string>();
   let beforeSelection: RunSelection | undefined;
-  const selection = () => root.ownerDocument.getSelection();
+  const selection = () => selectionFor(root);
   verifyRenderedRuns(root, analysis);
 
   function refreshSnapshots(): void {

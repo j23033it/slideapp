@@ -3,6 +3,8 @@
  * 位置はブラウザの当たり判定で決め、文字列検索はしない。
  */
 
+import { selectionFor } from '../editing/dom/selection'
+
 type DocumentWithCaret = Document & {
   caretPositionFromPoint?: (
     x: number,
@@ -125,7 +127,7 @@ export function caretInRun(run: HTMLElement, x: number, y: number, root: ShadowR
 
 /** 現在の選択が1つのランの中だけにあるか */
 export function selectionInRun(root: ShadowRoot, run: HTMLElement): RunSelectionPoint | null {
-  const selection = root.ownerDocument.getSelection()
+  const selection = selectionFor(root)
   if (!selection || selection.rangeCount !== 1) return null
   const range = selection.getRangeAt(0)
   const start = runElementOf(range.startContainer)
@@ -136,21 +138,9 @@ export function selectionInRun(root: ShadowRoot, run: HTMLElement): RunSelection
   return { runId: run.dataset.smRun ?? '', offset, collapsed: range.collapsed }
 }
 
-/**
- * テキストノードが無いラン（末尾の空ラン）に空のテキストノードを足す。
- * WebView2 は要素そのものを指すキャレットをブロック境界へ正規化することがあり、
- * そのままでは空ランに入力できないため、必ず文字位置へ置けるようにする。
- * 空のテキストノードは `innerHTML` にも `textContent` にも現れない。
- */
-function ensureCaretTextNode(run: HTMLElement): void {
-  const walker = run.ownerDocument.createTreeWalker(run, NodeFilter.SHOW_TEXT)
-  if (!walker.nextNode()) run.append(run.ownerDocument.createTextNode(''))
-}
-
 /** ランの `offset` 文字目にキャレットを置く */
 export function setCaretInRun(run: HTMLElement, offset: number): void {
-  ensureCaretTextNode(run)
   const point = pointInRun(run, offset)
   if (!point) return
-  run.ownerDocument.getSelection()?.setBaseAndExtent(point.node, point.offset, point.node, point.offset)
+  selectionFor(run)?.setBaseAndExtent(point.node, point.offset, point.node, point.offset)
 }

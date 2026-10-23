@@ -6,6 +6,7 @@
 import type { Cursor } from '../document'
 import { resolveCursor, type Analysis, type EditingEngine, type EditResult, type ReadonlyCode } from '../editing'
 import { bindEditing } from '../editing/dom'
+import { selectionFor } from '../editing/dom/selection'
 import type { RenderedDeck } from '../marp/renderer'
 import type { SlideSurface } from '../marp/surface'
 import {
@@ -77,7 +78,7 @@ export class StageEditor {
   private pointerSelection: Range | null | undefined
 
   private readonly onPointerDown = (): void => {
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     this.pointerSelection = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null
   }
 
@@ -166,8 +167,7 @@ export class StageEditor {
       if (!existing || existing.collapsed || previousSelection !== undefined) {
         const point = caretInRun(fresh, event.clientX, event.clientY, this.root)
         if (point) {
-          this.root.ownerDocument
-            .getSelection()
+          selectionFor(this.root)
             ?.setBaseAndExtent(point.node, point.offset, point.node, point.offset)
         }
       }
@@ -195,7 +195,7 @@ export class StageEditor {
    * 選択がこの編集面の中で新しく作られた場合に、選択を保つ。
    */
   private clickEndsSelection(element: Element, event: MouseEvent, previousSelection: Range | null | undefined): boolean {
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return false
     const range = selection.getRangeAt(0)
     // A click can leave an old selection visible (especially across editing hosts).
@@ -239,7 +239,7 @@ export class StageEditor {
       return
     }
     if (event.key !== 'Backspace' && event.key !== 'Delete') return
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     if (!selection || selection.rangeCount !== 1) return
     const range = selection.getRangeAt(0)
     const runElement = runElementOf(range.startContainer)
@@ -307,24 +307,11 @@ export class StageEditor {
 
   private readonly onSelectionChange = (): void => { this.cancelAbandonedDraft() }
 
-  /**
-   * 選択位置がランの直前・直後（要素の境界）を指しているか。
-   * WebView2 が空のインライン要素へのキャレットを親要素の位置へ正規化した場合に使う。
-   */
-  private pointAtRunBoundary(node: Node | null, offset: number, runId: string): boolean {
-    const run = this.runElement(runId)
-    if (!run || !node) return false
-    const parent = run.parentNode
-    if (node !== parent) return false
-    const index = [...parent.childNodes].indexOf(run)
-    return offset === index || offset === index + 1
-  }
-
   /** Roll back an unfilled line after navigation, retaining the actual selection. */
   private cancelAbandonedDraft(): boolean {
     const draft = this.analysis.draft
     if (!draft || !this.editing || !this.adapter || this.recoveringDraftSelection || this.hasPendingComposition()) return false
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     if (!selection?.rangeCount) return false
     const capture = (node: Node | null, offset: number): Cursor | undefined => {
       const element = runElementOf(node)
@@ -334,14 +321,7 @@ export class StageEditor {
     }
     const anchor = capture(selection.anchorNode, selection.anchorOffset)
     const focus = capture(selection.focusNode, selection.focusOffset)
-    // WebView2 は空のインライン要素を指すキャレットを要素の境界へ正規化することがある。
-    // 下書きの空ラン自身・その直前直後を指しているなら、まだ空行にいるとみなす。
     if (anchor?.runId === draft.runId && focus?.runId === draft.runId) return false
-    if (selection.isCollapsed && this.pointAtRunBoundary(selection.anchorNode, selection.anchorOffset, draft.runId)) {
-      const empty = this.runElement(draft.runId)
-      if (empty) setCaretInRun(empty, 0)
-      return false
-    }
     const oldRuns = this.analysis.runs
     this.recoveringDraftSelection = true
     try {
@@ -373,7 +353,7 @@ export class StageEditor {
   private cancelDraftAtLineStart(): boolean {
     const draft = this.analysis.draft
     if (!draft || !this.adapter) return false
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     if (!selection || selection.rangeCount !== 1 || !selection.isCollapsed) return false
     const range = selection.getRangeAt(0)
     const runElement = runElementOf(range.startContainer)
@@ -391,7 +371,7 @@ export class StageEditor {
   }
 
   private insertNewline(kind: 'line' | 'paragraph'): void {
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     const before = this.currentCursor(false)
     if (!selection?.isCollapsed || !before) {
       this.options.onNotice('cross-run')
@@ -567,7 +547,7 @@ export class StageEditor {
   }
 
   private currentCursor(end: boolean): Cursor | undefined {
-    const selection = this.root.ownerDocument.getSelection()
+    const selection = selectionFor(this.root)
     if (!selection || selection.rangeCount !== 1) return
     const range = selection.getRangeAt(0)
     const runElement = runElementOf(end ? range.endContainer : range.startContainer)
