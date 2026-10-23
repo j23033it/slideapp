@@ -39,8 +39,105 @@ Browser verification can override `toAssetUrl`.
 
 Remote font fetching respects CSP and falls back offline. To preserve embedded
 Web fonts in raster parts without relaxing CSP, pass `fontEmbedCSS` with data URL
-`@font-face` rules. Native text uses an installed Windows font, also in OOXML `ea`.
+`@font-face` rules. Native text uses an installed Windows font for OOXML `latin`.
+Japanese characters always use **Noto Sans JP** in the preview, measurement and
+raster surfaces, regardless of the authored family. `src/marp/fonts.ts` prepends
+a Japanese-only alias (registered in `document.head`) to the declaring CSS rules,
+including conditional rules and pseudos, while retaining the original Latin family
+list, specificity and `!important`. Inherited children, including editing run spans,
+keep inheriting: no computed font or extra attributes/styles are added to them.
+The existing PostCSS dependency is explicitly pinned for lossless CSS rule updates;
+selector casing (notably `foreignObject`) survives SVG rasterization. Existing
+inline/presentation font declarations are updated only where already present.
+The ZIP pass splits text runs at the Japanese Unicode boundaries documented in
+`docs/design.md`, retaining all run properties and `a:latin`. Only Japanese segments
+receive Noto Sans JP in `a:ea`; Bopomofo, Hangul and other out-of-range characters
+retain the original `a:ea`. Japanese custom bullets also use Noto Sans JP. Missing Noto Sans JP
+stops export with an explicit error. Local probes include full Regular face names
+(notably `Yu Gothic Regular`). Generic Latin families are matched by measured
+advances against Windows font candidates instead of assuming English browser
+defaults. An unsupported name is detected by changing its trailing fallback
+between serif and monospace: differing advances mean the name was skipped by the
+browser, so export also tries the next authored family (for example Consolas
+after Windows' unsupported ui-monospace in the default theme). A supported generic
+with unmatched advances, a lone unsupported generic, or unavailable measurement
+uses the approximation below and records requested/replacement names in
+`substitutedFonts`. Font mapping uncertainty never aborts the deck. Raster parts
+keep the browser's generic; native text uses the reported approximation, so line
+wrap differences are possible in this case.
+
+| Generic | Windows approximation when no measured match exists |
+| --- | --- |
+| `system-ui`, `ui-sans-serif`, `ui-rounded` | Segoe UI |
+| `sans-serif` | Arial |
+| `serif`, `ui-serif` | Times New Roman |
+| `monospace`, `ui-monospace` | Consolas |
+| `cursive` / `fantasy` / `math` | Comic Sans MS / Impact / Cambria Math |
+| `fangsong` / `emoji` | SimSun / Segoe UI Emoji |
+
+These are export approximations, not claims about every browser's defaults.
+[CSS Fonts 4](https://www.w3.org/TR/css-fonts-4/#generic-font-families) defines
+generic categories and allows platform/language-dependent mappings.
+[Microsoft's font catalog](https://learn.microsoft.com/en-us/typography/font-list/)
+documents the corresponding Windows families; in particular
+[Segoe UI](https://learn.microsoft.com/en-us/typography/font-list/segoe-ui) is a
+Windows UI font, and [Consolas](https://learn.microsoft.com/en-us/typography/font-list/consolas)
+is designed for monospaced programming text. Arial/Times New Roman preserve the
+sans/serif categories; ui-rounded uses Segoe UI because Windows has no universal
+rounded UI face; SimSun is a CJK serif approximation for fangsong. All are measured
+before approximation, including Yu Gothic UI as a Japanese Windows UI candidate.
+If the preferred approximation is not installed, use the first installed one of
+Segoe UI, Arial, Consolas, Noto Sans JP, and report that actual replacement.
 PowerPoint has one presentation size, so mixed slide sizes are rejected.
+
+To reproduce issue #21 in installed Chrome and PowerPoint:
+
+```powershell
+node src/export/pptx/inspect-chrome.mjs tests/fixtures/export/japanese-fonts.md --font-audit --inspect-dir "$env:TEMP/slideapp-issue21"
+powershell -NoProfile -File src/export/pptx/audit-powerpoint.ps1 -InputDir "$env:TEMP/slideapp-issue21" -All
+```
+
+`--font-audit` uses the actual `SlideSurface`, checks CDP's painted platform fonts,
+and records preview PNGs and per-paragraph line contents in `*-font-audit.json`.
+The COM audit checks Latin/East Asian names, exact preview line contents, unchanged
+table row heights, Japanese custom bullet fonts and in-memory editing. The seven
+slides cover both Arial/Yu Gothic orders, serif/monospace/sans-serif, inherited
+families, mixed Japanese/Latin/fullwidth/halfwidth kana, bold/italic, tables and
+custom bullets. On 2026-10-23 Chrome 156 and installed PowerPoint passed all seven
+slides with no rasterization or export errors. Glyph shapes and line wraps were
+also compared in their PNGs.
+
+The issue #21 review regressions are `font-code-default.md`, `font-code-gaia.md`,
+`font-code-uncover.md`, `font-system-ui.md` and `font-pseudo.md` in the same fixture
+directory. Pass all five paths plus `japanese-fonts.md` to `inspect-chrome.mjs
+--font-audit`, then run the COM audit above with `-All`. Chrome 156.0.8078.48 and
+installed PowerPoint passed these 12 slides on 2026-10-23. Default code retains
+editable Consolas without font substitution; system-ui matches installed
+Yu Gothic UI by measured advances (also confirmed by CDP), with Noto Sans JP for
+Japanese and identical Office line wraps. The explicitly same-family Yu Mincho
+`p::before` paints Noto Sans JP and is preserved as a reported decoration image.
+Gaia/uncover code retains existing local raster routes for inline-block/effects;
+their substitutions (Roboto Mono → BIZ UDGothic, SFMono-Regular → Consolas) are
+reported. Gaia's live preview can download Roboto Mono while offline export uses
+the reported installed replacement. The three unit regressions use the pinned
+themes' actual code stacks with unavailable earlier families and verify Consolas.
+The merged `path-default-fill.md` additionally passed all five slides in Chrome
+and COM, retaining both `fonts` and `defaultFill` in `com-metrics.json`.
+
+Review 2 regressions are `font-first-line.md` and `font-east-asian.md`. The font
+preview harness now runs **MarpRenderer → SlideSurface**, including editing spans,
+and rejects added run style/font attributes. Chrome checks actual platform fonts:
+first-line Latin (including bold text) stays Consolas and Japanese stays Noto Sans
+JP. The first-line paragraph keeps the existing local raster route; comparison
+against a real Chrome screenshot permits SVG/canvas antialias differences (6% of
+foreground pixels with the existing 2px/color tolerance; measured 4.17%).
+Bopomofo remains SimSun and Hangul remains Malgun Gothic in preview and native
+PowerPoint runs, without substitution. The supplied review probes, all existing
+font fixtures and all three code themes passed Chrome/PowerPoint verification
+(20 slides). COM checks each Unicode span's expected Latin/East Asian font, line
+wraps, table heights and editing. The four-class `!important` pseudo probe also
+paints Noto Sans JP: rewriting its declaring rule naturally removes the previously
+reported specificity limitation. WebView2's 10 direct-editing cases passed.
 
 Unsupported math/SVG primitives/emoji, transformed blocks and merged tables are rasterized.
 Supported inline SVG `g`, `rect`/circular `rx`, single text nodes, absolute

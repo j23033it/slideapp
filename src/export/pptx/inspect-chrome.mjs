@@ -12,6 +12,7 @@ const args = process.argv.slice(2), options = {}, sources = []
 while (args.length) {
   const arg = args.shift()
   if (arg === '--fixtures') options.fixtures = true
+  else if (arg === '--font-audit') options.fontAudit = true
   else if (['--inspect-dir', '--browser-path'].includes(arg) && args.length) options[arg] = args.shift()
   else if (arg.startsWith('--')) throw Error(`Unknown option: ${arg}`)
   else sources.push(resolve(arg))
@@ -83,6 +84,63 @@ try {
       await writeFile(join(outputDir, `${item.name}-${snapshot.slide}.html`), snapshot.html)
     }
     const record = {name:item.name,slides:model.slides.length,rasterized:model.report.rasterizedElements,errors:model.report.errors??[]}
+    if (options.fontAudit) {
+      await command('DOM.enable'); await command('CSS.enable')
+      record.fontAudit = []
+      for (let index = 0; index < model.slides.length; index++) {
+        const paragraphs = await evaluate(`import('/src/export/pptx/devHarness.ts').then(m=>m.showFontFixtureForCDP(${JSON.stringify(item.markdown)},${index}))`)
+        const { root: tree } = await command('DOM.getDocument', { depth:-1, pierce:true })
+        const nodes = []
+        const walk = (node, inPreview = false) => {
+          inPreview ||= node.attributes?.includes('data-pptx-preview') ?? false
+          if (inPreview && (['p', 'code', 'span', 'strong'].includes(node.localName) || node.pseudoType === 'before')) nodes.push(node)
+          for (const child of [...node.children??[], ...node.shadowRoots??[], ...node.pseudoElements??[]]) walk(child, inPreview)
+        }
+        walk(tree)
+        const used = []
+        for (const node of nodes) {
+          const { fonts } = await command('CSS.getPlatformFontsForNode', { nodeId:node.nodeId })
+          if (fonts.length) used.push({ tag:node.pseudoType ?? node.localName, fonts })
+        }
+        if (!used.some(p => p.fonts.some(f => f.familyName === 'Noto Sans JP'))) throw Error(`Japanese font was not painted on slide ${index+1}`)
+        if ((item.name === 'japanese-fonts' && index < 6) || item.name === 'font-system-ui') {
+          const latin = model.slides[index].parts.find(p => p.kind === 'text').paragraph.runs[0].style.fontFace
+          if (used[0].fonts.length !== 1 || used[0].fonts[0].familyName !== latin) throw Error(`Preview/PPTX Latin mismatch on slide ${index+1}: ${latin}`)
+        }
+        if (item.name.startsWith('font-code-')) {
+          const code = used.find(node => node.tag === 'code')
+          const runs = model.slides[index].parts.filter(p => p.kind === 'text').flatMap(p => p.paragraph.runs)
+          const nativeCode = runs.find(run => run.text.includes('const ABC'))
+          if (item.name === 'font-code-default') {
+            if (!code?.fonts.some(font => font.familyName === 'Consolas')) throw Error(`Code preview did not paint Consolas: ${item.name}`)
+            if (nativeCode?.style.fontFace !== 'Consolas') throw Error(`Code export did not retain native Consolas: ${item.name}`)
+          } else if (nativeCode) {
+            if (!code?.fonts.some(font => font.familyName === nativeCode.style.fontFace) && !model.report.substitutedFonts.some(font => font.replacement === nativeCode.style.fontFace)) throw Error(`Code font substitution was not reported: ${item.name}`)
+          } else if (!model.report.rasterizedElements.some(element => ['code', 'marp-pre', 'pre'].includes(element.element))) throw Error(`Code was neither native nor reported as rasterized: ${item.name}`)
+        }
+        if (item.name === 'font-pseudo' && !used.some(node => node.tag === 'before' && node.fonts.some(font => font.familyName === 'Noto Sans JP'))) throw Error('Explicit same-family pseudo did not paint Noto Sans JP')
+        if (item.name === 'font-first-line') {
+          const fonts = used.flatMap(node => node.fonts)
+          if (!fonts.some(font => font.familyName === 'Consolas') || fonts.some(font => font.familyName === 'Arial')) throw Error('First-line Latin font was overridden in production preview')
+          if (!model.report.rasterizedElements.some(element => element.element === 'p' && element.reason.includes('first-line'))) throw Error('First-line font was not preserved by local rasterization')
+          const reference = await command('Page.captureScreenshot', { format:'png', clip:{x:16,y:16,width:1280,height:720,scale:1} })
+          await writeFile(join(outputDir, `${item.name}-reference-${index+1}.png`), Buffer.from(reference.data, 'base64'))
+          record.rasterComparison = await evaluate(`import('/src/export/pptx/devHarness.ts').then(m=>m.compareRasterForCDP('data:image/png;base64,${reference.data}',${JSON.stringify(model.slides[index].parts)}))`)
+          // Native LCD text vs SVG/canvas grayscale AA differs at glyph edges.
+          if (!record.rasterComparison.length || record.rasterComparison.some(part => part.ratio > .06)) throw Error(`First-line preview/raster mismatch: ${JSON.stringify(record.rasterComparison)}`)
+        }
+        if (item.name === 'font-east-asian') {
+          const expected = index === 0 ? 'SimSun' : 'Malgun Gothic'
+          if (!used.some(node => node.fonts.some(font => font.familyName === expected))) throw Error(`Non-Japanese font was overridden: ${expected}`)
+          if (model.report.substitutedFonts.length) throw Error('Installed East Asian font was unexpectedly substituted')
+        }
+        const screenshot = await command('Page.captureScreenshot', { format:'png', captureBeyondViewport:true, clip:{x:16,y:16,width:1280,height:720,scale:2} })
+        await writeFile(join(outputDir, `${item.name}-preview-${index+1}.png`), Buffer.from(screenshot.data, 'base64'))
+        record.fontAudit.push({ slide:index+1, paragraphs, used })
+      }
+      await writeFile(join(outputDir, `${item.name}-font-audit.json`), JSON.stringify(record.fontAudit, null, 2))
+      await evaluate("import('/src/export/pptx/devHarness.ts').then(m=>m.hideFixtureForCDP())")
+    }
     summary.push(record);console.log(JSON.stringify(record))
   }
   await writeFile(join(outputDir, 'summary.json'), JSON.stringify(summary, null, 2))

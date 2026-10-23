@@ -1,5 +1,6 @@
 import { cssColor, type Paragraph } from './model'
 import { nativeStyleReason, pixels } from './styles'
+import { isJapaneseCharacter, JAPANESE_FONT } from '../../marp/fonts'
 
 /** CSSOM returns a quoted CSS string, with hexadecimal escapes rather than JS escapes. */
 export function markerText(content: string): string {
@@ -38,5 +39,5 @@ export function measureMarker(li: Element, fonts: Map<string, string>, scale: nu
   if (!character && content === 'normal' && base.listStyleType === 'disc' && style.fontFamily === base.fontFamily && style.fontSize === base.fontSize && style.color === base.color) {
     return { marker: { fontFace: 'Verdana', fontSize: fontSize * 1.1, ...cssColor(style.color || base.color) }, approximation: {property:'list-style-type',value:'disc',replacement:'Verdana U+2022 at 110% of the CSS marker size'} }
   }
-  return { marker: { character, fontFace, fontSize, ...cssColor(style.color || base.color) }, text: character ? markerText(content) : undefined }
+  return { marker: { character, fontFace: character && isJapaneseCharacter(character) ? JAPANESE_FONT : fontFace, fontSize, ...cssColor(style.color || base.color) }, text: character ? markerText(content) : undefined }
 }

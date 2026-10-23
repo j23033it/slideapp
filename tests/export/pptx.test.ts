@@ -62,6 +62,27 @@ describe('measured DOM → PowerPoint options', () => {
 })
 
 describe('generated PPTX archive', () => {
+  it.each(['text', 'list', 'table'] as const)('preserves out-of-range East Asian fonts in %s, splitting only Japanese ranges', async kind => {
+    const mixed = { ...run, text: 'ㄅㄆㄇㄈ 日本語 한글𠮷 ABC & end', style: { ...run.style, fontFace: 'SimSun' } }
+    const p = { ...paragraph, runs: [mixed] }
+    const border = { type: 'solid' as const, color: '164A8A', pt: 1 }
+    const cell = { runs: [mixed], style: p, fill: { color: 'FFFFFF', transparency: 0 }, border: [border, border, border, border] as [typeof border, typeof border, typeof border, typeof border] }
+    const part = kind === 'text' ? { kind, paragraph: p } : kind === 'list'
+      ? { kind, rect: p.rect, paragraphs: [p] }
+      : { kind, rect: p.rect, rows: [[cell]], columnWidths: [p.rect.width], rowHeights: [p.rect.height] }
+    const zip = await JSZip.loadAsync(await generatePptx([{ ...slide, parts: [part] }]))
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string')
+    const runs = [...xml.matchAll(/<a:r>(.*?)<\/a:r>/gs)].map(match => ({
+      text: /<a:t>(.*?)<\/a:t>/s.exec(match[1]!)![1],
+      ea: /<a:ea typeface="([^"]+)"/.exec(match[1]!)![1],
+      latin: /<a:latin typeface="([^"]+)"/.exec(match[1]!)![1],
+    }))
+    expect(runs.map(run => [run.text, run.ea])).toEqual([
+      ['ㄅㄆㄇㄈ ', 'SimSun'], ['日本語', 'Noto Sans JP'], [' 한글', 'SimSun'], ['𠮷', 'Noto Sans JP'], [' ABC &amp; end', 'SimSun'],
+    ])
+    expect(runs.every(run => run.latin === 'SimSun')).toBe(true)
+    expect(xml.match(/<a:hlinkClick/g)).toHaveLength(5)
+  })
   it('stores repeated PNG media once while retaining every slide relationship', async () => {
     const data = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='
     const imageSlide: MeasuredSlide = { ...slide, parts: [{ kind: 'image', data, rect: { x: 0, y: 0, width: 1280, height: 720 } }] }
@@ -79,8 +100,9 @@ describe('generated PPTX archive', () => {
     const zip = await JSZip.loadAsync(bytes)
     expect(Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name))).toHaveLength(2)
     const xml = await zip.file('ppt/slides/slide1.xml')!.async('string')
-    expect(xml).toContain('<a:t>日本語 &amp; editable</a:t>')
-    expect(xml).toContain('<a:ea typeface="Yu Gothic"')
+    expect([...xml.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map(match => match[1]).join('')).toBe('日本語 &amp; editable')
+    expect(xml).toContain('<a:ea typeface="Noto Sans JP"')
+    expect(xml).toContain('<a:latin typeface="Yu Gothic"')
     expect(xml).toContain('sz="2400"')
     expect(xml).toContain('b="1"')
     expect(xml).toContain('i="1"')
@@ -102,7 +124,8 @@ describe('generated PPTX archive', () => {
     expect(xml).toContain('<a:gridCol w="2286000"/>')
     expect(xml).toContain('EEEEFF')
     expect(xml.match(/<a:tc>/g)).toHaveLength(2)
-    expect(xml).toContain('<a:ea typeface="Yu Gothic"')
+    expect(xml).toContain('<a:ea typeface="Noto Sans JP"')
+    expect(xml).toContain('<a:latin typeface="Yu Gothic"')
     expect(xml).toContain('<a:tr h="952500">')
     // A zero top padding must not make the remaining point-valued margins inches.
     expect(xml).toContain('marL="0" marR="38100" marT="0" marB="19050"')

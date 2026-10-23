@@ -8,6 +8,23 @@ New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 Add-Type -AssemblyName System.Drawing
 $powerPoint = New-Object -ComObject PowerPoint.Application
 $metrics = @()
+function Assert-FontRuns($textRange, $runs) {
+  $offset = 1
+  foreach ($run in $runs) {
+    if (!$run.text.Length) { continue }
+    # Office assigns a theme font to soft-break controls with no glyphs. Check
+    # painted spans independently instead of treating that as mixed text fonts.
+    foreach ($span in [regex]::Matches($run.text, '[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\r\n]')) {
+      $range = $textRange.Characters($offset + $span.Index, $span.Length)
+      if ($range.Font.NameAscii -ne $run.style.fontFace) { throw "PowerPoint Latin font mismatch: $($range.Font.NameAscii), expected $($run.style.fontFace)" }
+      $point = [char]::ConvertToUtf32($span.Value, 0)
+      $isJapanese = @($fontRanges | Where-Object { $point -ge $_[0] -and $point -le $_[1] }).Count -gt 0
+      $eastAsian = if ($isJapanese) { 'Noto Sans JP' } else { $run.style.fontFace }
+      if ($range.Font.NameFarEast -ne $eastAsian) { throw "PowerPoint East Asian font mismatch for '$($span.Value)': $($range.Font.NameFarEast), expected $eastAsian" }
+    }
+    $offset += $run.text.Length
+  }
+}
 try {
   $fileFilter = if ($All) { '*.pptx' } else { 'audit-*.pptx' }
   foreach ($file in Get-ChildItem -LiteralPath $InputDir -Filter $fileFilter | Sort-Object Name) {
@@ -15,6 +32,10 @@ try {
     try {
       $presentation = $powerPoint.Presentations.Open($file.FullName, $true, $false, $false)
       $model = Get-Content -LiteralPath (Join-Path $InputDir ($file.BaseName + '.json')) -Raw -Encoding UTF8 | ConvertFrom-Json
+      $fontRanges = @(if ($model.japaneseRanges) { $model.japaneseRanges -split ',' | ForEach-Object { $bounds = ($_ -replace '^U\+', '') -split '-'; ,@([Convert]::ToInt32($bounds[0], 16), [Convert]::ToInt32($bounds[1], 16)) } })
+      $fontAuditPath = Join-Path $InputDir ($file.BaseName + '-font-audit.json')
+      $isFontFixture = Test-Path -LiteralPath $fontAuditPath
+      $fontAudit = if ($isFontFixture -and (Test-Path -LiteralPath $fontAuditPath)) { Get-Content -LiteralPath $fontAuditPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
       for ($index = 1; $index -le $presentation.Slides.Count; $index++) {
         $slide = $presentation.Slides.Item($index)
         $slide.Export((Join-Path $OutputDir ($file.BaseName + '-' + $index + '.png')), 'PNG', 1280, 720)
@@ -66,6 +87,7 @@ try {
         $tableIndex = 0
         $pathIndex = 0
         $pathMetrics = @()
+        $fontMetrics = @()
         $partsToCheck = @(foreach ($measuredPart in $model.slides[$index - 1].parts) {
           if ($measuredPart.kind -eq 'list' -and $measuredPart.positioned) {
             foreach ($paragraph in $measuredPart.paragraphs) { @{ kind='list'; paragraphs=@($paragraph) } }
@@ -90,6 +112,9 @@ try {
             $table = $tableShapes[$tableIndex++].Table
             for ($row = 1; $row -le $table.Rows.Count; $row++) {
               if ([Math]::Abs($table.Rows.Item($row).Height - $part.rowHeights[$row - 1] * .75) -gt .02) { throw "PowerPoint changed a measured table row: $($file.Name), row $row" }
+              if ($isFontFixture) {
+                for ($column = 1; $column -le $table.Columns.Count; $column++) { Assert-FontRuns $table.Cell($row,$column).Shape.TextFrame.TextRange $part.rows[$row - 1][$column - 1].runs }
+              }
             }
             $cell = $table.Cell(1,1).Shape.TextFrame.TextRange
             $original = $cell.Text; $cell.Text = '編集確認'
@@ -104,6 +129,16 @@ try {
           $matches = @($textShapes | Where-Object { $_.TextFrame.TextRange.Text.Replace("`r", "`n").Replace([char]11, [char]10).Trim() -eq $normalized })
           if ($matches.Count -eq 0) { throw "Native editable text missing: $expected" }
           $shape = $matches[0]
+          if ($isFontFixture) {
+            if ($file.BaseName -eq 'font-code-default' -and $expected.Contains('const ABC') -and $shape.TextFrame.TextRange.Characters(1,1).Font.NameAscii -ne 'Consolas') { throw 'PowerPoint code font is not Consolas' }
+            if ($part.kind -eq 'text') { Assert-FontRuns $shape.TextFrame.TextRange $part.paragraph.runs }
+            if ($part.kind -eq 'list') { for ($i = 1; $i -le $part.paragraphs.Count; $i++) { Assert-FontRuns ($shape.TextFrame.TextRange.Paragraphs($i)) $part.paragraphs[$i - 1].runs } }
+            $lines = @(for ($i = 1; $i -le $shape.TextFrame.TextRange.Lines().Count; $i++) { $shape.TextFrame.TextRange.Lines($i).Text.Trim() })
+            $reference = @(if ($null -ne $fontAudit) { $fontAudit[$index - 1].paragraphs | Where-Object { $_.text -eq $expected } })
+            if ($reference.Count -eq 1 -and ($lines -join "`n") -cne ($reference[0].lines -join "`n")) { throw "Preview/PowerPoint line wrap mismatch on slide $index : $expected" }
+            $paintedRuns = @($shape.TextFrame.TextRange.Runs() | Where-Object { $_.Text -match '[^\r\n\v]' })
+            $fontMetrics += @{ text=$expected; lines=$lines; latin=@($paintedRuns | ForEach-Object { $_.Font.NameAscii }); eastAsian=(($paintedRuns | ForEach-Object { $_.Font.NameFarEast } | Select-Object -Unique) -join ','); previewLinesVerified=($reference.Count -eq 1) }
+          }
           if ($part.kind -eq 'list') {
             for ($i = 1; $i -le $part.paragraphs.Count; $i++) {
               $paragraph = $shape.TextFrame.TextRange.Paragraphs($i)
@@ -127,7 +162,7 @@ try {
           if (!$shape.TextFrame.TextRange.Text.Contains('編集確認')) { throw 'Native text edit failed' }
           $shape.TextFrame.TextRange.Text = $original
         }
-        $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; markers=$markerMetrics; paths=$pathMetrics; strokeColors=$strokeColors; defaultFill=$defaultFillMetrics; inMemoryEditVerified=$true }
+        $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; markers=$markerMetrics; paths=$pathMetrics; fonts=$fontMetrics; strokeColors=$strokeColors; defaultFill=$defaultFillMetrics; inMemoryEditVerified=$true }
       }
     } finally {
       if ($null -ne $presentation) { $presentation.Saved = -1; $presentation.Close(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($presentation) }

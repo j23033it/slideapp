@@ -3,7 +3,7 @@ import type { MarpCoreBrowser } from '@marp-team/marp-core/browser'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { splitRenderedSlides } from '../../marp/renderer'
 import { rewriteCssUrls, resolveAssetPath } from '../../marp/urls'
-import { splitCssImports } from '../../marp/fonts'
+import { applyJapaneseFonts, JAPANESE_FONT_CSS, splitCssImports } from '../../marp/fonts'
 import { applyUnavailableFontFallbacks, resolveFonts } from './fonts'
 import { generatePptx } from './generate'
 import { measureSlide } from './measure'
@@ -74,7 +74,7 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
     const styles = splitCssImports(rewriteCssUrls(rendered.css, source.baseDir, toAssetUrl))
     const warnings: string[] = []
     const inlineFontFaces = (styles.css.match(/@font-face\s*\{[^}]+\}/gi) ?? []).filter(rule => [...rule.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)].every(match => match[1]!.startsWith('data:'))).join('\n')
-    const fontCSS = options.fontEmbedCSS ?? `${inlineFontFaces}\n${await fontRules(styles.imports, warnings)}`
+    const fontCSS = `${options.fontEmbedCSS ?? `${inlineFontFaces}\n${await fontRules(styles.imports, warnings)}`}\n${JAPANESE_FONT_CSS}`
     if ([...fontCSS.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)].some(match => !match[1]!.startsWith('data:'))) throw new Error('fontEmbedCSS must contain embedded data URLs only')
     fontStyle.textContent = fontCSS
     document.head.append(fontStyle)
@@ -101,6 +101,7 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
     }
     for (const element of shadow.querySelectorAll<HTMLElement>('[style]')) element.setAttribute('style', rewriteCssUrls(element.getAttribute('style')!, source.baseDir, toAssetUrl))
     document.body.append(host)
+    applyJapaneseFonts(shadow)
     const { default: browser } = await import('@marp-team/marp-core/browser')
     handle = browser(shadow)
     await inlineImages(shadow, undefined, (element, error) => { element.dataset.pptxAssetError = error instanceof Error ? error.message : String(error) })
@@ -124,6 +125,9 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
     const report: ExportReport = { slideCount: split.slides.length, rasterizedCount: 0, rasterizedElements: [], substitutedFonts: [], warnings }
     const fonts = await resolveFonts(shadow, report)
     applyUnavailableFontFallbacks(shadow, fonts, fontCSS)
+    await document.fonts.ready
+    handle.update()
+    await new Promise<void>(resolve => setTimeout(resolve, 250))
     const slides: MeasuredSlide[] = []
     const backgrounds = new Map<string, Promise<string>>()
     for (const [index, svg] of [...shadow.querySelectorAll<SVGSVGElement>('svg[data-marpit-svg]')].entries()) {
