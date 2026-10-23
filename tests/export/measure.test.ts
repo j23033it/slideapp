@@ -538,6 +538,43 @@ describe('export DOM text collection', () => {
       }
     } finally { svg.remove() }
   })
+  it.each([
+    ['code', 'background-color:rgb(239,241,243);font-family:Consolas'],
+    ['span', 'background-color:rgb(255,255,0)'],
+    ['span', 'border:1px solid rgb(255,255,0)'],
+  ])('keeps cell fills behind decorated inline %s (%s) (#29)', async (tag, decoration) => {
+    const svg = surface(`<table style="font:24px Arial;border-collapse:collapse"><thead><tr><th style="background-color:#1d4ed8;color:rgb(255,255,255)">Header</th></tr></thead><tbody><tr><td style="background-color:rgb(255,255,255)"><${tag} style="display:inline;${decoration}">Text</${tag}></td></tr><tr><td style="background-color:rgb(255,255,255)">Later</td></tr></tbody></table>`)
+    const table = svg.querySelector('table')!, inline = table.querySelector(tag)!
+    setRect(table, new DOMRect(60, 200, 100, 120))
+    for (const [index, row] of [...table.rows].entries()) {
+      const rect = new DOMRect(60, 200 + index * 40, 100, 40)
+      setRect(row, rect); setRect(row.cells[0]!, rect)
+    }
+    setRect(inline, new DOMRect(60, 240, 98, 29))
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(60, 240, 98, 29)] as unknown as DOMRectList)
+    vi.spyOn(raster, 'rasterizeBackground').mockResolvedValue({ rect: inline.getBoundingClientRect(), data: png })
+    try {
+      const state = report(), slide = await measureSlide(svg, [], fonts(), '', state, 0)
+      expect(state.errors).toBeUndefined()
+      expect(state.rasterizedElements).toEqual([{ slide: 1, element: `${tag} background`, reason: 'CSS background decoration' }])
+      const native = slide.parts.find(p => p.kind === 'table')!
+      expect(native.rows.flat().every(cell => cell.fill?.transparency === 100)).toBe(true)
+      expect(native.columnWidths[0]).toBeGreaterThan(100)
+      expect(slide.parts.map(p => p.kind)).toEqual(['box', 'box', 'box', 'image', 'table'])
+      const backgrounds = slide.parts.filter(p => p.kind === 'box')
+      expect(backgrounds.map(p => p.fill.color)).toEqual(['1D4ED8', 'FFFFFF', 'FFFFFF'])
+      for (const box of backgrounds) {
+        expect(box.rect.x).toBe(native.rect.x)
+        expect(box.rect.width).toBeCloseTo(native.columnWidths[0]!)
+      }
+      const xml = await (await JSZip.loadAsync(await generatePptx([slide]))).file('ppt/slides/slide1.xml')!.async('string')
+      const cells = [...xml.matchAll(/<a:tcPr\b.*?<\/a:tcPr>/gs)].map(m => m[0])
+      expect(cells).toHaveLength(3)
+      for (const cell of cells) expect(cell).toContain('<a:alpha val="0"/>')
+      expect(xml.indexOf('<p:sp>')).toBeLessThan(xml.indexOf('<p:pic>'))
+      expect(xml.indexOf('<p:pic>')).toBeLessThan(xml.indexOf('<p:graphicFrame>'))
+    } finally { svg.remove() }
+  })
   it.each([false, true])('only constrains Office reserves at the slide edge (spare column=%s) (#20)', spare => {
     const svg = surface('<table style="font:24px Arial"><tbody><tr><td>A</td><td>B</td><td>C</td></tr></tbody></table>')
     const table = svg.querySelector('table')!, widths = [200, 100, 100], textWidths = [179, 79, spare ? 20 : 72]

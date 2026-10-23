@@ -143,7 +143,7 @@ try {
                   $officeRgb = [int]$rgb.R + 256 * [int]$rgb.G + 65536 * [int]$rgb.B
                   if ($cellShape.Fill.Visible -ne -1 -or $cellShape.Fill.ForeColor.RGB -ne $officeRgb -or [Math]::Abs($cellShape.Fill.Transparency * 100 - $measuredCell.fill.transparency) -gt .1) { throw 'PowerPoint changed a native table cell fill' }
                 }
-                if (($file.BaseName -eq 'table-background-width' -or $file.BaseName -like 'table-width-wrapped-*' -or ($file.BaseName -like 'probe-*' -and $index -ge 4)) -and $row -eq 1) {
+                if (($file.BaseName -in @('table-background-width','table-inline-decoration') -or $file.BaseName -like 'table-width-wrapped-*' -or ($file.BaseName -like 'probe-*' -and $index -ge 4)) -and $row -eq 1) {
                   if ($cellShape.TextFrame.TextRange.Characters(1).Font.Color.RGB -ne 16777215) { throw 'Table header text is not white' }
                   # Sample the final cell's right edge inside its padding, clear of strokes/glyphs.
                   $sampleX = [int][Math]::Round(($cellShape.Left + $cellShape.Width) / .75 - 3)
@@ -159,7 +159,37 @@ try {
             $original = $cell.Text; $cell.Text = '編集確認'
             if ($cell.Text -ne '編集確認') { throw 'Table cell edit failed' }
             $cell.Text = $original
-            $tableMetrics += @{ columnWidths=$columnWidths; rowHeights=$rowHeights; rowHeightChanges=$rowHeightChanges; headerPaint=$headerPaint; inMemoryCellEditVerified=$true }
+            $inlineDecoration = @()
+            if ($file.BaseName -eq 'table-inline-decoration') {
+              $images = @($model.slides[$index - 1].parts | Where-Object kind -EQ 'image')
+              $expectedImages = if ($index -eq 1) { 2 } else { 1 }
+              if ($images.Count -ne $expectedImages) { throw 'Inline table decoration missing from measured model' }
+              $bitmap = [System.Drawing.Bitmap]::FromFile((Join-Path $OutputDir ($file.BaseName + '-' + $index + '.png')))
+              try {
+                foreach ($image in $images) {
+                  $picture = @($slide.Shapes | Where-Object { $_.Type -eq 13 -and [Math]::Abs($_.Left - $image.rect.x * .75) -lt .02 -and [Math]::Abs($_.Top - $image.rect.y * .75) -lt .02 })
+                  if ($picture.Count -ne 1 -or $picture[0].ZOrderPosition -ge $tableShape.ZOrderPosition) { throw 'Inline decoration must remain below the transparent native table' }
+                  $sampleX = [int][Math]::Round($image.rect.x + $image.rect.width / 2)
+                  $sampleY = [int][Math]::Round($image.rect.y + $(if ($index -eq 3) { 1 } else { 2 }))
+                  $pixel = $bitmap.GetPixel($sampleX, $sampleY)
+                  $expectedRgb = if ($index -eq 1) { @(240,241,242) } elseif ($index -eq 2) { @(255,255,0) } else { @(234,179,8) }
+                  if ([Math]::Abs($pixel.R - $expectedRgb[0]) -gt 1 -or [Math]::Abs($pixel.G - $expectedRgb[1]) -gt 1 -or [Math]::Abs($pixel.B - $expectedRgb[2]) -gt 1) { throw "Inline table decoration is covered: slide $index, pixel=$pixel" }
+                  $inlineDecoration += @{ x=$sampleX; y=$sampleY; rgb=@($pixel.R,$pixel.G,$pixel.B); belowNativeTable=$true }
+                }
+              } finally { $bitmap.Dispose() }
+              for ($row = 1; $row -le $table.Rows.Count; $row++) {
+                for ($column = 1; $column -le $table.Columns.Count; $column++) {
+                  $fill = $table.Cell($row,$column).Shape.Fill
+                  if ($fill.Visible -eq -1 -and $fill.Transparency -lt .999) { throw 'Native cell fill covers inline decoration' }
+                }
+              }
+              $inlineCell = $table.Cell(2,1).Shape.TextFrame.TextRange
+              $originalInline = $inlineCell.Text
+              [void]$inlineCell.InsertAfter(' edit')
+              if (!$inlineCell.Text.EndsWith(' edit')) { throw 'Decorated native cell edit failed' }
+              $inlineCell.Text = $originalInline
+            }
+            $tableMetrics += @{ columnWidths=$columnWidths; rowHeights=$rowHeights; rowHeightChanges=$rowHeightChanges; headerPaint=$headerPaint; inlineDecoration=$inlineDecoration; inMemoryCellEditVerified=$true }
           }
           $expected = $null
           if ($part.kind -eq 'text') { $expected = ($part.paragraph.runs | ForEach-Object text) -join '' }
@@ -207,6 +237,7 @@ try {
           if ($tableShapes.Count -ne $expectedTables) { throw 'Table background regression lost native tables or failed bounds fallback' }
         }
         if ($file.BaseName -like 'table-width-wrapped-*' -and $tableShapes.Count -ne 1) { throw 'Full-width wrapped table lost editable cells' }
+        if ($file.BaseName -eq 'table-inline-decoration' -and $tableShapes.Count -ne 1) { throw 'Decorated inline table lost editable cells' }
         $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; tableMetrics=$tableMetrics; markers=$markerMetrics; paths=$pathMetrics; fonts=$fontMetrics; strokeColors=$strokeColors; defaultFill=$defaultFillMetrics; inMemoryEditVerified=$true }
       }
     } finally {

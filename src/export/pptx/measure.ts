@@ -292,16 +292,25 @@ function cellBorder(cell: HTMLTableCellElement, side: string, table: HTMLTableEl
   return result
 }
 
+/** An opaque native cell would cover independent inline decoration below the table. */
+function tableHasLayeredDecoration(table: HTMLTableElement): boolean {
+  return [table, ...table.querySelectorAll('*')].some(node => isPainted(node) && (
+    (!node.matches('table,thead,tbody,tfoot,tr,td,th,col,colgroup') && separateBackground(node)) ||
+    ['::before', '::after'].some(pseudo => isPainted(node, pseudo) && pseudoNeedsRaster(pseudoFacts(node, pseudo)))
+  ))
+}
+
 export function measureTable(table: HTMLTableElement, origin: DOMRect, fonts: Map<string, string>): Extract<Part, { kind: 'table' }> {
   const reason = tableShapeReason(table)
   if (reason) throw new Error(reason)
   const rows = [...table.rows]
+  const layeredDecoration = tableHasLayeredDecoration(table)
   const result: TableCell[][] = rows.map(row => [...row.cells].map(cell => {
     const style = getComputedStyle(cell)
     const borders = ['top', 'right', 'bottom', 'left'].map(side => cellBorder(cell, side, table)) as TableCell['border']
-    // Simple fills belong to the table grid, so Office resizing cannot expose a gap.
+    // Simple fills belong to the grid unless they would cover descendant paint.
     // Complex decoration keeps its existing independent browser-painted layer.
-    const fill = rasterBox(style, true) ? { color: 'FFFFFF', transparency: 100 } : cssColor(style.backgroundColor)
+    const fill = layeredDecoration || rasterBox(style, true) ? { color: 'FFFFFF', transparency: 100 } : cssColor(style.backgroundColor)
     return { runs: collectRuns(cell, fonts), style: paragraph(cell, origin, fonts), fill, border: borders, valign: requiredCellAlignment(style.verticalAlign) }
   }))
   const rect = relativeRect(table.getBoundingClientRect(), origin)
@@ -665,15 +674,22 @@ export async function measureSlide(svg: SVGSVGElement, notes: string[], fonts: M
       if (!rasterFallback && isPainted(element)) {
         const nativeEnd = parts.length
         const nativeTable = element.matches('table') ? parts.slice(start).find(part => part.kind === 'table') : undefined
+        const layeredTable = nativeTable && tableHasLayeredDecoration(element as HTMLTableElement)
         const backgroundNodes = element.matches(`${BLOCKS},ul,ol,table`) ? [element, ...element.querySelectorAll('*')] : [element]
+        // All cell/structural paint must precede inline paint, including decorations
+        // that extend into a later cell in DOM order.
+        if (layeredTable) {
+          const structural = (node: Element) => node.matches('table,thead,tbody,tfoot,tr,td,th,col,colgroup')
+          backgroundNodes.sort((a, b) => Number(!structural(a)) - Number(!structural(b)))
+        }
         for (const node of backgroundNodes.filter(separateBackground)) {
           if (rasterized.has(node) || decorationSeen.get(node)?.has('background')) continue
           const seen = decorationSeen.get(node) ?? new Set<string>()
           seen.add('background'); decorationSeen.set(node, seen)
           try {
             if (!rasterBox(getComputedStyle(node), node.matches('thead,tbody,tfoot,tr,td,th,col,colgroup')) && getComputedStyle(node).display !== 'inline') {
-              if (nativeTable && node.matches('td,th')) continue // Already painted by a:tcPr.
-              const rect = nativeTable && node.matches('table,thead,tbody,tfoot,tr,col,colgroup')
+              if (nativeTable && !layeredTable && node.matches('td,th')) continue // Already painted by a:tcPr.
+              const rect = nativeTable && node.matches('table,thead,tbody,tfoot,tr,td,th,col,colgroup')
                 ? tableBackgroundRect(node, element as HTMLTableElement, nativeTable, origin)
                 : relativeRect(node.getBoundingClientRect(), origin)
               const box = nativeBox(node, rect)

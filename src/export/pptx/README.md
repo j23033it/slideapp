@@ -166,7 +166,10 @@ the expanded table would cross the slide's right edge does spare width in other
 columns supply that reserve; any remaining reserve shortage is shared
 proportionally. Reserve shortage alone never rasterizes a table. Rectangular
 solid cell backgrounds (including alpha) use the native cell's fill, so text,
-borders and fill share the final grid.
+borders and fill share the final grid. If a table contains independently painted
+descendant backgrounds, borders or generated decoration, all its cells instead
+stay transparent. Structural and cell background shapes use the same final grid
+and precede descendant decoration, followed by the transparent editable table.
 Solid table/row/column/group backgrounds map their horizontal edges to those same
 output column boundaries. Complex cell decoration (gradient, radius, shadow,
 etc.) retains its separate browser-painted image. If the original DOM table itself
@@ -307,6 +310,24 @@ slide 5 needed reserve reduction: its right edge moved from 1291.80625px to
 1280px, with unchanged Office row heights and editable cells. The other 42 tables
 kept main's column widths. The deliberately missing-image review case retains its
 expected isolated asset error.
+
+PR #29's inline-decoration regression is `table-inline-decoration.md`: default
+theme code on white cells, a yellow span on blue cells, and an outlined span.
+The fixture uses the default code background/font/radius, with `white-space:inherit`
+and zero code padding to stay within existing native inline-layout support.
+Unmodified default code's `break-spaces`/padding still takes the existing table
+raster route; this change does not broaden native layout eligibility.
+Export with `inspect-chrome.mjs`, then run `audit-powerpoint.ps1 -All`. The audit
+requires an editable table on every slide, transparent cell fills, decoration
+below the table, visible gray/yellow/outline pixels and blue paint at every final
+header edge. It also changes/restores decorated cell text in memory.
+Chrome 156.0.8078.48 and installed PowerPoint passed all three slides on
+2026-10-24: only the four inline decorations are images; all three tables remain
+editable. The code background samples retain RGB(240,241,242), the yellow span
+RGB(255,255,0), and the outline RGB(234,179,8). The complete 72-deck / 131-slide
+COM run also passed. All 116 existing rows across 43 native tables (71 decks /
+128 slides) matched main e5fec9d within 0.02pt, with zero row-height increases;
+the pre-existing `probe-default` slide 7 DOM/Office difference remains unchanged.
 
 `src/app/**` is deliberately outside this implementation's scope. Changes to the
 `Platform` interface require adding the two new methods to any UI test mocks.
