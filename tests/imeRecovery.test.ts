@@ -40,7 +40,101 @@ function setup(source = '日本語') {
   return { editor, model, run, send, start, end, key, select, crossRuns: () => crossRuns }
 }
 
+const nextTask = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
 afterEach(() => { document.body.innerHTML = ''; document.getSelection()?.removeAllRanges() })
+
+describe('compositionend save settlement task', () => {
+  it.each([false, true])('retains final input after a microtask checkpoint (isComposing: %s)', async isComposing => {
+    const s = setup()
+    try {
+      s.start(); s.run.textContent = '日本語途中'; s.send('input', { isComposing: true })
+      const save = vi.fn(() => { s.editor.endEditing(); return s.model.serialize() })
+      expect(s.editor.deferWhileComposing(save)).toBe(true)
+      s.end(); await Promise.resolve()
+      expect(save).not.toHaveBeenCalled()
+      expect(s.run.isConnected).toBe(true)
+      s.run.textContent = '日本語確定'
+      s.send('input', { inputType: 'insertFromComposition', isComposing })
+      await nextTask()
+      expect(save).toHaveReturnedWith('日本語確定')
+      expect(save).toHaveBeenCalledTimes(1)
+      expect(s.editor.isComposing()).toBe(false)
+    } finally { s.editor.dispose() }
+  })
+
+  it.each(['s', 'blur'])('%s while settling cannot release a save before final input', async action => {
+    const s = setup()
+    try {
+      s.start(); s.run.textContent = '日本語途中'; s.send('input', { isComposing: true })
+      const save = vi.fn(() => { s.editor.endEditing(); return s.model.serialize() })
+      s.editor.deferWhileComposing(save)
+      s.end(); await Promise.resolve()
+      if (action === 'blur') s.run.closest('[data-sm-block]')!.dispatchEvent(new FocusEvent('blur', { composed: true }))
+      else s.key('s', { ctrlKey: true })
+      expect(save).not.toHaveBeenCalled()
+      expect(s.editor.isComposing()).toBe(true)
+      s.run.textContent = '日本語確定'; s.send('input', { inputType: 'insertFromComposition' })
+      await nextTask()
+      expect(save).toHaveReturnedWith('日本語確定')
+      expect(save).toHaveBeenCalledTimes(1)
+    } finally { s.editor.dispose() }
+  })
+
+  it('settles retained DOM and releases a save without a final input event', async () => {
+    const s = setup()
+    try {
+      s.start(); s.run.textContent = '日本語途中'; s.send('input', { isComposing: true })
+      const save = vi.fn(() => s.model.serialize())
+      s.editor.deferWhileComposing(save)
+      s.end(); await Promise.resolve()
+      expect(save).not.toHaveBeenCalled()
+      // No input event: the task must still inspect the retained DOM.
+      s.run.textContent = '日本語確定'
+      await nextTask()
+      expect(save).toHaveReturnedWith('日本語確定')
+      expect(save).toHaveBeenCalledTimes(1)
+      expect(s.editor.isComposing()).toBe(false)
+    } finally { s.editor.dispose() }
+  })
+
+  it('a new composition cancels the old timer and carries save waiters forward', async () => {
+    const s = setup()
+    vi.useFakeTimers()
+    try {
+      s.start(); s.run.textContent = '日本語途中'; s.send('input', { isComposing: true })
+      const save = vi.fn(() => s.model.serialize())
+      s.editor.deferWhileComposing(save)
+      s.end()
+      expect(vi.getTimerCount()).toBe(1)
+      s.start()
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.runAllTimersAsync()
+      expect(save).not.toHaveBeenCalled()
+      expect(s.editor.isComposing()).toBe(true)
+      s.run.textContent = '日本語再開'; s.send('input', { isComposing: true }); s.end()
+      await vi.runAllTimersAsync()
+      expect(save).toHaveReturnedWith('日本語再開')
+      expect(save).toHaveBeenCalledTimes(1)
+    } finally { s.editor.dispose(); vi.useRealTimers() }
+  })
+
+  it('dispose cancels the completion timer without running deferred saves', async () => {
+    const s = setup()
+    vi.useFakeTimers()
+    try {
+      s.start()
+      const save = vi.fn()
+      s.editor.deferWhileComposing(save)
+      s.end()
+      expect(vi.getTimerCount()).toBe(1)
+      s.editor.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.runAllTimersAsync()
+      expect(save).not.toHaveBeenCalled()
+    } finally { s.editor.dispose(); vi.useRealTimers() }
+  })
+})
 
 describe('WebView2 composition recovery', () => {
   it.each(['beforeinput', 'input'])('an ordinary Enter after a provisional %s without compositionstart only confirms text, including a replay', input => {
@@ -84,7 +178,7 @@ describe('WebView2 composition recovery', () => {
       s.start(); s.run.textContent = '日本語入力'
       s.send('input', { isComposing: true, inputType: 'insertCompositionText' }); s.end()
       s.send(late, { isComposing: true, inputType: 'insertCompositionText' })
-      await Promise.resolve()
+      await nextTask()
       expect(s.editor.isComposing()).toBe(false)
       for (const [key, inputType, text] of [['Backspace', 'deleteContentBackward', '日本語入'], ['Delete', 'deleteContentForward', '日本語']] as const) {
         s.select(3); s.key(key)
@@ -121,7 +215,7 @@ describe('WebView2 composition recovery', () => {
       s.start(); s.run.textContent = '日本語確定'; s.send('input', { isComposing: true })
       s.key('Enter', init)
       expect(s.editor.isComposing()).toBe(true); expect(s.model.text).toBe('日本語')
-      s.end(); await Promise.resolve(); expect(s.model.text).toBe('日本語確定'); expect(s.editor.isComposing()).toBe(false)
+      s.end(); await nextTask(); expect(s.model.text).toBe('日本語確定'); expect(s.editor.isComposing()).toBe(false)
     } finally { s.editor.dispose() }
   })
 
@@ -131,9 +225,9 @@ describe('WebView2 composition recovery', () => {
       s.start(); s.run.textContent = '日本語確定'; s.send('input', { isComposing: true })
       let saved = ''
       s.editor.deferWhileComposing(() => { saved = s.model.serialize() })
-      s.end(); s.start(); await Promise.resolve()
+      s.end(); s.start(); await nextTask()
       expect(s.editor.isComposing()).toBe(true); expect(saved).toBe('')
-      s.run.textContent = '日本語再開'; s.send('input', { isComposing: true }); s.end(); await Promise.resolve()
+      s.run.textContent = '日本語再開'; s.send('input', { isComposing: true }); s.end(); await nextTask()
       expect(saved).toBe('日本語再開')
     } finally { s.editor.dispose() }
   })
@@ -142,7 +236,7 @@ describe('WebView2 composition recovery', () => {
     const s = setup()
     try {
       s.start(); s.select(1); s.run.textContent = '日本語確定'; s.send('input', { isComposing: true })
-      s.end(); await Promise.resolve(); s.select(1)
+      s.end(); await nextTask(); s.select(1)
       s.key('ArrowRight'); s.key('Enter'); s.send('beforeinput', { inputType: 'insertParagraph' })
       expect(s.crossRuns()).toBe(0); expect(s.model.text).toBe('日本語確定')
     } finally { s.editor.dispose() }
@@ -171,7 +265,7 @@ describe('WebView2 composition recovery', () => {
     const s = setup()
     const now = vi.spyOn(performance, 'now').mockReturnValue(1000)
     try {
-      s.start(); s.end(); await Promise.resolve(); s.select(1)
+      s.start(); s.end(); await nextTask(); s.select(1)
       now.mockReturnValue(1101); s.key('Enter')
       expect(s.crossRuns()).toBe(1)
     } finally { now.mockRestore(); s.editor.dispose() }

@@ -4,6 +4,7 @@ import { act } from 'preact/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from '../src/app/App'
+import { StageEditor } from '../src/app/stageEditor'
 import { editorSessionSaveState } from '../src/app/session'
 import type { SlideStageProps } from '../src/app/SlideStage'
 import { strings } from '../src/app/strings'
@@ -11,6 +12,7 @@ import { UPDATE_CHECK_EVENT } from '../src/app/UpdateNotice'
 import { exportPptx, type ExportReport } from '../src/export/pptx'
 import { DEFAULT_SETTINGS, platform, type UpdateInfo } from '../src/platform'
 import type { FileEventHandlers, SaveOutcome } from '../src/platform/types'
+import type { SlideSurface } from '../src/marp/surface'
 
 const captured = vi.hoisted(() => ({ stage: null as SlideStageProps | null }))
 vi.mock('../src/app/SlideStage', () => ({
@@ -124,6 +126,50 @@ afterEach(async () => {
 })
 
 describe('App asynchronous disk callbacks', () => {
+  it.each(['Ctrl+S', 'toolbar save'])('includes late final input in %s through the real StageEditor', async action => {
+    const stageHost = document.createElement('div')
+    document.body.append(stageHost)
+    const root = stageHost.attachShadow({ mode: 'open' })
+    const editor = new StageEditor({ root, update: (deck, current) => { root.innerHTML = deck.slides[current] } } as SlideSurface,
+      session().renderer.editing, {
+        latest: () => ({ analysis: session().analysis, deck: session().deck }),
+        onBegin: label => captured.stage!.callbacks.onBegin(label),
+        onEnd: () => captured.stage!.callbacks.onEnd(),
+        onNotice: code => captured.stage!.callbacks.onNotice(code),
+        onCommit: (result, cursors) => captured.stage!.callbacks.onCommit(result, cursors),
+        onCrossRun: (result, after, before) => captured.stage!.callbacks.onCrossRun(result, after, before),
+        onHistory: direction => captured.stage!.callbacks.onHistory(direction),
+      })
+    captured.stage!.apiRef.current = editor
+    vi.mocked(platform.saveFile).mockResolvedValue({ ok: true, hash: 'final', mtime: 2 })
+    try {
+      editor.render(session().deck, session().analysis, 0)
+      const run = root.querySelector<HTMLElement>('[data-sm-run]')!
+      await act(async () => {
+        run.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+        run.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, composed: true }))
+        run.textContent = '日本語途中'
+        run.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, isComposing: true }))
+        run.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, composed: true }))
+        if (action === 'Ctrl+S') run.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, composed: true, cancelable: true }))
+        else click(strings.toolbar.save)
+        expect(platform.saveFile).not.toHaveBeenCalled()
+        await Promise.resolve()
+        expect(platform.saveFile).not.toHaveBeenCalled()
+        expect(run.isConnected).toBe(true)
+        run.textContent = '日本語確定'
+        run.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertFromComposition' }))
+        await new Promise<void>(resolve => setTimeout(resolve, 0))
+      })
+      expect(platform.saveFile).toHaveBeenCalledExactlyOnceWith(path, '日本語確定', false, 'base')
+      expect(session().model.serialize()).toBe('日本語確定')
+    } finally {
+      captured.stage!.apiRef.current = null
+      editor.dispose()
+      stageHost.remove()
+    }
+  })
+
   it.each(['first-open', 'switch-file', 'composition-wait'] as const)(
     'uses the latest notification received during %s before publishing the new session', async (timing) => {
       if (timing === 'first-open') {
