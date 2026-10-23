@@ -54,8 +54,8 @@ non-text geometry rasterize the diagram. External marker references are rejected
 Stroke and arrow paint also participate in viewport checks. Clipped opaque square
 hairlines (at most 1 CSS pixel outside) retain their exact visible area as a fill
 and clipped rectangular border strips; other clipped strokes/markers rasterize.
-Computed CSS path overrides, hidden/transformed marker content and nondefault
-path line caps/joins reject only the SVG and appear in the raster report.
+Computed CSS path overrides, hidden/transformed marker content, non-butt path
+line caps and unsupported joins reject only the SVG and appear in the raster report.
 Solid block backgrounds and straight solid borders become native shapes behind content.
 Equal circular CSS corners with uniform borders use a native `roundRect`, with
 the measured radius and the CSS border inset. Elliptical/asymmetric corners and
@@ -285,6 +285,47 @@ It covers rounded HTML boxes with block children, SVG groups/boxes/text/elbow
 paths/arrowheads, dashed borders, nowrap tables, explicit BRs and local fallback
 for an unsupported circle. `parity.test.ts` additionally checks transactional
 fallback, malformed paths, reverse line directions, OOXML and SVG allowlist safety.
+
+Connected stroked subpaths (including closed `Z/z` paths) use one editable
+`custGeom` per subpath, at every stroke width. Independent straight subpaths keep
+their native line shapes. A path with multiple subpaths and a translucent stroke
+(from `stroke-opacity` or stroke color alpha) rasterizes its entire SVG with a
+reported reason: splitting one stroke across shapes compounds alpha at overlaps.
+Separate path elements retain independent native alpha, so their overlaps remain
+darker as in SVG. Opaque strokes retain the native conversion above.
+PptxGenJS 4.0.1 has no shape join/cap API, so the existing
+JSZip/OOXML pass adds explicit flat caps and `a:miter` (with `lim` in 1/1000 percent),
+`a:round` or `a:bevel` only to named SVG path shapes. Miter limits use the SVG ratio
+multiplied by 100000. Segment corners and actual miter tips participate in viewport
+clipping checks; clipped stroke paint still rasterizes the diagram.
+See [DrawingML miter](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.miter)
+and [SVG stroke joins](https://www.w3.org/TR/SVG/painting.html#StrokeLinejoinProperty).
+Per SVG's vertex marker rules,
+`marker-end` applies only to the final vertex of the entire path, and `marker-start`
+only to the first vertex, not to each subpath (issue #12's second finding was a
+false positive, confirmed in Chrome and the SVG specification). Start/mid markers
+retain the existing raster fallback. Their presentation attributes remain in the
+shared preview/export HTML allowlist because dropping them would silently remove
+visible arrows before either renderer can preserve them. `stroke-miterlimit` also
+survives the allowlist for native joins and faithful fallback.
+
+`tests/fixtures/export/path-joins.md` covers 1px/2px connectors, thick miter/round/
+bevel corners, miter limits 1/4/10, closed paths, reverse coordinates and separate
+subpaths. Export it with `inspect-chrome.mjs`, then run `audit-powerpoint.ps1 -All`:
+the audit checks native labels and changes/restores freeform nodes in memory.
+The installed PowerPoint verification retained all 12 paths and 5 editable text
+shapes with zero rasterized elements. PNG inspection confirmed complete thick
+corners, closed joins, round/bevel styles and the miter-limit cutoff.
+
+`tests/fixtures/export/path-alpha.md` reproduces overlapping subpaths in one
+translucent path, separate translucent path elements, and mixed closed/open
+subpaths. The first and third slides rasterize their SVG; the second retains two
+editable freeforms. `audit-powerpoint.ps1 -All` samples the exported PowerPoint
+PNGs and records `strokeColors` in `com-metrics.json`: a single path stays
+RGB(255,127,127) at both single and overlapping strokes; separate path elements
+produce RGB(255,63,63) at the overlap. Installed PowerPoint confirmed these colors,
+including the supplied `alpha-probe.md` reproduction, and retained the existing
+fixture's 12 editable freeforms and 5 editable text shapes.
 
 Comparison with the supplied reference converter's existing 8-slide PPTX used
 installed PowerPoint COM (2560×1440 PNG) and the reference converter's Marp DOM

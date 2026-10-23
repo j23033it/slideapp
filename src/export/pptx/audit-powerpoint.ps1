@@ -5,6 +5,7 @@
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+Add-Type -AssemblyName System.Drawing
 $powerPoint = New-Object -ComObject PowerPoint.Application
 $metrics = @()
 try {
@@ -17,16 +18,50 @@ try {
       for ($index = 1; $index -le $presentation.Slides.Count; $index++) {
         $slide = $presentation.Slides.Item($index)
         $slide.Export((Join-Path $OutputDir ($file.BaseName + '-' + $index + '.png')), 'PNG', 1280, 720)
+        $strokeColors = $null
+        if ($file.BaseName -eq 'path-alpha') {
+          # These fixture paths share a horizontal stroke at local y=100.
+          # Sample stroke interiors, away from raster/Office antialiasing edges.
+          $paintPart = @($model.slides[$index - 1].parts | Where-Object { $_.kind -in @('image','path') })[0]
+          $sampleX = $paintPart.rect.x + $(if ($paintPart.kind -eq 'image') { 150 } else { 50 })
+          $sampleY = $paintPart.rect.y + $(if ($paintPart.kind -eq 'image') { 100 } else { 0 })
+          $bitmap = [System.Drawing.Bitmap]::FromFile((Join-Path $OutputDir ($file.BaseName + '-' + $index + '.png')))
+          try {
+            $single = $bitmap.GetPixel([int][Math]::Round($sampleX), [int][Math]::Round($sampleY))
+            $overlap = $bitmap.GetPixel([int][Math]::Round($sampleX + 100), [int][Math]::Round($sampleY))
+            $expectedOverlap = if ($index -eq 2) { 63 } else { 127 }
+            if ($single.R -ne 255 -or [Math]::Abs($single.G - 127) -gt 1 -or [Math]::Abs($single.B - 127) -gt 1 -or
+                $overlap.R -ne 255 -or [Math]::Abs($overlap.G - $expectedOverlap) -gt 1 -or [Math]::Abs($overlap.B - $expectedOverlap) -gt 1) {
+              throw "PowerPoint changed translucent stroke compositing: slide $index, single=$single, overlap=$overlap"
+            }
+            $strokeColors = @{ single=@($single.R,$single.G,$single.B); overlap=@($overlap.R,$overlap.G,$overlap.B) }
+          } finally { $bitmap.Dispose() }
+        }
         $textShapes = @($slide.Shapes | Where-Object { $_.HasTextFrame -eq -1 -and $_.TextFrame.HasText -eq -1 })
         $tableShapes = @($slide.Shapes | Where-Object HasTable -EQ -1)
         $markerMetrics = @()
         $tableIndex = 0
+        $pathIndex = 0
+        $pathMetrics = @()
         $partsToCheck = @(foreach ($measuredPart in $model.slides[$index - 1].parts) {
           if ($measuredPart.kind -eq 'list' -and $measuredPart.positioned) {
             foreach ($paragraph in $measuredPart.paragraphs) { @{ kind='list'; paragraphs=@($paragraph) } }
           } else { $measuredPart }
         })
         foreach ($part in $partsToCheck) {
+          if ($part.kind -eq 'path') {
+            $pathIndex++
+            $pathName = "SlideApp SVG path $pathIndex"
+            $shape = $slide.Shapes.Item($pathName)
+            if ($shape.Type -ne 5 -or $shape.Nodes.Count -lt 2) { throw "Native editable freeform missing: $pathName" }
+            $point = $shape.Nodes.Item(1).Points
+            $x = $point.GetValue(1,1); $y = $point.GetValue(1,2)
+            $shape.Nodes.SetPosition(1, $x + 1, $y)
+            $changed = $shape.Nodes.Item(1).Points
+            if ([Math]::Abs($changed.GetValue(1,1) - $x - 1) -gt .02) { throw 'Freeform node edit failed' }
+            $shape.Nodes.SetPosition(1, $x, $y)
+            $pathMetrics += @{ name=$pathName; nodes=$shape.Nodes.Count; inMemoryNodeEditVerified=$true }
+          }
           if ($part.kind -eq 'table') {
             if ($tableShapes.Count -eq 0) { throw 'Native table missing' }
             $table = $tableShapes[$tableIndex++].Table
@@ -69,7 +104,7 @@ try {
           if (!$shape.TextFrame.TextRange.Text.Contains('編集確認')) { throw 'Native text edit failed' }
           $shape.TextFrame.TextRange.Text = $original
         }
-        $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; markers=$markerMetrics; inMemoryEditVerified=$true }
+        $metrics += @{ fixture=$file.BaseName; slide=$index; textShapes=$textShapes.Count; tables=$tableShapes.Count; markers=$markerMetrics; paths=$pathMetrics; strokeColors=$strokeColors; inMemoryEditVerified=$true }
       }
     } finally {
       if ($null -ne $presentation) { $presentation.Saved = -1; $presentation.Close(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($presentation) }

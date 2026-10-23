@@ -38,6 +38,7 @@ export type Part = { kind: 'text'; paragraph: Paragraph } |
   { kind: 'line'; x: number; y: number; width: number; height: number; color: string; points: number; transparency?: number; dash?: boolean; flipH?: boolean; flipV?: boolean } |
   { kind: 'box'; rect: Rect; fill: { color: string; transparency: number }; radius?: number; line?: PptxGenJS.ShapeLineProps } |
   { kind: 'polygon'; rect: Rect; points: { x: number; y: number }[]; fill: { color: string; transparency: number } } |
+  { kind: 'path'; rect: Rect; points: { x: number; y: number }[]; closed: boolean; line: PptxGenJS.ShapeLineProps; join: 'miter' | 'round' | 'bevel'; miterLimit: number } |
   { kind: 'table'; rect: Rect; rows: TableCell[][]; columnWidths: number[]; rowHeights: number[] }
 export interface MeasuredSlide {
   width: number; height: number; background: string; parts: Part[]; notes: string[]
@@ -129,6 +130,7 @@ export function validatePart(part: Part): void {
     if (part.kind === 'list') part.paragraphs.forEach(paragraph)
     if (part.kind === 'box' && part.radius !== undefined && (!Number.isFinite(part.radius) || part.radius < 0)) throw new Error('Invalid measured radius')
     if (part.kind === 'polygon' && (part.points.length < 3 || part.points.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y)))) throw new Error('Invalid measured polygon')
+    if (part.kind === 'path' && (part.points.length < 2 || part.points.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y)) || !Number.isFinite(part.miterLimit) || part.miterLimit < 0 || part.miterLimit * 100000 > 2147483647)) throw new Error('Invalid measured path')
     if (part.kind === 'table') {
       if (!part.rows.length || !part.columnWidths.length || part.rows.some(row => row.length !== part.columnWidths.length) || part.rowHeights.length !== part.rows.length || [...part.columnWidths, ...part.rowHeights].some(n => !Number.isFinite(n) || n <= 0)) throw new Error('Invalid measured table geometry')
       part.rows.flat().forEach(cell => paragraph(cell.style))

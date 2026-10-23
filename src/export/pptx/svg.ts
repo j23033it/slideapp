@@ -5,12 +5,13 @@ import { clipsContent } from './cssAudit'
 
 type Point = { x: number; y: number }
 type Segment = { from: Point; to: Point }
+type Subpath = { segments: Segment[]; closed: boolean }
 /** Strict tokenizer: never drop an unknown character or guess a path command. */
-export function straightPath(d: string): Segment[] {
+function straightSubpaths(d: string): Subpath[] {
   const tokens = d.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?/g) ?? []
   if (d.replace(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:e[-+]?\d+)?|[\s,]/g, '')) throw new Error('Unsupported SVG path token')
-  let index = 0, command = '', previous: Point | undefined
-  const segments: Segment[] = []
+  let index = 0, command = '', previous: Point | undefined, start: Point | undefined
+  const subpaths: Subpath[] = []
   const number = () => {
     const value = Number(tokens[index++])
     if (!Number.isFinite(value)) throw new Error('Invalid SVG path coordinate')
@@ -18,15 +19,32 @@ export function straightPath(d: string): Segment[] {
   }
   while (index < tokens.length) {
     if (/^[a-z]$/i.test(tokens[index]!)) command = tokens[index++]!
+    if (command === 'Z' || command === 'z') {
+      if (!previous || !start || subpaths.at(-1)!.closed) throw new Error('SVG close path must follow an open subpath')
+      const subpath = subpaths.at(-1)!
+      subpath.segments.push({ from: previous, to: start })
+      subpath.closed = true
+      previous = start
+      command = ''
+      continue
+    }
     if (!['M', 'L', 'H', 'V'].includes(command)) throw new Error(`Unsupported SVG path command: ${command}`)
     if (!previous && command !== 'M') throw new Error('SVG path must begin with M')
+    if (subpaths.at(-1)?.closed && command !== 'M') throw new Error('Unsupported SVG continuation after close path')
     const next = command === 'H' ? { x: number(), y: previous!.y } : command === 'V' ? { x: previous!.x, y: number() } : { x: number(), y: number() }
-    if (command !== 'M') segments.push({ from: previous!, to: next })
+    if (command === 'M') {
+      start = next
+      subpaths.push({ segments: [], closed: false })
+    } else subpaths.at(-1)!.segments.push({ from: previous!, to: next })
     previous = next
     if (command === 'M') command = 'L'
   }
   if (!previous) throw new Error('Empty SVG path')
-  return segments
+  return subpaths
+}
+
+export function straightPath(d: string): Segment[] {
+  return straightSubpaths(d).flatMap(subpath => subpath.segments)
 }
 
 const paint = (value: string) => value === 'none' ? { color: 'FFFFFF', transparency: 100 } : cssColor(value)
@@ -136,21 +154,55 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
     } else if (el.localName === 'path') {
       if (fill.transparency < 100) throw new Error('Unsupported SVG filled path')
       if (s.markerStart !== 'none' || s.markerMid !== 'none') throw new Error('Unsupported SVG start/mid marker')
-      const segments = straightPath(pathData(el)).map(segment => ({ from: point(segment.from), to: point(segment.to) }))
-      if (line && ((s.strokeLinecap && s.strokeLinecap !== 'butt') || (s.strokeLinejoin && s.strokeLinejoin !== 'miter'))) throw new Error(`Unsupported SVG stroke-linecap/linejoin: ${s.strokeLinecap} / ${s.strokeLinejoin}`)
-      if (line && segments.length > 1) {
-        // A miter may extend farther than half the stroke. A conservative bound
-        // is preferable to silently exporting paint that the viewport clips.
-        const points = segments.flatMap(segment => [segment.from, segment.to])
+      const subpaths = straightSubpaths(pathData(el)).map(subpath => ({ ...subpath,
+        segments: subpath.segments.map(segment => ({ from: point(segment.from), to: point(segment.to) })) }))
+      // SVG paints one path's stroke once, including overlapping subpaths.
+      // Separate Office shapes would apply alpha again at each overlap. Reject
+      // this SVG atomically; separate path elements must still composite apart.
+      if (line && stroke.transparency > 0 && subpaths.length > 1) throw new Error('Unsupported SVG translucent multi-subpath stroke: separate shapes would compound transparency')
+      const join = s.strokeLinejoin || 'miter', miterLimit = Number(s.strokeMiterlimit || 4)
+      if (line && ((s.strokeLinecap && s.strokeLinecap !== 'butt') || !['miter', 'round', 'bevel'].includes(join))) throw new Error(`Unsupported SVG stroke-linecap/linejoin: ${s.strokeLinecap} / ${s.strokeLinejoin}`)
+      if (line) for (const subpath of subpaths) {
+        const edges = subpath.segments.filter(({from,to}) => from.x !== to.x || from.y !== to.y)
+        if (!edges.length) continue
+        if (!subpath.closed && edges.length === 1) {
+          const { from, to } = edges[0]!
+          parts.push({ kind: 'line', x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x - from.x), height: Math.abs(to.y - from.y),
+            flipH: to.x < from.x, flipV: to.y < from.y, color: stroke.color, transparency: stroke.transparency, points: strokeWidth * .75, dash })
+          continue
+        }
+        // Keep a whole subpath together, so Office can join adjacent strokes and
+        // close the last-to-first join. Flat degenerate bounds need a nonzero
+        // coordinate frame; points themselves retain their exact positions.
+        const points = [edges[0]!.from, ...edges.map(edge => edge.to)]
+        if (subpath.closed) points.pop()
         const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y))
-        checkPaintBounds(x, y, Math.max(...points.map(p => p.x)) - x, Math.max(...points.map(p => p.y)) - y, strokeWidth / 2 * Number(s.strokeMiterlimit || 4))
+        parts.push({kind:'path', rect:{x,y,width:Math.max(1,Math.max(...points.map(p => p.x))-x),height:Math.max(1,Math.max(...points.map(p => p.y))-y)},
+          points,closed:subpath.closed,line,join:join as 'miter' | 'round' | 'bevel',miterLimit})
+        // Segment corners and actual miter tips bound the stroke. Expanding the
+        // whole path by miterLimit would unnecessarily reject thin connectors.
+        const half = strokeWidth / 2
+        const normals = edges.map(({from,to}) => {
+          const length = Math.hypot(to.x-from.x,to.y-from.y)
+          return {x:-(to.y-from.y)/length,y:(to.x-from.x)/length}
+        })
+        const checkPoint = (p: Point) => checkPaintBounds(p.x,p.y,0,0)
+        edges.forEach(({from,to}, i) => {
+          const n = normals[i]!
+          for (const p of [from,to]) for (const sign of [-1,1]) checkPoint({x:p.x+sign*half*n.x,y:p.y+sign*half*n.y})
+        })
+        for (let i = subpath.closed ? 0 : 1; i < edges.length; i++) {
+          const a = normals[(i+edges.length-1)%edges.length]!, b = normals[i]!, vertex = edges[i]!.from
+          if (join === 'round') checkPaintBounds(vertex.x,vertex.y,0,0,half)
+          else if (join === 'miter') {
+            const denominator = 1+a.x*b.x+a.y*b.y
+            if (denominator > 0 && Math.sqrt(2/denominator) <= miterLimit) {
+              for (const sign of [-1,1]) checkPoint({x:vertex.x+sign*half*(a.x+b.x)/denominator,y:vertex.y+sign*half*(a.y+b.y)/denominator})
+            }
+          }
+        }
       }
-      if (line) for (const { from, to } of segments) {
-        if (from.x === to.x && from.y === to.y) continue
-        parts.push({ kind: 'line', x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x - from.x), height: Math.abs(to.y - from.y),
-          flipH: to.x < from.x, flipV: to.y < from.y, color: stroke.color, transparency: stroke.transparency, points: strokeWidth * .75, dash })
-      }
-      if (s.markerEnd && s.markerEnd !== 'none' && segments.length) {
+      if (s.markerEnd && s.markerEnd !== 'none') {
         const urlText = /^url\(["']?([^"')]+)["']?\)$/.exec(s.markerEnd)?.[1]
         const target = urlText ? new URL(urlText, document.baseURI) : undefined, current = new URL(document.baseURI)
         if (!target || !target.hash) throw new Error('Unsupported SVG marker URL')
@@ -167,15 +219,20 @@ export function measureSvg(svg: SVGSVGElement, origin: DOMRect, fonts: Map<strin
           if (node.hasAttribute('transform') || (style.transform && style.transform !== 'none')) throw new Error('Unsupported SVG marker transform')
         }
         if (getComputedStyle(path).stroke !== 'none' || getComputedStyle(path).opacity !== '1') throw new Error('Unsupported SVG marker stroke/opacity')
-        const last = segments.at(-1)!, dx = last.to.x - last.from.x, dy = last.to.y - last.from.y
-        if (!dx && !dy) throw new Error('SVG marker has no direction')
-        const angle = Math.atan2(dy, dx), units = marker.getAttribute('markerUnits') === 'userSpaceOnUse' ? scale : strokeWidth
+        const units = marker.getAttribute('markerUnits') === 'userSpaceOnUse' ? scale : strokeWidth
         const w = marker.markerWidth.baseVal.value * units, h = marker.markerHeight.baseVal.value * units, unit = Math.min(w, h) / 10
         const refX = marker.refX.baseVal.value, refY = marker.refY.baseVal.value
-        const points = [{ x: 0, y: 0 }, { x: 10, y: 5 }, { x: 0, y: 10 }].map(p => ({ x: last.to.x + (p.x - refX) * unit * Math.cos(angle) - (p.y - refY) * unit * Math.sin(angle), y: last.to.y + (p.x - refX) * unit * Math.sin(angle) + (p.y - refY) * unit * Math.cos(angle) }))
-        const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y))
         const color = paint(getComputedStyle(path).fill)
         color.transparency = 100 - (100 - color.transparency) * Number(getComputedStyle(path).fillOpacity || 1)
+        // SVG marker-end belongs to the final vertex of the entire path, not
+        // every subpath. Never borrow an endpoint/direction from an earlier M.
+        const last = subpaths.at(-1)!.segments.at(-1)
+        if (!last) throw new Error('SVG marker has no direction')
+        const dx = last.to.x - last.from.x, dy = last.to.y - last.from.y
+        if (!dx && !dy) throw new Error('SVG marker has no direction')
+        const angle = Math.atan2(dy, dx)
+        const points = [{ x: 0, y: 0 }, { x: 10, y: 5 }, { x: 0, y: 10 }].map(p => ({ x: last.to.x + (p.x - refX) * unit * Math.cos(angle) - (p.y - refY) * unit * Math.sin(angle), y: last.to.y + (p.x - refX) * unit * Math.sin(angle) + (p.y - refY) * unit * Math.cos(angle) }))
+        const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y))
         parts.push({ kind: 'polygon', rect: { x, y, width: Math.max(...points.map(p => p.x)) - x, height: Math.max(...points.map(p => p.y)) - y }, points, fill: color })
       }
     } else throw new Error(`Unsupported SVG element: ${el.localName}`)
