@@ -329,9 +329,10 @@ export function App() {
   /** 監視先を戻したときの読み込み結果も、外部変更と同じ規則で反映する */
   const restoreSessionWatch = useCallback(
     async (session: EditorSession): Promise<void> => {
+      const observation = diskObservationRef.current
       const restored = await platform.openFile(session.path).catch(() => null)
       await waitForComposition()
-      if (restored) {
+      if (restored && canApplyDiskResult(observation, diskObservationRef.current, restored.hash)) {
         externalRef.current({ type: 'changed', path: session.path, ...restored })
       }
     },
