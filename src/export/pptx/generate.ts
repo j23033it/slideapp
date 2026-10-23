@@ -57,6 +57,28 @@ function correctListIndents(xml: string, lists: Map<string, Extract<Part, { kind
   return corrected
 }
 
+// PptxGenJS has points but no shape join/cap API. Amend only our named SVG
+// paths in the existing ZIP pass, leaving text, boxes and arrow polygons alone.
+function correctPathJoins(xml: string, paths: Map<string, Extract<Part, { kind: 'path' }>>): string {
+  let found = 0
+  const corrected = xml.replace(/<p:sp>.*?<\/p:sp>/gs, shape => {
+    const name = /<p:cNvPr\b[^>]*\bname="([^"]+)"/.exec(shape)?.[1]
+    const path = name ? paths.get(name) : undefined
+    if (!path) return shape
+    found++
+    let lines = 0
+    const result = shape.replace(/<a:ln\b[^>]*>.*?<\/a:ln>/gs, line => {
+      lines++
+      const join = path.join === 'miter' ? `<a:miter lim="${Math.round(path.miterLimit * 100000)}"/>` : `<a:${path.join}/>`
+      return line.replace(/ cap="[^"]*"/g, '').replace('<a:ln', '<a:ln cap="flat"').replace('</a:ln>', `${join}</a:ln>`)
+    })
+    if (lines !== 1) throw new Error('Unexpected PowerPoint path line')
+    return result
+  })
+  if (found !== paths.size) throw new Error('Missing PowerPoint path shape')
+  return corrected
+}
+
 /** Pure measured-model → OOXML generation, also usable in Node verification. */
 export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides'): Promise<Uint8Array> {
   if (!slides.length) throw new Error('No slides to export')
@@ -68,6 +90,7 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
   const defaultFont = firstText?.kind === 'text' ? firstText.paragraph.runs[0]?.style.fontFace ?? 'Yu Gothic' : 'Yu Gothic'
   pptx.theme = { headFontFace: defaultFont, bodyFontFace: defaultFont }
   const slideLists: Map<string, Extract<Part, { kind: 'list' }>>[] = []
+  const slidePaths: Map<string, Extract<Part, { kind: 'path' }>>[] = []
   slides.forEach((model, index) => {
     const name = `MARP_${index}`
     pptx.defineLayout({ name, width: model.width / 96, height: model.height / 96 })
@@ -77,6 +100,8 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
     const slide = pptx.addSlide()
     const lists = new Map<string, Extract<Part, { kind: 'list' }>>()
     slideLists.push(lists)
+    const paths = new Map<string, Extract<Part, { kind: 'path' }>>()
+    slidePaths.push(paths)
     slide.background = { color: model.background }
     for (const part of model.parts) {
       if (part.kind === 'text') slide.addText(textRuns(part.paragraph.runs), toTextOptions(part.paragraph))
@@ -101,6 +126,13 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
       else if (part.kind === 'box') slide.addShape(part.radius ? pptx.ShapeType.roundRect : pptx.ShapeType.rect, { ...toPosition(part.rect), rectRadius: (part.radius ?? 0) / 96, fill: part.fill, line: part.line ?? { transparency: 100 } })
       // 4.0.1 supports custGeom at runtime but omits it from the ShapeType enum.
       else if (part.kind === 'polygon') slide.addShape('custGeom' as PptxGenJS.ShapeType, { ...toPosition(part.rect), points: [...part.points.map(p => ({ x: (p.x - part.rect.x) / 96, y: (p.y - part.rect.y) / 96 })), { close: true }], fill: part.fill, line: { transparency: 100 } })
+      else if (part.kind === 'path') {
+        const objectName = `SlideApp SVG path ${paths.size + 1}`
+        paths.set(objectName, part)
+        slide.addShape('custGeom' as PptxGenJS.ShapeType, { ...toPosition(part.rect), objectName,
+          points: [...part.points.map(p => ({ x: (p.x - part.rect.x) / 96, y: (p.y - part.rect.y) / 96 })), ...(part.closed ? [{ close: true as const }] : [])],
+          fill: { color: 'FFFFFF', transparency: 100 }, line: part.line })
+      }
       else {
         slide.addTable(part.rows.map(row => row.map(cell => ({
           text: textRuns(cell.runs),
@@ -124,6 +156,7 @@ export async function generatePptx(slides: MeasuredSlide[], title = 'Marp slides
   for (const [index, lists] of slideLists.entries()) {
     const path = `ppt/slides/slide${index + 1}.xml`
     let xml = correctListIndents(await zip.file(path)!.async('string'), lists)
+    xml = correctPathJoins(xml, slidePaths[index]!)
     // PptxGenJS 4.0.1 repeats pPr for rich runs in every text/table paragraph.
     // DrawingML permits exactly one. Also make no-stroke independent of themes.
     xml = xml.replace(/<a:ln>\s*<\/a:ln>/g, '<a:ln><a:noFill/></a:ln>').replace(/<a:p>.*?<\/a:p>/gs, paragraph => {
