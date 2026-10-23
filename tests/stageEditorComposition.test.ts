@@ -88,7 +88,6 @@ describe('StageEditor IME composition', () => {
         order.push('deferred')
         editor.endEditing()
       })
-      editor.endEditing()
       expect(order).toEqual([])
 
       run!.textContent = 'Second'

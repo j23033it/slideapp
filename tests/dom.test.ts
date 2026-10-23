@@ -151,6 +151,39 @@ describe('DOM editing boundary', () => {
     expect(onCommit.mock.lastCall?.[0].newText).toBe('日本語入力');
     adapter.dispose();
   });
+  it('does not change attributes or compare provisional DOM while composition switches into a nested item', () => {
+    const { root, run, adapter, onCommit, onReject } = setup('- parent\n  - child');
+    const parent = run('parent'), child = run('child');
+    adapter.begin(parent); select(child, 5);
+    const observer = new MutationObserver(() => {});
+    observer.observe(root, { subtree: true, attributes: true, childList: true, characterData: true });
+    const cloned = vi.spyOn(Node.prototype, 'cloneNode');
+    child.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    child.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertCompositionText', isComposing: true }));
+    expect(observer.takeRecords()).toEqual([]);
+    child.textContent = 'child日本語'; observer.takeRecords(); // The browser owns this mutation.
+    child.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', isComposing: true }));
+    expect(observer.takeRecords()).toEqual([]);
+    expect(cloned).not.toHaveBeenCalled(); expect(onCommit).not.toHaveBeenCalled(); expect(onReject).not.toHaveBeenCalled();
+    child.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    expect(onCommit.mock.lastCall?.[0].newText).toBe('- parent\n  - child日本語');
+    observer.disconnect(); cloned.mockRestore(); adapter.dispose();
+  });
+  it('refreshes composition snapshots after accepting a nested edit', () => {
+    const { run, adapter, onCommit, onReject } = setup('- parent\n  - child');
+    const parent = run('parent'), child = run('child');
+    adapter.begin(parent); select(child, 5);
+    child.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    child.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertCompositionText', isComposing: true }));
+    child.textContent = 'child一'; child.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    select(parent, 6);
+    parent.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    parent.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertCompositionText', isComposing: true }));
+    parent.textContent = 'parent二'; parent.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    expect(onReject).not.toHaveBeenCalled();
+    expect(onCommit.mock.lastCall?.[0].newText).toBe('- parent二\n  - child一');
+    adapter.dispose();
+  });
   it('blocks cross-run selections, Enter, formatting, native history and boundary deletion', () => {
     const { root, run, adapter, onReject } = setup();
     const left = run('left '), bold = run('bold'); adapter.begin(left); select(left, 1);

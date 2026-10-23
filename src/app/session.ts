@@ -55,7 +55,7 @@ export class CompositionGate {
     return this.composing
   }
 
-  /** compositionstart / 変換中のbeforeinput */
+  /** compositionstart のみ。input/beforeinput のフラグでは再開しない */
   start(): void {
     this.composing = true
     this.generation += 1

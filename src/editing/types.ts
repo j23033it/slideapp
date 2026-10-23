@@ -17,6 +17,8 @@ export interface Analysis {
   text: string; html: string; css: string; runs: Run[]; blocks: Block[]; readonly: ReadonlyRegion[];
   /** Internal validation fingerprints, including read-only and generated tokens. */
   structure: string; inlineStructure: string[];
+  /** Unfilled paragraph/line: remove only this recorded insertion on finish. */
+  draft?: { runId: string; edit: SourceEdit; before: { runId: string; offset: number } };
 }
 export type EditResult = { ok: true; edit: SourceEdit; newText: string; analysis: Analysis; escaped: boolean } |
   { ok: false; reason: ReadonlyReason };
