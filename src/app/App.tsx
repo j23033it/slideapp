@@ -64,7 +64,7 @@ type PendingAction =
 
 type ExportNotice =
   | { kind: 'success'; path: string; report: ExportReport }
-  | { kind: 'error'; message: string; report?: ExportReport }
+  | { kind: 'error'; message: string; report?: ExportReport; details?: string[] }
 
 interface ViewState {
   tick: number
@@ -138,8 +138,31 @@ function createExportMarp(baseDir: string, config: ThemeConfig): Marp {
 
 function hasExportReportDetails(report: ExportReport): boolean {
   return report.rasterizedCount > 0 || report.rasterizedElements.length > 0 ||
-    (report.approximatedElements?.length ?? 0) > 0 || report.substitutedFonts.length > 0 ||
-    report.warnings.length > 0 || (report.errors?.length ?? 0) > 0
+    report.substitutedFonts.length > 0 || report.warnings.length > 0 || (report.errors?.length ?? 0) > 0
+}
+
+function groupExportItemsBySlide(items: readonly { slide: number }[]): { slide: number; count: number }[] {
+  const counts = new Map<number, number>()
+  for (const item of items) counts.set(item.slide, (counts.get(item.slide) ?? 0) + 1)
+  return [...counts.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([slide, count]) => ({ slide, count }))
+}
+
+function exportWarningMessages(warnings: readonly string[]): string[] {
+  const messages = new Set<string>()
+  for (const warning of warnings) {
+    // reportElementError also mirrors errors into warnings; the Japanese error summary covers those.
+    if (warning.startsWith('Error on slide ')) continue
+    if (warning.startsWith('Web font stylesheet could not be embedded:')) {
+      messages.add(strings.export.webFontUnavailable)
+    } else if (warning.startsWith('Font load failed:')) {
+      messages.add(strings.export.fontLoadFailed)
+    } else {
+      messages.add(strings.export.genericWarning)
+    }
+  }
+  return [...messages]
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -683,8 +706,9 @@ export function App() {
       } catch (reason) {
         setExportNotice({
           kind: 'error',
-          message: strings.export.writeFailed(path, errorMessage(reason)),
+          message: strings.export.writeFailed(basename(path)),
           report,
+          details: [errorMessage(reason)],
         })
         setExportReportOpen(hasExportReportDetails(report))
         return
@@ -693,7 +717,7 @@ export function App() {
       if (report.errors?.length) {
         setExportNotice({
           kind: 'error',
-          message: strings.export.partial(path),
+          message: strings.export.partial(basename(path)),
           report,
         })
         setExportReportOpen(true)
@@ -702,7 +726,11 @@ export function App() {
         setExportReportOpen(hasExportReportDetails(report))
       }
     } catch (reason) {
-      setExportNotice({ kind: 'error', message: strings.export.failed(errorMessage(reason)) })
+      setExportNotice({
+        kind: 'error',
+        message: strings.export.failed,
+        details: [errorMessage(reason)],
+      })
     } finally {
       exportingRef.current = false
       setExporting(false)
@@ -1321,6 +1349,19 @@ export function App() {
   const exportReport = exportNotice?.report
   const exportReportHasDetails = exportReport ? hasExportReportDetails(exportReport) : false
   const exportReportErrors = exportReport?.errors ?? []
+  const exportRasterizedBySlide = exportReport ? groupExportItemsBySlide(exportReport.rasterizedElements) : []
+  const exportRasterizedUnassignedCount = exportReport
+    ? Math.max(0, exportReport.rasterizedCount - exportReport.rasterizedElements.length)
+    : 0
+  const exportErrorsBySlide = groupExportItemsBySlide(exportReportErrors)
+  const exportWarnings = exportReport ? exportWarningMessages(exportReport.warnings) : []
+  const exportTechnicalDetails = exportNotice
+    ? [...new Set([
+      ...(exportNotice.kind === 'error' ? exportNotice.details ?? [] : []),
+      ...(exportReport?.warnings.filter((warning) => !warning.startsWith('Error on slide ')) ?? []),
+      ...exportReportErrors.map((error) => strings.export.errorDetail(error.slide, error.element, error.reason)),
+    ])]
+    : []
   const showExportBanner = exportNotice !== null &&
     (exportNotice.kind === 'error' || !exportReportHasDetails)
 
@@ -1370,15 +1411,14 @@ export function App() {
           <div class="export-banner-content">
             <span class="banner-message">
               {exportNotice.kind === 'success'
-                ? strings.export.succeeded(exportNotice.path)
+                ? strings.export.succeeded(basename(exportNotice.path))
                 : exportNotice.message}
             </span>
-            {exportNotice.kind === 'error' && exportReportErrors.length > 0 ? (
-              <ul class="export-error-list">
-                {exportReportErrors.map((error, index) => (
-                  <li key={index}>{strings.export.errorItem(error.slide, error.element, error.reason)}</li>
-                ))}
-              </ul>
+            {exportNotice.kind === 'error' && !exportReportOpen && exportNotice.details?.length ? (
+              <details class="export-report-details">
+                <summary>{strings.export.details}</summary>
+                <ul>{exportNotice.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul>
+              </details>
             ) : null}
           </div>
           <button type="button" onClick={() => setExportNotice(null)}>
@@ -1511,35 +1551,27 @@ export function App() {
             <h2 class="modal-title" id="export-report-title">{strings.export.reportTitle}</h2>
             <p class="modal-message">
               {exportNotice.kind === 'success'
-                ? strings.export.succeeded(exportNotice.path)
+                ? strings.export.succeeded(basename(exportNotice.path))
                 : exportNotice.message}
             </p>
             <div class="export-report-list">
               {exportNotice.report.rasterizedCount > 0 || exportNotice.report.rasterizedElements.length > 0 ? (
                 <section class="export-report-section">
-                  <h3>{strings.export.rasterized(Math.max(exportNotice.report.rasterizedCount, exportNotice.report.rasterizedElements.length))}</h3>
+                  <h3>{strings.export.rasterizedTitle}</h3>
                   <ul>
-                    {exportNotice.report.rasterizedElements.map((item, index) => (
-                      <li key={index}>{strings.export.rasterizedItem(item.slide, item.element, item.reason)}</li>
+                    {exportRasterizedBySlide.map(({ slide, count }) => (
+                      <li key={slide}>{strings.export.rasterizedSlide(slide, count)}</li>
                     ))}
+                    {exportRasterizedUnassignedCount > 0 ? (
+                      <li>{strings.export.rasterizedUnassigned(exportRasterizedUnassignedCount)}</li>
+                    ) : null}
                   </ul>
-                </section>
-              ) : null}
-              {(exportNotice.report.approximatedElements?.length ?? 0) > 0 ? (
-                <section class="export-report-section">
-                  <h3>{strings.export.approximated(exportNotice.report.approximatedElements!.length)}</h3>
-                  <ul>
-                    {exportNotice.report.approximatedElements!.map((item, index) => (
-                      <li key={index}>
-                        {strings.export.approximatedItem(item.slide, item.element, item.property, item.value, item.replacement)}
-                      </li>
-                    ))}
-                  </ul>
+                  <p>{strings.export.rasterizedEditingLimit}</p>
                 </section>
               ) : null}
               {exportNotice.report.substitutedFonts.length > 0 ? (
                 <section class="export-report-section">
-                  <h3>{strings.export.substitutedFonts(exportNotice.report.substitutedFonts.length)}</h3>
+                  <h3>{strings.export.substitutedFontsTitle}</h3>
                   <ul>
                     {exportNotice.report.substitutedFonts.map((font, index) => (
                       <li key={index}>{strings.export.substitutedFont(font.requested, font.replacement)}</li>
@@ -1547,21 +1579,27 @@ export function App() {
                   </ul>
                 </section>
               ) : null}
-              {exportNotice.report.warnings.length > 0 ? (
+              {exportWarnings.length > 0 ? (
                 <section class="export-report-section">
-                  <h3>{strings.export.warnings(exportNotice.report.warnings.length)}</h3>
-                  <ul>{exportNotice.report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+                  <h3>{strings.export.warningTitle}</h3>
+                  <ul>{exportWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
                 </section>
               ) : null}
               {exportReportErrors.length > 0 ? (
                 <section class="export-report-section">
-                  <h3>{strings.export.errors(exportReportErrors.length)}</h3>
+                  <h3>{strings.export.errorsTitle}</h3>
                   <ul>
-                    {exportReportErrors.map((error, index) => (
-                      <li key={index}>{strings.export.errorItem(error.slide, error.element, error.reason)}</li>
+                    {exportErrorsBySlide.map(({ slide, count }) => (
+                      <li key={slide}>{strings.export.errorSlide(slide, count)}</li>
                     ))}
                   </ul>
                 </section>
+              ) : null}
+              {exportTechnicalDetails.length > 0 ? (
+                <details class="export-report-details">
+                  <summary>{strings.export.details}</summary>
+                  <ul>{exportTechnicalDetails.map((detail, index) => <li key={index}>{detail}</li>)}</ul>
+                </details>
               ) : null}
             </div>
             <div class="modal-buttons">
