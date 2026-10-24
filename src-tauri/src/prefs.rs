@@ -29,6 +29,10 @@ pub struct AppSettings {
     /// 既存の設定ファイルに項目が無くても読めるよう既定値を補う
     #[serde(default = "default_true")]
     pub check_updates_on_startup: bool,
+    #[serde(default)]
+    pub open_tabs: Vec<String>,
+    #[serde(default)]
+    pub active_tab: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -42,6 +46,8 @@ impl Default for AppSettings {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_collapsed: false,
             check_updates_on_startup: true,
+            open_tabs: Vec::new(),
+            active_tab: None,
         }
     }
 }
@@ -205,6 +211,22 @@ mod tests {
         assert!(json.contains("\"sidebarWidth\""));
         assert!(json.contains("\"sidebarCollapsed\""));
         assert!(json.contains("\"checkUpdatesOnStartup\""));
+    }
+
+    #[test]
+    fn tab_settings_preserve_order_and_old_settings_default_to_empty() {
+        let old: AppSettings = serde_json::from_str(
+            r#"{"theme":"dark","sidebarWidth":200,"sidebarCollapsed":true}"#,
+        ).unwrap();
+        assert!(old.open_tabs.is_empty());
+        assert_eq!(old.active_tab, None);
+        let settings = AppSettings {
+            open_tabs: vec![r"C:\second.md".into(), r"C:\first.md".into()],
+            active_tab: Some(r"C:\first.md".into()),
+            ..AppSettings::default()
+        };
+        let roundtrip: AppSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(roundtrip, settings);
     }
 
     #[test]

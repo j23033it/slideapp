@@ -5,6 +5,8 @@ import type { EditorSession, StageApi } from './session'
 import { StageEditor, type EditSuccess, type EditingCursors } from './stageEditor'
 import type { Cursor } from '../document'
 import type { ReadonlyCode } from '../editing'
+import { selectionFor } from '../editing/dom/selection'
+import { runElementOf, selectionInRun } from './caret'
 
 export interface SlideStageCallbacks {
   onBegin(label: string): void
@@ -57,13 +59,24 @@ export function SlideStage({
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
     })
     editorRef.current = editor
+    let cursor: Cursor | undefined
+    const rememberCursor = () => {
+      const root = host.shadowRoot
+      if (!root) return
+      const run = runElementOf(selectionFor(root)?.focusNode ?? null)
+      const point = run ? selectionInRun(root, run) : null
+      if (point?.collapsed) cursor = { runId: point.runId, offset: point.offset }
+    }
+    host.ownerDocument.addEventListener('selectionchange', rememberCursor)
     apiRef.current = {
       endEditing: () => editor.endEditing(),
+      captureCursor: () => { rememberCursor(); return cursor },
       isComposing: () => editor.isComposing(),
       deferWhileComposing: (action) => editor.deferWhileComposing(action),
     }
 
     return () => {
+      host.ownerDocument.removeEventListener('selectionchange', rememberCursor)
       apiRef.current = null
       editorRef.current = null
       editor.dispose()

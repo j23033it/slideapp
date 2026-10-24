@@ -28,6 +28,12 @@ export const strings = {
       'slide-readonly': '読み取り専用の文書ではスライドを操作できません',
     } satisfies Record<SlideOperationCode, string>,
   },
+  tabs: {
+    label: '開いているファイル',
+    open: 'ファイルを新しいタブで開く',
+    close: (name: string) => `${name}を閉じる`,
+    warning: '外部変更またはファイルの問題があります',
+  },
   appName: 'SlideApp',
 
   toolbar: {
