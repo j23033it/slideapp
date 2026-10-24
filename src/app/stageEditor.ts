@@ -3,7 +3,7 @@
  * クリック位置のキャレット、読み取り専用の理由、ランの境界での削除、
  * 編集終了時のスライド単位の再描画を持つ。
  */
-import type { Cursor } from '../document'
+import type { Cursor, SourceEdit } from '../document'
 import { resolveCursor, type Analysis, type EditingEngine, type EditResult, type ReadonlyCode } from '../editing'
 import { bindEditing } from '../editing/dom'
 import { selectionFor } from '../editing/dom/selection'
@@ -21,7 +21,7 @@ import { planBoundaryDeletion, areRunsDomAdjacent } from './runDeletion'
 import { CompositionGate } from './session'
 import { strings } from './strings'
 
-export type EditSuccess = Extract<EditResult, { ok: true }>
+export type EditSuccess = Extract<EditResult<SourceEdit | readonly SourceEdit[]>, { ok: true }>
 
 export interface EditingCursors {
   before?: Cursor

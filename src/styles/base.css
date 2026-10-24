@@ -276,6 +276,7 @@ button {
   flex: 0 0 auto;
   display: flex;
   justify-content: flex-end;
+  gap: 2px;
   padding: 2px 4px;
   border-top: 1px solid var(--sm-border);
 }
@@ -290,8 +291,18 @@ button {
   color: var(--sm-text-muted);
 }
 
-.sidebar-footer button:hover {
+.sidebar-footer button:hover:enabled {
   background: var(--sm-hover);
+}
+
+.sidebar-footer button:focus-visible {
+  outline: 2px solid var(--sm-accent);
+  outline-offset: -2px;
+}
+
+.sidebar-footer button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .resizer {

@@ -46,7 +46,7 @@ async function waitFor(expression, timeout = 10000) {
   throw new Error(`Timed out: ${expression}`)
 }
 async function key(key, modifiers = 0) {
-  const code = { Tab: 9, Enter: 13, Backspace: 8, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, z: 90 }[key]
+  const code = { Tab: 9, Enter: 13, Backspace: 8, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, m: 77, y: 89, z: 90 }[key]
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await delay(180)
@@ -312,6 +312,83 @@ try {
     await key('c',2)
     check(await evaluate(`trace.some(e => e.type === 'copy:capture')`), 'Ctrl+C did not dispatch copy from idle')
     check(await clipboardText() === paragraph.slice(1,8), 'Ctrl+C did not copy text from idle to the Windows clipboard')
+  })
+  await scenario('slide-controls-and-history', async () => {
+    const initial = await evaluate('editor.options.latest().analysis.text')
+    const clickControl = async (expression, button = 'left') => {
+      const p = await evaluate(`(() => { const r = (${expression}).getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2} })()`)
+      await mouse('mouseMoved', p)
+      await mouse('mousePressed', p, { button, buttons: button === 'left' ? 1 : 2, clickCount: 1 })
+      await mouse('mouseReleased', p, { button, buttons: 0, clickCount: 1 })
+      await delay(200)
+    }
+    const list = `document.querySelector('.tab-workspace:not([hidden]) .slide-list-host').shadowRoot`
+    const selected = () => evaluate(`${list}.querySelector('.slot[aria-current]').dataset.index`)
+    const count = () => evaluate(`${list}.querySelectorAll('.slide-row').length`)
+    await clickControl(`document.querySelector('.tab-workspace:not([hidden]) .sidebar-footer button')`)
+    check(await count() === 3 && await selected() === '1', 'Plus did not add and select an empty slide')
+    await key('m', 2)
+    check(await count() === 4 && await selected() === '2', 'Ctrl+M did not add after the displayed slide')
+    await key('z', 2)
+    check(await count() === 3 && await selected() === '1', 'Undo did not restore the previous slide selection')
+    await key('y', 2)
+    check(await count() === 4 && await selected() === '2', 'Redo did not restore the new slide selection')
+    await key('z', 2); await key('z', 2)
+    check(await evaluate('editor.options.latest().analysis.text') === initial && await selected() === '0', 'Undo did not restore the initial source and selection')
+    await clickControl(`${list}.querySelector('.slot')`, 'right')
+    await clickControl(`${list}.querySelector('[data-command="duplicate"]')`)
+    check(await count() === 3 && await selected() === '1', 'Context menu did not duplicate and select the slide')
+    await clickControl(`${list}.querySelectorAll('.slot')[1]`, 'right')
+    await clickControl(`${list}.querySelector('[data-command="delete"]')`)
+    check(await count() === 2 && await selected() === '1', 'Context menu did not delete the slide')
+    await key('z', 2)
+    check(await count() === 3 && await selected() === '1', 'Undo did not restore the deleted slide')
+    await key('z', 2)
+    check(await evaluate('editor.options.latest().analysis.text') === initial && await selected() === '0', 'Undo did not restore the source before duplication')
+  })
+  await scenario('slide-context-menu-after-text-edit', async () => {
+    await click(paragraph, paragraph.length)
+    await send('Input.insertText', { text: '一覧操作' })
+    check(await evaluate('editor.editing'), 'Text editing ended before opening the menu')
+    const list = `document.querySelector('.tab-workspace:not([hidden]) .slide-list-host').shadowRoot`
+    const p = await evaluate(`(() => { const r = ${list}.querySelector('.slide-row').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2} })()`)
+    await mouse('mouseMoved', p)
+    await mouse('mousePressed', p, { button: 'right', buttons: 2, clickCount: 1 })
+    await mouse('mouseReleased', p, { button: 'right', buttons: 0, clickCount: 1 })
+    await delay(250)
+    check(await evaluate(`!!${list}.querySelector('.slide-menu')`), 'Text-edit thumbnail update dismissed the context menu')
+    check(await evaluate(`${list}.activeElement?.dataset.command`) === 'add', 'Text-edit thumbnail update stole menu focus')
+    check(!await evaluate('editor.editing'), 'Opening the context menu did not finish text editing')
+    await key('ArrowDown'); await key('Enter')
+    check(await evaluate(`${list}.querySelectorAll('.slide-row').length`) === 3, 'The context menu could not duplicate after text editing')
+    check(await evaluate('editor.options.latest().analysis.text.split("一覧操作").length') === 3, 'Duplication lost the committed text edit')
+  })
+  await scenario('slide-drag-after-text-edit-and-history', async () => {
+    await click(paragraph, paragraph.length)
+    await send('Input.insertText', { text: 'ドラッグ操作' })
+    check(await evaluate('editor.editing'), 'Text editing ended before dragging')
+    const initial = await evaluate('editor.options.latest().analysis.text')
+    const points = await evaluate(`(() => {
+      const rows = [...document.querySelector('.tab-workspace:not([hidden]) .slide-list-host').shadowRoot.querySelectorAll('.slide-row')];
+      const a = rows[0].getBoundingClientRect(), b = rows[1].getBoundingClientRect();
+      return {a:{x:a.x+a.width/2,y:a.y+a.height/2},b:{x:b.x+b.width/2,y:b.bottom-4}};
+    })()`)
+    await mouse('mouseMoved', points.a)
+    await mouse('mousePressed', points.a, { button: 'left', buttons: 1, clickCount: 1 })
+    for (let i = 1; i <= 12; i++) {
+      await mouse('mouseMoved', { x: points.a.x + (points.b.x - points.a.x) * i / 12, y: points.a.y + (points.b.y - points.a.y) * i / 12 }, { button: 'left', buttons: 1 })
+      await delay(20)
+    }
+    await mouse('mouseReleased', points.b, { button: 'left', buttons: 0, clickCount: 1 })
+    await delay(200)
+    const moved = await evaluate('editor.options.latest().analysis.text')
+    check(moved.indexOf('## 日本語入力のテスト') < moved.indexOf('# SlideApp 動作確認'), 'Drag did not reorder the slide bodies')
+    check(moved.includes('ドラッグ操作') && !await evaluate('editor.editing'), 'Drag did not commit and preserve the text edit')
+    check(await evaluate(`document.querySelector('.slide-list-host').shadowRoot.querySelector('.slot[aria-current]').dataset.index`) === '1', 'Drag did not select the moved slide')
+    await key('z', 2)
+    check(await evaluate('editor.options.latest().analysis.text') === initial, 'Undo did not restore source after drag')
+    await key('y', 2)
+    check(await evaluate('editor.options.latest().analysis.text') === moved, 'Redo did not restore dragged source')
   })
   await writeFile(join(output,'results.json'), JSON.stringify(results,null,2))
   console.log('Traces: ' + output)

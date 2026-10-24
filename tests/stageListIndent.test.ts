@@ -20,7 +20,7 @@ function fixture(source = '- first\n- target') {
     onNotice(code) { notices.push(code) },
     onCommit(result, cursors) { model.edit(result.edit, cursors); analysis = result.analysis; deck = { slides: [analysis.html] } as RenderedDeck },
     onCrossRun(result, cursor, before) {
-      model.edit(result.edit, { before, after: cursor })
+      Array.isArray(result.edit) ? model.editTransaction(result.edit, { before, after: cursor }) : model.edit(result.edit, { before, after: cursor })
       analysis = result.analysis; deck = { slides: [analysis.html] } as RenderedDeck
       editor.render(deck, analysis, 0, { seq: ++seq, cursor })
     },

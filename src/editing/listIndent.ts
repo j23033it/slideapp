@@ -1,4 +1,4 @@
-import type { RangeReplacement, SourceEdit } from '../document/model';
+import type { SourceEdit } from '../document/model';
 import { mapBlockLines } from './blocks';
 import type { Token } from './markdown-types';
 import { reason, type ReadonlyReason, type Run } from './types';
@@ -71,7 +71,7 @@ export function captureLists(source: string, tokens: Token[], runForToken: (toke
   return { items, runItems, rows, lines };
 }
 
-type IndentPlan = { ok: true; edit: SourceEdit; validate(after: ListSnapshot): boolean } | { ok: false; reason: ReadonlyReason };
+type IndentPlan = { ok: true; edits: SourceEdit[]; validate(after: ListSnapshot): boolean } | { ok: false; reason: ReadonlyReason };
 
 export function planListIndent(snapshot: ListSnapshot, runId: string, direction: ListIndentDirection, fingerprint: Fingerprint): IndentPlan {
   const fail = (code: 'list-indent-target' | 'list-indent-first' | 'list-indent-top' | 'list-indent-unsafe', description: string): IndentPlan =>
@@ -101,13 +101,13 @@ export function planListIndent(snapshot: ListSnapshot, runId: string, direction:
     nextParent = parent.parent;
   }
   if (!Number.isInteger(amount) || amount <= 0) return fail('list-indent-unsafe', 'Indentation columns are not uniquely determined');
-  const ranges: RangeReplacement[] = [];
+  const ranges: SourceEdit[] = [];
   for (let line = target.first; line < target.last; line++) {
     const { start, text } = lines[line];
     if (!text.trim()) continue; // Keep blank lines byte-for-byte, including existing spaces.
     const indent = /^ */.exec(text)![0].length;
     if (direction === 'outdent' && indent < amount) return fail('list-indent-unsafe', 'A continuation line cannot be outdented safely');
-    const change: RangeReplacement = direction === 'indent'
+    const change: SourceEdit = direction === 'indent'
       ? { start, end: start, insert: ' '.repeat(amount) }
       : { start, end: start + amount, insert: '' };
     if (line === target.first && resetNumber) {
@@ -133,5 +133,5 @@ export function planListIndent(snapshot: ListSnapshot, runId: string, direction:
       token.children?.map(fingerprint) ?? null]),
   });
   const expected = signature(snapshot, true);
-  return { ok: true, edit: { ...ranges[0], additional: ranges.slice(1) }, validate: after => signature(after, false) === expected };
+  return { ok: true, edits: ranges.reverse(), validate: after => signature(after, false) === expected };
 }

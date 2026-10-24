@@ -1,4 +1,5 @@
 import type { SourceEdit } from '../document/model';
+import type { SlideSources } from './slides';
 
 export type ReadonlyCode = 'table' | 'code' | 'math' | 'image' | 'html' | 'emoji' | 'front-matter' |
   'comment' | 'generated' | 'ambiguous-source' | 'renderer-transform' | 'dom-mismatch' | 'nul' |
@@ -18,8 +19,10 @@ export interface Analysis {
   text: string; html: string; css: string; runs: Run[]; blocks: Block[]; readonly: ReadonlyRegion[];
   /** Internal validation fingerprints, including read-only and generated tokens. */
   structure: string; inlineStructure: string[];
+  /** Recorded before Marpit consumes the slide delimiter tokens. */
+  slideSources?: SlideSources;
   /** Unfilled paragraph/line: remove only this recorded insertion on finish. */
   draft?: { runId: string; edit: SourceEdit; before: { runId: string; offset: number } };
 }
-export type EditResult = { ok: true; edit: SourceEdit; newText: string; analysis: Analysis; escaped: boolean } |
+export type EditResult<TEdit = SourceEdit> = { ok: true; edit: TEdit; newText: string; analysis: Analysis; escaped: boolean } |
   { ok: false; reason: ReadonlyReason };
