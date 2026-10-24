@@ -1,4 +1,5 @@
 import type { JSX } from 'preact'
+import { createPortal } from 'preact/compat'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { Marp } from '@marp-team/marp-core'
 
@@ -33,7 +34,6 @@ import {
   diskChangedSinceBanner,
   hasUnsavedChanges,
   mineFileName,
-  needsOpenReconfirm,
   planConflictBanner,
   planConflictChoice,
   planMineCopyReload,
@@ -58,9 +58,7 @@ type Banner =
   | { kind: 'info'; message: string }
 
 type PendingAction =
-  | { kind: 'open'; path: string }
-  | { kind: 'close' }
-  | { kind: 'update'; resolve: (approved: boolean) => void }
+  | { kind: 'update'; reason: 'close' | 'update'; resolve: (approved: boolean) => void }
 
 type ExportNotice =
   | { kind: 'success'; path: string; report: ExportReport }
@@ -187,10 +185,32 @@ function bannerMessage(banner: Banner): string {
   }
 }
 
-export function App() {
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
-  const [settingsLoaded, setSettingsLoaded] = useState(false)
-  const [recent, setRecent] = useState<string[]>([])
+interface WorkspaceApi {
+  leave(): Promise<boolean>
+  prepare(reason: 'close' | 'update'): Promise<boolean>
+  release(): void
+  external(change: ExternalChange): void
+  state(): { dirty: boolean; busy: boolean; pending: boolean }
+}
+
+interface WorkspaceProps {
+  path: string | null
+  rememberRecent: boolean
+  active: boolean
+  settings: AppSettings
+  setSettings: (value: AppSettings | ((previous: AppSettings) => AppSettings)) => void
+  recent: string[]
+  onRecent: (paths: string[]) => void
+  onOpen: (path: string) => void
+  onReady: (success: boolean, message?: string) => void
+  onState: (state: { dirty: boolean; warning: boolean }) => void
+  apiRef: { current: WorkspaceApi | null }
+  toolbarHost: HTMLDivElement | null
+}
+
+/** One mounted workspace per tab: all document, view and async state stays here. */
+function TabWorkspace({ path: initialPath, rememberRecent, active, settings, setSettings, recent,
+  onRecent, onOpen, onReady, onState, apiRef, toolbarHost }: WorkspaceProps) {
   const [view, setView] = useState<ViewState>(INITIAL_VIEW)
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -200,16 +220,21 @@ export function App() {
   const [exportReportOpen, setExportReportOpen] = useState(false)
 
   const renderer = useMemo(() => new MarpRenderer((path) => platform.convertFileSrc(path)), [])
+  const activeWorkspaceRef = useRef(active)
+  activeWorkspaceRef.current = active
   const rendererRef = useRef(renderer)
+  const workspaceAlive = useRef(true)
   const sessionRef = useRef<EditorSession | null>(null)
   const stageApi = useRef<StageApi | null>(null)
   const editingRef = useRef(false)
   const currentRef = useRef(0)
   const pendingRef = useRef<PendingAction | null>(null)
   const pendingOperationRef = useRef(0)
+  const confirmReasonRef = useRef<'close' | 'update'>('update')
   const updateInstallLockedRef = useRef(false)
   const exportingRef = useRef(false)
   const bannerRef = useRef<Banner | null>(null)
+  const fileProblemRef = useRef(false)
   const focusSeq = useRef(0)
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
   const pendingUpdateExternalRef = useRef<{ change: ExternalChange; observation: DiskObservation } | null>(null)
@@ -300,7 +325,7 @@ export function App() {
     stageApi.current?.endEditing()
     const session = sessionRef.current
     if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
-      return new Promise<boolean>((resolve) => replacePending({ kind: 'update', resolve }))
+      return new Promise<boolean>((resolve) => replacePending({ kind: 'update', reason: confirmReasonRef.current, resolve }))
     }
 
     updateInstallLockedRef.current = true
@@ -326,157 +351,38 @@ export function App() {
     }
   }, [])
 
-  /** 監視先を戻したときの読み込み結果も、外部変更と同じ規則で反映する */
-  const restoreSessionWatch = useCallback(
-    async (session: EditorSession): Promise<void> => {
-      const observation = diskObservationRef.current
-      const restored = await platform.openFile(session.path).catch(() => null)
-      await waitForComposition()
-      if (restored && canApplyDiskResult(observation, diskObservationRef.current, restored.hash)) {
-        externalRef.current({ type: 'changed', path: session.path, ...restored })
-      }
-    },
-    [waitForComposition],
-  )
-
   const analyzeSession = useCallback((session: EditorSession, analysis: Analysis): void => {
     session.analysis = analysis
     session.deck = session.renderer.update(analysis, session.baseDir)
   }, [])
 
-  // 起動時: 設定と最近使ったファイルを読む
-  useEffect(() => {
-    let alive = true
-
-    void (async () => {
-      try {
-        const loaded = await platform.settingsGet()
-        if (alive) setSettings(loaded)
-      } catch (reason) {
-        console.warn('settings_get failed', reason)
-      } finally {
-        if (alive) setSettingsLoaded(true)
-      }
-    })()
-
-    void (async () => {
-      try {
-        const loaded = await platform.recentFilesGet()
-        if (alive) setRecent(loaded)
-      } catch (reason) {
-        console.warn('recent_files_get failed', reason)
-      }
-    })()
-
-    return () => {
-      alive = false
-    }
-  }, [])
-
-  // テーマの適用（system は prefers-color-scheme に従う）
-  useEffect(() => {
-    document.documentElement.dataset.theme = settings.theme
-  }, [settings.theme])
-
-  // 設定の保存（ドラッグ中はまとめて、最後の値だけ書く）
-  useEffect(() => {
-    if (!settingsLoaded) return
-    const timer = setTimeout(() => {
-      platform.settingsSet(settings).catch((reason: unknown) => {
-        sync({ error: strings.errors.settingsFailed(errorMessage(reason)) })
-      })
-    }, 250)
-    return () => clearTimeout(timer)
-  }, [settings, settingsLoaded, sync])
-
   // ウィンドウタイトル（未保存時に ●）
   useEffect(() => {
+    if (!activeWorkspaceRef.current) return
     const name = view.path ? basename(view.path) : null
-    const dirty = view.path !== null && view.saveState !== 'clean'
+    const dirty = view.path !== null && hasUnsavedChanges(view.saveState)
     const title = strings.windowTitle(name, dirty)
     document.title = title
     platform.setWindowTitle(title).catch((reason: unknown) => {
       console.warn('setTitle failed', reason)
     })
-  }, [view.path, view.saveState])
-
-  // 開いている間は閉じるイベントを受け、IME確定後に未保存確認またはクローズを行う
-  useEffect(() => {
-    if (view.path === null) return
-    let alive = true
-    let unlisten: (() => void) | undefined
-
-    const handleClose = (): void => {
-      if (updateInstallLockedRef.current) {
-        platform.forceClose().catch((reason: unknown) => {
-          sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
-        })
-        return
-      }
-      if (deferIfComposing(handleClose)) return
-      const session = sessionRef.current
-      if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
-        replacePending({ kind: 'close' })
-        return
-      }
-      platform.forceClose().catch((reason: unknown) => {
-        sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
-      })
-    }
-
-    platform
-      .onCloseRequested(handleClose)
-      .then((stop) => {
-        if (alive) unlisten = stop
-        else stop()
-      })
-      .catch((reason: unknown) => {
-        sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
-      })
-    return () => {
-      alive = false
-      unlisten?.()
-    }
-  }, [deferIfComposing, replacePending, view.path, sync])
+  }, [active, view.path, view.saveState])
 
   const openPathNow = useCallback(
-    async (path: string, options: { allowDirty?: boolean } = {}) => {
+    async (path: string) => {
       if (updateInstallLockedRef.current) return
-      if (deferIfComposing(() => void openPathNow(path, options))) return
-      const startingSession = sessionRef.current
-      const baseline: ContentSnapshot | null = startingSession
-        ? { text: startingSession.model.serialize(), hasBom: startingSession.model.hasBom }
-        : null
+      if (deferIfComposing(() => void openPathNow(path))) return
       const startedObservation = diskObservationRef.current
       const opening = { path, observation: startedObservation }
       openingRef.current = opening
       setView((previous) => ({ ...previous, busy: true }))
       try {
         stageApi.current?.endEditing()
-        // Rust の open_file は成功時に監視を新しいファイルへ切り替える。
-        // ここで stopWatching すると、開くのに失敗したとき元の監視が止まったままになる。
         let file = await platform.openFile(path)
+        if (!workspaceAlive.current) { await platform.stopWatching(path); return }
         const themeConfig = await readThemeConfig(path)
         await waitForComposition()
-        const existing = sessionRef.current
-        if (existing) {
-          // 読み込みを待つ間に元のファイルが編集されていたら、置き換えずに確認をやり直す。
-          const reconfirm = needsOpenReconfirm({
-            snapshot: baseline,
-            current: { text: existing.model.serialize(), hasBom: existing.model.hasBom },
-            state: editorSessionSaveState(existing),
-            allowDirty: options.allowDirty ?? false,
-          })
-          if (reconfirm) {
-            if (existing.path !== path) {
-              // 監視が新しいファイルへ移っているため、元のファイルへ戻す
-              await restoreSessionWatch(existing)
-            }
-            replacePending({ kind: 'open', path })
-            setView((previous) => ({ ...previous, busy: false }))
-            return
-          }
-        }
+        if (!workspaceAlive.current) { await platform.stopWatching(path); return }
         // open_file は応答前から監視するため、新セッションの作成前に
         // 受けた通知を照合する。ここまで新しいファイルに未保存の編集はない。
         const buffered = canApplyDiskResult(startedObservation, opening.observation)
@@ -488,6 +394,7 @@ export function App() {
           : buffered?.type === 'unreadable'
             ? { kind: 'unreadable', path, message: buffered.message }
             : null
+        fileProblemRef.current = banner?.kind === 'removed' || banner?.kind === 'unreadable'
         const baseDir = dirname(path)
         const model = new DocumentModel(file.text, { hasBom: file.hasBom, diskHash: file.hash })
         const themeWarnings = registerThemeConfig(rendererRef.current, themeConfig)
@@ -522,42 +429,34 @@ export function App() {
           deckVersion: previous.deckVersion + 1,
           thumbVersion: previous.thumbVersion + 1,
         }))
-        platform
+        if (rememberRecent) platform
           .recentFilesAdd(path)
-          .then((list) => setRecent(list))
+          .then((list) => onRecent(list))
           .catch((reason: unknown) => {
             sync({ error: strings.errors.recentFailed(errorMessage(reason)) })
           })
+        onReady(true)
       } catch (reason) {
-        // open_file 成功後にフロント側のモデル構築・解析が拒否した場合も、
-        // Rust の監視だけが拒否対象へ残らないよう元のファイルへ戻す。
-        const restoreSession = sessionRef.current ?? startingSession
-        if (restoreSession) {
-          await restoreSessionWatch(restoreSession)
-        } else {
-          await platform.stopWatching().catch(() => {})
-        }
-        sync({ busy: false, error: strings.errors.openFailed(errorMessage(reason)) })
+        await platform.stopWatching(path).catch(() => {})
+        onReady(false, errorMessage(reason))
       } finally {
         if (openingRef.current === opening) openingRef.current = null
       }
     },
-    [deferIfComposing, replacePending, restoreSessionWatch, sync, waitForComposition],
+    [deferIfComposing, onReady, onRecent, sync, waitForComposition],
   )
 
-  const requestOpen = useCallback(
-    (path: string) => {
-      if (updateInstallLockedRef.current) return
-      if (deferIfComposing(() => requestOpen(path))) return
-      const session = sessionRef.current
-      if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
-        replacePending({ kind: 'open', path })
-        return
-      }
-      void openPathNow(path)
-    },
-    [deferIfComposing, openPathNow, replacePending],
-  )
+  const requestOpen = useCallback((path: string) => {
+    if (updateInstallLockedRef.current || pendingRef.current) return
+    onOpen(path)
+  }, [onOpen])
+
+  useEffect(() => {
+    workspaceAlive.current = true
+    if (initialPath) void openPathNow(initialPath)
+    return () => { workspaceAlive.current = false }
+    // The path and callbacks are stable for the lifetime of this workspace.
+  }, [initialPath])
 
   const openDialogNow = useCallback(async () => {
     try {
@@ -607,6 +506,7 @@ export function App() {
           )
           session.savedSnapshot = completion.savedSnapshot
           session.conflict = false
+          fileProblemRef.current = false
           if (completion.markSaved) {
             session.model.markSaved(completion.diskHash)
           } else {
@@ -778,6 +678,7 @@ export function App() {
       session.analysis = analysis
       session.deck = deck
       session.focus = undefined
+      fileProblemRef.current = false
       const current = slideAfterReload(currentRef.current, deck.slides.length)
       syncDeck({
         current,
@@ -987,6 +888,7 @@ export function App() {
       const session = sessionRef.current
       if (!session || session.path !== change.path) return
       if (change.type === 'changed') {
+        fileProblemRef.current = false
         // 読み直せたので、削除・読み取り不能の帯は用済み
         setView((previous) =>
           previous.banner?.kind === 'removed' || previous.banner?.kind === 'unreadable'
@@ -1028,6 +930,7 @@ export function App() {
 
       switch (decision.type) {
         case 'ignore':
+          sync()
           return
         case 'synced':
           session.model.markSaved(decision.hash)
@@ -1048,9 +951,11 @@ export function App() {
           })
           return
         case 'removed':
+          fileProblemRef.current = true
           sync({ banner: { kind: 'removed', path: session.path } })
           return
         case 'unreadable':
+          fileProblemRef.current = true
           sync({ banner: { kind: 'unreadable', path: session.path, message: decision.message } })
           return
       }
@@ -1083,31 +988,6 @@ export function App() {
   )
   externalRef.current = handleExternal
 
-  // ファイル監視
-  useEffect(() => {
-    let alive = true
-    let unlisten: (() => void) | undefined
-    platform
-      .listenFileEvents({
-        changed: (event) => externalRef.current({ type: 'changed', ...event }),
-        removed: (event) => externalRef.current({ type: 'removed', path: event.path }),
-        unreadable: (event) =>
-          externalRef.current({ type: 'unreadable', path: event.path, message: event.message }),
-      })
-      .then((stop) => {
-        if (alive) unlisten = stop
-        else stop()
-      })
-      .catch((reason: unknown) => {
-        sync({ error: strings.errors.openFailed(errorMessage(reason)) })
-      })
-    return () => {
-      alive = false
-      unlisten?.()
-      void platform.stopWatching().catch(() => {})
-    }
-  }, [sync])
-
   const stageCallbacks: SlideStageCallbacks = {
     onBegin: (label) => {
       if (updateInstallLockedRef.current) return
@@ -1137,6 +1017,7 @@ export function App() {
         return
       }
       analyzeSession(session, result.analysis)
+      if (cursors.after) session.focus = nextFocus(cursors.after)
       sync()
     },
     onCrossRun: (result: EditSuccess, target: Cursor, before?: Cursor) => {
@@ -1193,27 +1074,8 @@ export function App() {
         replacePending(null, { updateResolution: true })
         return
       }
-      if (mode === 'save' && action.kind === 'close') {
-        const session = sessionRef.current
-        if (session && hasUnsavedChanges(editorSessionSaveState(session))) {
-          // 保存応答中に追加編集があったので、閉じる前にもう一度確認する。
-          replacePending(action)
-          return
-        }
-      }
-      if (!isCurrentOperation()) return
-      replacePending(null)
-      if (action.kind === 'open') {
-        await openPathNow(action.path, { allowDirty: mode === 'discard' })
-        return
-      }
-      try {
-        await platform.forceClose()
-      } catch (reason) {
-        sync({ error: strings.errors.closeFailed(errorMessage(reason)) })
-      }
     },
-    [openPathNow, replacePending, runSave, sync, waitForComposition],
+    [replacePending, runSave, waitForComposition],
   )
 
   const continuePending = useCallback(
@@ -1233,7 +1095,7 @@ export function App() {
   // キー操作
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (updateInstallLockedRef.current || event.defaultPrevented) return
+      if (!activeWorkspaceRef.current || updateInstallLockedRef.current || event.defaultPrevented) return
       if (pendingRef.current) return
       const mod = event.ctrlKey || event.metaKey
       if (mod && !event.altKey && event.key.toLowerCase() === 'e') {
@@ -1297,7 +1159,7 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [goBy, goTo, openDialog, restore, runPptxExport, runSave])
+  }, [active, goBy, goTo, openDialog, restore, runPptxExport, runSave])
 
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((previous) => ({ ...previous, ...patch }))
@@ -1343,6 +1205,37 @@ export function App() {
     [settings.sidebarWidth],
   )
 
+  apiRef.current = {
+    leave: async () => {
+      if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
+      await waitForComposition()
+      if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
+      const cursor = stageApi.current?.captureCursor?.()
+      stageApi.current?.endEditing()
+      const session = sessionRef.current
+      if (session && cursor) {
+        const resolved = resolveCursor(session.analysis, cursor)
+        if (resolved) session.focus = nextFocus(resolved)
+      }
+      return true
+    },
+    prepare: (reason) => { confirmReasonRef.current = reason; return beforeUpdateInstall() },
+    release: releaseUpdateInstall,
+    external: handleExternal,
+    state: () => ({
+      dirty: sessionRef.current ? hasUnsavedChanges(editorSessionSaveState(sessionRef.current)) : false,
+      busy: view.busy || openingRef.current !== null,
+      pending: pendingRef.current !== null,
+    }),
+  }
+
+  useEffect(() => {
+    onState({
+      dirty: hasUnsavedChanges(view.saveState),
+      warning: view.saveState === 'conflict' || fileProblemRef.current,
+    })
+  }, [view.saveState, view.banner, view.tick, onState])
+
   const sidebarCollapsed = settings.sidebarCollapsed
   const session = sessionRef.current
   const slideTotal = session?.deck.slides.length ?? 0
@@ -1368,7 +1261,7 @@ export function App() {
 
   return (
     <div class="app" inert={updateInstallLocked}>
-      <Toolbar
+      {active && toolbarHost ? createPortal(<div inert={updateInstallLocked}><Toolbar
         theme={settings.theme}
         sidebarCollapsed={sidebarCollapsed}
         busy={view.busy}
@@ -1386,13 +1279,7 @@ export function App() {
         onCycleTheme={cycleTheme}
         onOpenSettings={() => setSettingsOpen((open) => !open)}
         onCheckUpdates={() => window.dispatchEvent(new Event(UPDATE_CHECK_EVENT))}
-      />
-
-      <UpdateNotice
-        checkOnStartup={settingsLoaded ? settings.checkUpdatesOnStartup : null}
-        beforeInstall={beforeUpdateInstall}
-        onInstallFailure={releaseUpdateInstall}
-      />
+      /></div>, toolbarHost) : null}
 
       {view.error ? (
         <div class="banner" data-tone="error" role="alert">
@@ -1473,7 +1360,7 @@ export function App() {
           </>
         ) : null}
 
-        {session ? (
+        {session && active ? (
           <SlideStage
             session={session}
             deckVersion={view.deckVersion}
@@ -1481,14 +1368,14 @@ export function App() {
             apiRef={stageApi}
             callbacks={stageCallbacks}
           />
-        ) : (
+        ) : !session ? (
           <EmptyState
             recent={recent}
             busy={view.busy}
             onOpen={() => void openDialog()}
             onOpenRecent={requestOpen}
           />
-        )}
+        ) : null}
       </div>
 
       <StatusBar
@@ -1518,13 +1405,9 @@ export function App() {
             <h2 class="modal-title" id="confirm-title">
               {strings.confirm.title}
             </h2>
-            <p class="modal-message">{strings.confirm.message}</p>
+            <p class="modal-message">{view.path ? basename(view.path) : ''} — {strings.confirm.message}</p>
             <p class="modal-action">
-              {pending.kind === 'open'
-                ? strings.confirm.openAction
-                : pending.kind === 'update'
-                  ? strings.confirm.updateAction
-                  : strings.confirm.closeAction}
+              {pending.reason === 'update' ? strings.confirm.updateAction : strings.confirm.closeAction}
             </p>
             <div class="modal-buttons">
               <button type="button" onClick={() => void continuePending('save')}>
@@ -1617,6 +1500,414 @@ export function App() {
           </div>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+interface FileTab {
+  key: string
+  path: string
+  rememberRecent: boolean
+  api: { current: WorkspaceApi | null }
+  ready: boolean
+  dirty: boolean
+  warning: boolean
+  onReady(success: boolean, message?: string): void
+  onState(state: { dirty: boolean; warning: boolean }): void
+}
+
+/** Windows paths are case-insensitive; keep the original spelling for display/IPC. */
+function tabKey(path: string): string {
+  return path.replaceAll('/', '\\').toLowerCase()
+}
+
+/** Owns only the tab order, shared preferences, and whole-window operations. */
+export function App() {
+  const [tabs, setTabs] = useState<FileTab[]>([])
+  const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null)
+  const tabsRef = useRef(tabs)
+  const [activeKey, setActiveKey] = useState<string | null>(null)
+  const activeRef = useRef(activeKey)
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const settingsWritesRef = useRef<Promise<void>>(Promise.resolve())
+  const queueSettings = useCallback((snapshot: AppSettings): Promise<void> => {
+    const write = settingsWritesRef.current.catch(() => {}).then(() => platform.settingsSet(snapshot))
+    settingsWritesRef.current = write
+    return write
+  }, [])
+  const [loaded, setLoaded] = useState(false)
+  const [restored, setRestored] = useState(false)
+  const [recent, setRecent] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [locked, setLocked] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const lockedRef = useRef(false)
+  const switchingRef = useRef(false)
+  const aliveRef = useRef(true)
+  const emptyApi = useRef<WorkspaceApi | null>(null)
+  const dragKey = useRef<string | null>(null)
+  const tabListRef = useRef<HTMLDivElement>(null)
+  const restoreTarget = useRef<string | null>(null)
+  const restoringRef = useRef(false)
+  const controls = useRef<{
+    ready(key: string, success: boolean, message?: string): void
+    state(key: string, state: { dirty: boolean; warning: boolean }): void
+  }>({ ready: () => {}, state: () => {} })
+
+  const publishTabs = useCallback((next: FileTab[]) => {
+    tabsRef.current = next
+    setTabs(next)
+  }, [])
+  const publishActive = useCallback((key: string | null) => {
+    activeRef.current = key
+    setActiveKey(key)
+  }, [])
+  const persistNow = useCallback((): Promise<void> => queueSettings({
+    ...settingsRef.current,
+    openTabs: tabsRef.current.filter(tab => tab.ready).map(tab => tab.path),
+    activeTab: tabsRef.current.find(tab => tab.key === activeRef.current)?.path ?? null,
+  }), [queueSettings])
+  const currentApi = useCallback(() =>
+    tabsRef.current.find(tab => tab.key === activeRef.current)?.api.current ?? emptyApi.current, [])
+
+  const activate = useCallback(async (key: string) => {
+    if (lockedRef.current || switchingRef.current || key === activeRef.current) return
+    const target = tabsRef.current.find(tab => tab.key === key)
+    if (!target?.ready) return
+    switchingRef.current = true
+    try {
+      if (await currentApi()?.leave() === false) return
+      if (!aliveRef.current || lockedRef.current || !tabsRef.current.includes(target)) return
+      publishActive(key)
+    } finally {
+      switchingRef.current = false
+    }
+  }, [currentApi, publishActive])
+
+  const makeTab = useCallback((path: string, rememberRecent = true): FileTab => {
+    const key = tabKey(path)
+    return {
+      key, path, rememberRecent, api: { current: null }, ready: false, dirty: false, warning: false,
+      onReady: (success, message) => controls.current.ready(key, success, message),
+      onState: (state) => controls.current.state(key, state),
+    }
+  }, [])
+
+  controls.current.state = (key, state) => {
+    const tab = tabsRef.current.find(item => item.key === key)
+    if (!tab || (tab.dirty === state.dirty && tab.warning === state.warning)) return
+    Object.assign(tab, state)
+    publishTabs([...tabsRef.current])
+  }
+  controls.current.ready = (key, success, message) => {
+    if (!aliveRef.current) return
+    const tab = tabsRef.current.find(item => item.key === key)
+    if (!tab) return
+    if (success) {
+      tab.ready = true
+      publishTabs([...tabsRef.current])
+      if (!restoringRef.current) void activate(key)
+    } else {
+      publishTabs(tabsRef.current.filter(item => item !== tab))
+      if (!restoringRef.current) setError(strings.errors.openFailed(message ?? strings.errors.unknown))
+    }
+    if (restoringRef.current && tabsRef.current.every(item => item.ready)) {
+      restoringRef.current = false
+      const target = tabsRef.current.find(item => item.key === restoreTarget.current) ?? tabsRef.current[0]
+      publishActive(target?.key ?? null)
+      setRestored(true)
+    }
+  }
+
+  const requestOpen = useCallback((path: string) => {
+    if (lockedRef.current || switchingRef.current || restoringRef.current) return
+    const state = currentApi()?.state()
+    if (state?.pending || state?.busy) return
+    const key = tabKey(path)
+    if (tabsRef.current.some(tab => tab.key === key)) {
+      void activate(key)
+      return
+    }
+    // Opening a second file preserves the first tab and its uncommitted model.
+    publishTabs([...tabsRef.current, makeTab(path)])
+  }, [activate, currentApi, makeTab, publishTabs])
+
+  const openDialog = useCallback(async () => {
+    if (lockedRef.current || switchingRef.current) return
+    if (await currentApi()?.leave() === false) return
+    try {
+      const path = await platform.pickMarkdownFile(strings.fileDialog.markdownFilter)
+      if (path) requestOpen(path)
+    } catch (reason) {
+      setError(strings.errors.openFailed(errorMessage(reason)))
+    }
+  }, [currentApi, requestOpen])
+
+  useEffect(() => {
+    aliveRef.current = true
+    void platform.settingsGet().then(value => {
+      if (!aliveRef.current) return
+      const loadedSettings = { ...DEFAULT_SETTINGS, ...value }
+      setSettings(loadedSettings)
+      setLoaded(true)
+      // A user action while settings were loading takes precedence over restoration.
+      if (tabsRef.current.length) { setRestored(true); return }
+      const paths = [...new Map(loadedSettings.openTabs.map(path => [tabKey(path), path])).values()]
+      restoreTarget.current = loadedSettings.activeTab ? tabKey(loadedSettings.activeTab) : null
+      restoringRef.current = paths.length > 0
+      publishTabs(paths.map(path => makeTab(path, false)))
+      if (!paths.length) setRestored(true)
+    }).catch(reason => {
+      console.warn('settings_get failed', reason)
+      if (aliveRef.current) { setLoaded(true); setRestored(true) }
+    })
+    void platform.recentFilesGet().then(value => {
+      if (aliveRef.current) setRecent(value)
+    }).catch(reason => console.warn('recent_files_get failed', reason))
+    return () => { aliveRef.current = false }
+  }, [makeTab, publishTabs])
+
+  const tabPaths = JSON.stringify(tabs.filter(tab => tab.ready).map(tab => tab.path))
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings.theme
+    if (!loaded || !restored) return
+    const snapshot: AppSettings = {
+      ...settings,
+      openTabs: tabs.filter(tab => tab.ready).map(tab => tab.path),
+      activeTab: tabs.find(tab => tab.key === activeKey)?.path ?? null,
+    }
+    const timer = setTimeout(() => {
+      void queueSettings(snapshot).catch(reason => {
+        setError(strings.errors.settingsFailed(errorMessage(reason)))
+      })
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [settings, tabPaths, activeKey, loaded, restored, queueSettings])
+
+  useEffect(() => {
+    let alive = true
+    let stop: (() => void) | undefined
+    void platform.listenFileEvents({
+      changed: event => {
+        for (const tab of tabsRef.current) tab.api.current?.external({ type: 'changed', ...event })
+      },
+      removed: event => {
+        for (const tab of tabsRef.current) tab.api.current?.external({ type: 'removed', ...event })
+      },
+      unreadable: event => {
+        for (const tab of tabsRef.current) tab.api.current?.external({ type: 'unreadable', ...event })
+      },
+    }).then(unlisten => { if (alive) stop = unlisten; else unlisten() })
+      .catch(reason => setError(strings.errors.openFailed(errorMessage(reason))))
+    return () => {
+      alive = false
+      stop?.()
+      for (const tab of tabsRef.current) void platform.stopWatching(tab.path).catch(() => {})
+    }
+  }, [])
+
+  const releaseAll = useCallback(() => {
+    for (const tab of tabsRef.current) tab.api.current?.release()
+    emptyApi.current?.release()
+    lockedRef.current = false
+    setLocked(false)
+    setInstalling(false)
+  }, [])
+
+  const prepareAll = useCallback(async (reason: 'close' | 'update' = 'update'): Promise<boolean> => {
+    if (lockedRef.current || switchingRef.current || restoringRef.current ||
+      tabsRef.current.some(tab => !tab.ready || tab.api.current?.state().busy)) return false
+    if (await currentApi()?.leave() === false) return false
+    if (lockedRef.current) return false
+    lockedRef.current = true
+    setLocked(true)
+    const startingKey = activeRef.current
+    if (!tabsRef.current.length && await emptyApi.current?.prepare(reason) === false) {
+      releaseAll()
+      return false
+    }
+    for (const tab of tabsRef.current) {
+      const api = tab.api.current
+      if (!api) { releaseAll(); return false }
+      if (api.state().dirty) publishActive(tab.key)
+      if (!await api.prepare(reason)) {
+        releaseAll()
+        return false
+      }
+    }
+    if (startingKey) publishActive(startingKey)
+    if (reason === 'update') {
+      try {
+        await persistNow()
+      } catch (reason) {
+        setError(strings.errors.settingsFailed(errorMessage(reason)))
+        releaseAll()
+        return false
+      }
+      setInstalling(true)
+    }
+    return true
+  }, [currentApi, persistNow, publishActive, releaseAll])
+
+  const closeTab = useCallback(async (key: string) => {
+    if (lockedRef.current || switchingRef.current) return
+    const tab = tabsRef.current.find(item => item.key === key)
+    if (!tab?.ready) return
+    if (await currentApi()?.leave() === false) return
+    if (lockedRef.current) return
+    lockedRef.current = true
+    setLocked(true)
+    const startingKey = activeRef.current
+    // Show the exact dirty tab being confirmed, including its conflict banner.
+    if (tab.api.current?.state().dirty) publishActive(key)
+    try {
+      if (!await tab.api.current?.prepare('close')) return
+      await platform.stopWatching(tab.path)
+      const index = tabsRef.current.indexOf(tab)
+      const next = tabsRef.current.filter(item => item !== tab)
+      publishTabs(next)
+      const preserved = startingKey !== key ? next.find(item => item.key === startingKey) : null
+      publishActive(preserved?.key ?? next[Math.min(index, next.length - 1)]?.key ?? null)
+    } catch (reason) {
+      setError(strings.errors.closeFailed(errorMessage(reason)))
+    } finally {
+      tab.api.current?.release()
+      lockedRef.current = false
+      setLocked(false)
+    }
+  }, [currentApi, publishActive, publishTabs])
+
+  useEffect(() => {
+    let alive = true
+    let stop: (() => void) | undefined
+    void platform.onCloseRequested(() => {
+      void (async () => {
+        if (!await prepareAll('close')) return
+        try {
+          // Persist order immediately: the ordinary debounced write may not run before exit.
+          await persistNow()
+          await platform.forceClose()
+        } catch (reason) {
+          setError(strings.errors.closeFailed(errorMessage(reason)))
+          releaseAll()
+        }
+      })()
+    }).then(unlisten => { if (alive) stop = unlisten; else unlisten() })
+    return () => { alive = false; stop?.() }
+  }, [persistNow, prepareAll, releaseAll])
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !event.ctrlKey || event.altKey || lockedRef.current) return
+      if (currentApi()?.state().pending) return
+      const key = event.key.toLowerCase()
+      if (key === 'w') {
+        event.preventDefault()
+        event.stopPropagation()
+        if (activeRef.current) void closeTab(activeRef.current)
+      } else if (key === 'tab' || key === 'pagedown' || key === 'pageup') {
+        event.preventDefault()
+        event.stopPropagation()
+        const ready = tabsRef.current.filter(tab => tab.ready)
+        if (!ready.length) return
+        const index = ready.findIndex(tab => tab.key === activeRef.current)
+        const direction = key === 'pageup' || (key === 'tab' && event.shiftKey) ? -1 : 1
+        void activate(ready[(index + direction + ready.length) % ready.length]!.key)
+      }
+    }
+    window.addEventListener('keydown', keydown, true)
+    return () => window.removeEventListener('keydown', keydown, true)
+  }, [activate, closeTab, currentApi])
+
+  useEffect(() => {
+    tabListRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+  }, [activeKey])
+
+  const emptyReady = useCallback(() => {}, [])
+  const emptyState = useCallback(() => {}, [])
+  return (
+    <div class="app tab-app" inert={installing}>
+      <div class="file-tab-bar">
+        <div class="file-tabs" role="tablist" aria-label={strings.tabs.label} ref={tabListRef}
+          onKeyDown={event => {
+            if (event.ctrlKey || event.altKey || lockedRef.current) return
+            const ready = tabsRef.current.filter(tab => tab.ready)
+            const index = ready.findIndex(tab => tab.key === activeRef.current)
+            let next: FileTab | undefined
+            if (event.key === 'ArrowRight') next = ready[(index + 1) % ready.length]
+            else if (event.key === 'ArrowLeft') next = ready[(index - 1 + ready.length) % ready.length]
+            else if (event.key === 'Home') next = ready[0]
+            else if (event.key === 'End') next = ready[ready.length - 1]
+            if (!next) return
+            event.preventDefault()
+            void activate(next.key).then(() => {
+              tabListRef.current?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus()
+            })
+          }}>
+          {tabs.map(tab => (
+            <div class="file-tab" key={tab.key} data-active={tab.key === activeKey}
+              draggable={!locked && tab.ready}
+              onDragStart={event => {
+                dragKey.current = tab.key
+                event.dataTransfer?.setData('text/plain', tab.key)
+              }}
+              onDragEnd={() => { dragKey.current = null }}
+              onDragOver={event => { if (dragKey.current && !lockedRef.current) event.preventDefault() }}
+              onDrop={event => {
+                event.preventDefault()
+                const from = dragKey.current
+                dragKey.current = null
+                if (!from || from === tab.key || lockedRef.current) return
+                const next = [...tabsRef.current]
+                const index = next.findIndex(item => item.key === from)
+                if (index < 0) return
+                const moved = next.splice(index, 1)[0]!
+                next.splice(next.findIndex(item => item.key === tab.key), 0, moved)
+                publishTabs(next)
+              }}
+              onAuxClick={event => {
+                if (event.button === 1) { event.preventDefault(); void closeTab(tab.key) }
+              }}>
+              <button type="button" role="tab" aria-selected={tab.key === activeKey}
+                aria-controls={'panel-' + tab.key} title={tab.path}
+                disabled={locked || !tab.ready} tabIndex={tab.key === activeKey ? 0 : -1}
+                onClick={() => void activate(tab.key)}>
+                <span class="file-tab-name">{basename(tab.path)}</span>
+                {tab.dirty ? <span aria-label={strings.status.saveState.dirty}>●</span> : null}
+                {tab.warning ? <span class="file-tab-warning" title={strings.tabs.warning}
+                  aria-label={strings.tabs.warning}>⚠</span> : null}
+              </button>
+              <button type="button" class="file-tab-close" aria-label={strings.tabs.close(basename(tab.path))}
+                disabled={locked || !tab.ready} onClick={() => void closeTab(tab.key)}>×</button>
+            </div>
+          ))}
+        </div>
+        <button type="button" class="file-tab-open" title={strings.tabs.open} aria-label={strings.tabs.open}
+          disabled={locked} onClick={() => void openDialog()}>+</button>
+      </div>
+      <div class="toolbar-slot" ref={setToolbarHost} />
+      <UpdateNotice checkOnStartup={loaded ? settings.checkUpdatesOnStartup : null}
+        beforeInstall={() => prepareAll('update')} onInstallFailure={releaseAll} />
+      {error ? <div class="banner" data-tone="error" role="alert">
+        <span class="banner-message">{error}</span>
+        <button type="button" onClick={() => setError(null)}>{strings.errors.dismiss}</button>
+      </div> : null}
+      <div class="tab-workspaces">
+        {tabs.map(tab => (
+          <div class="tab-workspace" id={'panel-' + tab.key} key={tab.key} role="tabpanel"
+            hidden={tab.key !== activeKey}>
+            <TabWorkspace path={tab.path} rememberRecent={tab.rememberRecent} active={tab.key === activeKey} settings={settings}
+              setSettings={setSettings} recent={recent} onRecent={setRecent} onOpen={requestOpen}
+              onReady={tab.onReady} onState={tab.onState} apiRef={tab.api} toolbarHost={toolbarHost} />
+          </div>
+        ))}
+        {activeKey === null ? <TabWorkspace key="empty" path={null} rememberRecent={false} active settings={settings}
+          setSettings={setSettings} recent={recent} onRecent={setRecent} onOpen={requestOpen}
+          onReady={emptyReady} onState={emptyState} apiRef={emptyApi} toolbarHost={toolbarHost} /> : null}
+      </div>
     </div>
   )
 }

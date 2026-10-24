@@ -547,3 +547,86 @@ button {
 .settings-button:hover {
   background: var(--sm-hover);
 }
+
+/* File tabs share the toolbar's active surface; no motion is used. */
+.tab-workspaces {
+  flex: 1;
+  min-height: 0;
+}
+.tab-workspace {
+  height: 100%;
+}
+.tab-workspace[hidden] {
+  display: none;
+}
+.file-tab-bar {
+  display: flex;
+  flex: 0 0 32px;
+  height: 32px;
+  min-width: 0;
+  background: var(--sm-surface-alt);
+}
+.file-tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  align-items: stretch;
+}
+.file-tab {
+  display: flex;
+  flex: 0 1 200px;
+  min-width: 96px;
+  max-width: 240px;
+  border-right: 1px solid var(--sm-border);
+  border-bottom: 1px solid var(--sm-border);
+  background: var(--sm-surface-alt);
+}
+.file-tab[data-active='true'] {
+  background: var(--sm-toolbar);
+  border-bottom-color: var(--sm-toolbar);
+}
+.file-tab button {
+  border: 0;
+  background: transparent;
+  cursor: default;
+  padding: 0 7px;
+}
+.file-tab [role='tab'] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.file-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-tab-warning {
+  color: var(--sm-danger);
+}
+.file-tab .file-tab-close {
+  flex: 0 0 26px;
+  padding: 0;
+  font-size: 17px;
+}
+.file-tab-open {
+  flex: 0 0 32px;
+  border: 0;
+  border-bottom: 1px solid var(--sm-border);
+  background: var(--sm-surface-alt);
+  font-size: 20px;
+}
+.file-tab button:hover:not(:disabled),
+.file-tab-open:hover:not(:disabled) {
+  background: var(--sm-hover);
+}
+
+.toolbar-slot {
+  flex: 0 0 36px;
+  height: 36px;
+}

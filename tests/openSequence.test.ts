@@ -1,10 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
-/**
- * `openPathNow` は Preact の状態に強く結びついているため、ここでは呼び出し順の
- * 不変条件だけをソースで固定する。Rust の `open_file` は成功時に監視を切り替えるので、
- * 先に `stopWatching` すると、開くのに失敗したとき元のファイルの監視が止まったままになる。
+/** Preserve ordering guards around per-tab reads, save completion and conflict choices.
+ * Runtime tab behavior is covered in appAsyncSync.test.tsx.
  */
 const appSource = readFileSync(new URL('../src/app/App.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
@@ -17,62 +15,35 @@ function callbackBody(name: string): string {
 }
 
 describe('openPathNow', () => {
-  it('新しいファイルを開く前には監視を止めない', () => {
+  it('読み込み成功まで監視を止めず、失敗した対象だけを停止する', () => {
     const body = callbackBody('openPathNow')
-    expect(body.indexOf('const file = await platform.openFile(path)')).toBeLessThan(
-      body.indexOf('await platform.stopWatching().catch(() => {})'),
+    expect(body.indexOf('await platform.openFile(path)')).toBeLessThan(
+      body.indexOf('await platform.stopWatching(path).catch(() => {})'),
     )
+    expect(body).not.toContain('platform.stopWatching()')
   })
 
-  it('読み込み後に未保存の変更を確認し直す', () => {
-    expect(callbackBody('openPathNow')).toContain('needsOpenReconfirm')
-  })
-
-  it('読み込み応答後にIME確定を待ってから内容を照合する', () => {
+  it('読み込み応答後の新しい通知を照合してからセッションを公開する', () => {
     const body = callbackBody('openPathNow')
-    expect(body.indexOf('await platform.openFile(path)')).toBeLessThan(body.indexOf('await waitForComposition()'))
-    expect(body.indexOf('await waitForComposition()')).toBeLessThan(body.indexOf('needsOpenReconfirm'))
-  })
-
-  it('フロント側が読み込み内容を拒否したとき監視先を復旧する', () => {
-    const body = callbackBody('openPathNow')
-    expect(body).toContain('await restoreSessionWatch(restoreSession)')
-    expect(body).toContain('await platform.stopWatching().catch(() => {})')
-  })
-
-  it('監視先の復旧結果をIME確定後に外部変更として反映する', () => {
-    const restoreBody = callbackBody('restoreSessionWatch')
-    const read = restoreBody.indexOf('const restored = await platform.openFile(session.path)')
-    const wait = restoreBody.indexOf('await waitForComposition()', read)
-    const apply = restoreBody.indexOf(
-      "externalRef.current({ type: 'changed', path: session.path, ...restored })",
-      wait,
-    )
-    const openBody = callbackBody('openPathNow')
-
-    expect(read).toBeGreaterThanOrEqual(0)
+    const read = body.indexOf('await platform.openFile(path)')
+    const wait = body.indexOf('await waitForComposition()', read)
+    const compare = body.indexOf('canApplyDiskResult(startedObservation, opening.observation)')
     expect(wait).toBeGreaterThan(read)
-    expect(apply).toBeGreaterThan(wait)
-    expect(openBody).toContain('await restoreSessionWatch(existing)')
-    expect(openBody).toContain('await restoreSessionWatch(restoreSession)')
+    expect(compare).toBeGreaterThan(wait)
+    expect(body.indexOf('sessionRef.current = nextSession')).toBeGreaterThan(compare)
   })
 })
 
 describe('continuePendingNow', () => {
-  it('保存応答後に操作IDと取消状態を確認し、閉じる直前にも未保存状態を確認する', () => {
+  it('保存応答後の取消と追加編集を確認してから終了を承認する', () => {
     const body = callbackBody('continuePendingNow')
     const save = body.indexOf('const saved = await runSave()')
     const responseCheck = body.indexOf('if (!isCurrentOperation()) return', save)
-    const closeAction = body.indexOf("if (mode === 'save' && action.kind === 'close')")
-    const closeCheck = body.indexOf('hasUnsavedChanges(editorSessionSaveState(session))', closeAction)
-    const closeCall = body.indexOf('platform.forceClose()')
-
-    expect(body).toContain('const operationId = ++pendingOperationRef.current')
+    const dirtyCheck = body.indexOf('hasUnsavedChanges(editorSessionSaveState(session))', responseCheck)
+    const approve = body.indexOf('replacePending(null, { updateResolution: true })')
     expect(responseCheck).toBeGreaterThan(save)
-    expect(closeAction).toBeGreaterThan(responseCheck)
-    expect(closeCheck).toBeGreaterThan(responseCheck)
-    expect(closeCheck).toBeLessThan(closeCall)
-    expect(closeAction).toBeLessThan(closeCheck)
+    expect(dirtyCheck).toBeGreaterThan(responseCheck)
+    expect(approve).toBeGreaterThan(dirtyCheck)
     expect(body).toContain('replacePending(action)')
     expect(appSource).toContain('onClick={cancelPending}')
     expect(appSource).toContain('pendingOperationRef.current += 1')

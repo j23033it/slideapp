@@ -42,7 +42,7 @@ type EventSink = Arc<dyn Fn(FileEvent) + Send + Sync>;
 #[derive(Default)]
 pub struct FileService {
     // Serialize open/save/stop. The worker only locks `known`, never `active`.
-    active: Mutex<Option<WatchSession>>,
+    active: Mutex<Vec<WatchSession>>,
 }
 
 #[derive(Clone)]
@@ -58,6 +58,7 @@ enum WatchMessage {
 
 struct WatchSession {
     path: PathBuf,
+    requested_path: PathBuf,
     known: Arc<Mutex<KnownFile>>,
     sender: mpsc::Sender<WatchMessage>,
     watcher: Option<RecommendedWatcher>,
@@ -112,6 +113,10 @@ fn same_name(left: &Path, right: &Path) -> bool {
     }
 }
 
+fn same_target(left: &Path, right: &Path) -> bool {
+    left.parent() == right.parent() && same_name(left, right)
+}
+
 impl FileService {
     pub fn open(
         &self,
@@ -120,6 +125,18 @@ impl FileService {
     ) -> Result<OpenedFile, String> {
         let mut active = lock(&self.active);
         let target = absolute_path(path).map_err(|error| error.to_string())?;
+        if let Some(watch) = active
+            .iter()
+            .find(|watch| same_target(&watch.path, &target))
+        {
+            // Serialize the read and baseline update with save and observation.
+            // A failed read leaves the last known state intact.
+            let mut known = lock(&watch.known);
+            let opened = files::read_open_file(&target).map_err(|error| error.to_string())?;
+            known.hash = Some(opened.hash.clone());
+            known.removed = false;
+            return Ok(opened);
+        }
         let (sender, receiver) = mpsc::channel();
         let callback_sender = sender.clone();
         let mut watcher = notify::recommended_watcher(move |event| {
@@ -142,16 +159,15 @@ impl FileService {
         let event_path = path.to_string_lossy().into_owned();
         let emit: EventSink = Arc::new(emit);
 
-        // Stop/join the previous worker before the new one may emit anything.
-        active.take();
         let worker = thread::Builder::new()
             .name("slideapp-file-watch".into())
             .spawn(move || {
                 watch_loop(receiver, worker_path, event_path, worker_known, emit);
             })
             .map_err(|error| error.to_string())?;
-        *active = Some(WatchSession {
+        active.push(WatchSession {
             path: target,
+            requested_path: path.to_owned(),
             known,
             sender,
             watcher: Some(watcher),
@@ -169,9 +185,9 @@ impl FileService {
     ) -> Result<SavedFile, SaveError> {
         let active = lock(&self.active);
         let target = absolute_path(path)?;
-        let matching = active.as_ref().filter(|watch| {
-            watch.path.parent() == target.parent() && same_name(&watch.path, &target)
-        });
+        let matching = active
+            .iter()
+            .find(|watch| same_target(&watch.path, &target));
         let mut known = matching.map(|watch| lock(&watch.known));
         let previous = known.as_ref().map(|known| (**known).clone());
         let result = files::save_markdown(&target, text, has_bom, expected_hash, |hash| {
@@ -199,8 +215,20 @@ impl FileService {
         files::write_new_markdown(&absolute_path(path)?, text, has_bom)
     }
 
+    pub fn stop_path(&self, path: &Path) -> Result<(), String> {
+        // Closing must still work after the parent directory itself disappeared.
+        let target = absolute_path(path).ok();
+        lock(&self.active).retain(|watch| {
+            watch.requested_path != path
+                && !target
+                    .as_ref()
+                    .is_some_and(|target| same_target(&watch.path, target))
+        });
+        Ok(())
+    }
+
     pub fn stop(&self) {
-        lock(&self.active).take();
+        lock(&self.active).clear();
     }
 }
 
@@ -257,8 +285,8 @@ fn watch_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 deadline = None;
                 let mut known = lock(&known);
-                // Read and emit under the same lock used by save; a pre-save read
-                // must not be emitted after the save has advanced the known hash.
+                // Read and emit under the same lock used by open/save; an older
+                // read must not be emitted after either advances the known hash.
                 // Keep short sharing violations silent, then report once while
                 // continuing to retry. The wait happens in recv_timeout, outside
                 // this lock, so Stop/open/save never wait for an entire retry loop.
@@ -378,6 +406,94 @@ mod tests {
         }
     }
 
+    // Keep the real worker, but deliver notifications explicitly so it cannot
+    // observe an intermediate write before the test finishes reopening the file.
+    fn manual_notifications(service: &FileService) -> mpsc::Sender<WatchMessage> {
+        let mut active = lock(&service.active);
+        let watch = &mut active[0];
+        watch.watcher.take();
+        watch.sender.clone()
+    }
+
+    #[test]
+    fn reopening_a_watched_file_detects_a_return_to_the_previous_contents() {
+        let (_directory, path, service, opened, receiver) = watching();
+        let notifications = manual_notifications(&service);
+        fs::write(&path, b"external\r\n").unwrap();
+        let reopened = service
+            .open(&path, |_| {
+                panic!("reopening must preserve the original event sink")
+            })
+            .unwrap();
+        assert_eq!(reopened.text, "external\r\n");
+        assert_ne!(reopened.hash, opened.hash);
+
+        // The external writer restores A before the pending observation of B.
+        fs::write(&path, b"initial\r\n").unwrap();
+        notifications
+            .send(WatchMessage::Event(Ok(Event::new(EventKind::Modify(
+                notify::event::ModifyKind::Any,
+            ))
+            .add_path(path.clone()))))
+            .unwrap();
+        let event = changed(&receiver);
+        assert_eq!(event.path, path.to_string_lossy());
+        assert_eq!(event.file.text, opened.text);
+        assert_eq!(event.file.hash, opened.hash);
+        no_event(&receiver);
+    }
+
+    #[test]
+    fn failed_reopening_preserves_the_known_hash_and_removed_state() {
+        let (_directory, path, service, opened, _receiver) = watching();
+        let _notifications = manual_notifications(&service);
+        fs::write(&path, [0xFF, 0xFE]).unwrap();
+        assert!(service.open(&path, |_| {}).is_err());
+        {
+            let active = lock(&service.active);
+            let known = lock(&active[0].known);
+            assert_eq!(known.hash.as_ref(), Some(&opened.hash));
+            assert!(!known.removed);
+        }
+
+        fs::remove_file(&path).unwrap();
+        assert!(service.open(&path, |_| {}).is_err());
+        let active = lock(&service.active);
+        let known = lock(&active[0].known);
+        assert_eq!(known.hash.as_ref(), Some(&opened.hash));
+        assert!(!known.removed);
+    }
+
+    #[test]
+    fn reopening_a_reappeared_file_clears_the_removed_state() {
+        let (_directory, path, service, _opened, _receiver) = watching();
+        let _notifications = manual_notifications(&service);
+        fs::remove_file(&path).unwrap();
+        let known = lock(&service.active)[0].known.clone();
+        {
+            let emit: EventSink = Arc::new(|_| {});
+            assert!(observe_file(
+                &path,
+                &path.to_string_lossy(),
+                &mut lock(&known),
+                &emit,
+                false,
+            ));
+        }
+        assert!(service.open(&path, |_| {}).is_err());
+        {
+            let known = lock(&known);
+            assert!(known.hash.is_none());
+            assert!(known.removed);
+        }
+
+        fs::write(&path, b"reappeared\r\n").unwrap();
+        let reopened = service.open(&path, |_| {}).unwrap();
+        let known = lock(&known);
+        assert_eq!(known.hash.as_ref(), Some(&reopened.hash));
+        assert!(!known.removed);
+    }
+
     #[test]
     fn own_saves_are_silent_and_external_write_emits_once() {
         let (_directory, path, service, opened, receiver) = watching();
@@ -442,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_another_file_stops_the_previous_watch_and_stop_is_final() {
+    fn opening_another_file_preserves_previous_watch_and_stop_path_is_independent() {
         let (directory, path, service, _opened, old_receiver) = watching();
         let next = directory.path().join("next.md");
         fs::write(&next, b"next").unwrap();
@@ -452,15 +568,56 @@ mod tests {
                 sender.send(event).unwrap();
             })
             .unwrap();
-        fs::write(&path, b"ignored").unwrap();
-        assert!(old_receiver.recv_timeout(QUIET_PERIOD).is_err());
+        fs::write(&path, b"first external").unwrap();
+        assert_eq!(changed(&old_receiver).file.text, "first external");
         no_event(&receiver);
+        service.stop_path(&path).unwrap();
+        fs::write(&path, b"after close").unwrap();
+        assert!(old_receiver.recv_timeout(QUIET_PERIOD).is_err());
         fs::write(&next, b"changed next").unwrap();
         assert_eq!(changed(&receiver).file.text, "changed next");
         service.stop();
         fs::write(&next, b"after stop").unwrap();
         assert!(receiver.recv_timeout(QUIET_PERIOD).is_err());
         service.stop();
+    }
+
+    #[test]
+    fn closing_after_parent_directory_is_removed_stops_the_watch() {
+        let (directory, path, service, _opened, _receiver) = watching();
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(directory.path()).unwrap();
+        service.stop_path(&path).unwrap();
+        assert!(lock(&service.active).is_empty());
+    }
+
+    #[test]
+    fn own_save_on_one_file_does_not_suppress_another_file() {
+        let (directory, path, service, opened, receiver) = watching();
+        let next = directory.path().join("next.md");
+        fs::write(&next, b"initial\r\n").unwrap();
+        let (sender, next_receiver) = mpsc::channel();
+        let next_opened = service
+            .open(&next, move |event| {
+                sender.send(event).unwrap();
+            })
+            .unwrap();
+        service.save(&path, "same", false, &opened.hash).unwrap();
+        fs::write(&next, b"same").unwrap();
+        assert_eq!(changed(&next_receiver).file.text, "same");
+        no_event(&receiver);
+        service
+            .save(
+                &next,
+                "second own save",
+                false,
+                &files::read_open_file(&next).unwrap().hash,
+            )
+            .unwrap();
+        fs::write(&path, b"second own save").unwrap();
+        assert_eq!(changed(&receiver).file.text, "second own save");
+        no_event(&next_receiver);
+        assert_eq!(opened.hash, next_opened.hash);
     }
 
     #[test]
@@ -545,7 +702,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn opening_another_target_cancels_a_pending_retry() {
+    fn closing_one_target_cancels_only_its_pending_retry() {
         use std::os::windows::fs::OpenOptionsExt;
         let (directory, path, service, _opened, old_receiver) = watching();
         fs::write(&path, b"locked").unwrap();
@@ -568,6 +725,7 @@ mod tests {
             })
             .unwrap();
         assert!(started.elapsed() < Duration::from_millis(500));
+        service.stop_path(&path).unwrap();
         drop(held);
         assert!(old_receiver.recv_timeout(QUIET_PERIOD).is_err());
         fs::write(&next, b"next external").unwrap();
