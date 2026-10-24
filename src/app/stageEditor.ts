@@ -236,6 +236,7 @@ export class StageEditor {
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
     if (event.key === 'Tab' && this.editing) {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
       event.preventDefault()
       event.stopPropagation()
       if (event.isComposing || event.keyCode === 229 || this.hasPendingComposition()) return

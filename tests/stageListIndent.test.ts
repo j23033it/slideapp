@@ -130,4 +130,31 @@ describe('StageEditor Tab hierarchy changes', () => {
     try { expect(f.tab(f.run()).defaultPrevented).toBe(false) }
     finally { f.editor.dispose() }
   })
+
+  it.each([
+    { ctrlKey: true }, { metaKey: true }, { altKey: true },
+    { ctrlKey: true, shiftKey: true }, { metaKey: true, shiftKey: true }, { altKey: true, shiftKey: true },
+  ])('ignores modified Tab without consuming the event (%j)', modifiers => {
+    const source = modifiers.shiftKey ? '- first\n  - target' : '- first\n- target'
+    const f = fixture(source)
+    try {
+      const event = f.tab(f.begin(), modifiers)
+      expect(event.defaultPrevented).toBe(false)
+      expect(f.model.text).toBe(source)
+      expect(f.notices).toEqual([])
+    } finally { f.editor.dispose() }
+  })
+
+  it.each([false, true])('ignores an already handled Tab (shift=%s)', shiftKey => {
+    const source = shiftKey ? '- first\n  - target' : '- first\n- target'
+    const f = fixture(source)
+    try {
+      const element = f.begin()
+      const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, composed: true, cancelable: true, shiftKey })
+      event.preventDefault()
+      element.dispatchEvent(event)
+      expect(f.model.text).toBe(source)
+      expect(f.notices).toEqual([])
+    } finally { f.editor.dispose() }
+  })
 })

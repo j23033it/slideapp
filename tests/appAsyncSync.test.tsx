@@ -731,6 +731,56 @@ function shortcut(key: string, shiftKey = false) {
 }
 
 describe('file tabs', () => {
+  it.each([
+    { shiftKey: false, retainedText: false }, { shiftKey: true, retainedText: false },
+    { shiftKey: false, retainedText: true }, { shiftKey: true, retainedText: true },
+  ])('switches tabs from the real StageEditor without changing list hierarchy (%j)', async ({ shiftKey, retainedText }) => {
+    const source = '- 一番\n- 二番'
+    await editDocument(source)
+    const first = session()
+    await openTab()
+    const second = session()
+    await flush(() => tabButton(path).click())
+    const stage = captured.stage!
+    const stageHost = document.createElement('div')
+    host.append(stageHost)
+    const root = stageHost.attachShadow({ mode: 'open' })
+    const reachedEditor = vi.fn()
+    const onNotice = vi.fn(stage.callbacks.onNotice)
+    const editor = new StageEditor({ root, update: (deck, current) => { root.innerHTML = deck.slides[current] } } as SlideSurface,
+      first.renderer.editing, {
+        latest: () => ({ analysis: first.analysis, deck: first.deck }),
+        ...stage.callbacks, onNotice,
+      })
+    stage.apiRef.current = editor
+    root.addEventListener('keydown', reachedEditor, true)
+    try {
+      editor.render(first.deck, first.analysis, 0)
+      const run = [...root.querySelectorAll<HTMLElement>('[data-sm-run]')].find(item => item.textContent === '二番')!
+      await flush(() => {
+        run.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }))
+        document.getSelection()!.setBaseAndExtent(run.firstChild!, 1, run.firstChild!, 1)
+      })
+      if (retainedText) run.firstChild!.textContent = '二番編集中'
+      const event = new KeyboardEvent('keydown', { key: 'Tab', ctrlKey: true, shiftKey, bubbles: true, composed: true, cancelable: true })
+      await flush(() => run.dispatchEvent(event))
+      expect(event.defaultPrevented).toBe(true)
+      expect(reachedEditor).not.toHaveBeenCalled()
+      expect(onNotice).not.toHaveBeenCalled()
+      expect(session()).toBe(second)
+      expect(first.model.serialize()).toBe(retainedText ? '- 一番\n- 二番編集中' : source)
+      expect(second.model.serialize()).toBe('# Other')
+      await flush(() => tabButton(path).click())
+      expect(session()).toBe(first)
+      expect(session().model.serialize()).toBe(retainedText ? '- 一番\n- 二番編集中' : source)
+    } finally {
+      stage.apiRef.current = null
+      editor.dispose()
+      stageHost.remove()
+      document.getSelection()?.removeAllRanges()
+    }
+  })
+
   it('keeps each tab model, history and current slide when switching by click and keyboard', async () => {
     await editDocument('# First\n\n---\n\n# Second')
     const original = session()

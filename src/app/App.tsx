@@ -1805,9 +1805,11 @@ export function App() {
       const key = event.key.toLowerCase()
       if (key === 'w') {
         event.preventDefault()
+        event.stopPropagation()
         if (activeRef.current) void closeTab(activeRef.current)
       } else if (key === 'tab' || key === 'pagedown' || key === 'pageup') {
         event.preventDefault()
+        event.stopPropagation()
         const ready = tabsRef.current.filter(tab => tab.ready)
         if (!ready.length) return
         const index = ready.findIndex(tab => tab.key === activeRef.current)
