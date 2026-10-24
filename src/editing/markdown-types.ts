@@ -21,6 +21,11 @@ export interface CoreState { src: string; tokens: Token[] }
 export type RenderRule = (tokens: Token[], index: number, options: unknown, env: unknown, self: Renderer) => string;
 export interface Renderer { rules: Record<string, RenderRule>; renderToken: RenderRule }
 export interface Markdown {
+  marpit?: {
+    options: { headingDivider?: unknown };
+    lastGlobalDirectives?: Record<string, unknown>;
+    customDirectives: { global: Record<string, unknown>; local: Record<string, unknown> };
+  };
   inline: { ruler: Ruler<InlineRule>; ruler2: Ruler<(state: InlineState) => void>; State: new (...args: any[]) => InlineState };
   core: { ruler: Ruler<(state: CoreState) => void> };
   renderer: Renderer;

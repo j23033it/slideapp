@@ -25,7 +25,47 @@ The edit changes only its recorded source range. Validation compares the full bl
 
 `DocumentModel` keeps reversible range edits, original EOL arrays, cursor records, save state and disk hash. Supply `before`/`after` cursors for grouping: edits in the same run at the same cursor within 1000 ms are grouped. Call `breakHistoryGroup()` on navigation or other intentional transaction boundaries. External `reload(raw, hash, hasBom)` clears history. After undo/redo, analyze the restored text and call `resolveCursor(analysis, storedCursor)` to map the saved cursor to its new run ID. The cursor ordinal belongs to the entry's own before/after revision; external reload clears history.
 
-## Optional DOM adapter
+## Slide operations (session API; no UI wiring yet)
+
+Commit any pending text input/IME and finish the empty-line draft before calling
+`engine.applySlideOperation(model.text, operation, model.eols)`. All slide indices
+are zero-based. Operations are `{ kind: 'add' | 'duplicate' | 'delete', index }`
+or `{ kind: 'move', index, to }`, where `to` is the final position. Analysis exposes
+`slideSources`: body and actual Marpit hr ranges, separate front matter, inherited
+setting ranges, and a document-wide rejection reason when boundaries are unsafe.
+
+Success returns `{ ok: true, edits, newText, analysis, selectedSlide, newToOld }`.
+`newToOld[newIndex]` identifies the old slide, or null for a newly added slide;
+duplication maps both copies to the original. Apply all descending source edits
+with `model.editTransaction(edits)` to keep one Undo entry and the recorded EOLs.
+`SourceEdit.eols` lists the original/new EOL for each newline in `insert`, without
+the final empty sentinel. Existing text editing continues to default to majority
+EOLs. New slides are empty: a persistent empty heading target is not provided.
+
+The host can instead call `applySessionSlideOperation(session, operation,
+currentSlide)` from `app/session.ts`. It updates the model/history, analysis and
+rendered deck and clears text focus. On success select `selectedSlide` and refresh
+the stage and thumbnails. History cursors with `slideIndex` represent slide
+selection only; the existing `resolveCursor` / `planHistoryRestore` path restores
+that index without starting a text editor, including empty or read-only slides.
+When wiring the UI, also remove App's history early return based only on
+`model.text` equality: swapping equal normalized bodies can change only their
+EOLs and selection. Check serialized content and the returned history cursor.
+
+Rejection returns `{ ok: false, reason: { code, description } }`. Codes:
+`slide-heading-divider`, `slide-ambiguous-boundary`, `slide-inherited-settings`,
+`slide-only-slide`, `slide-invalid-index`, `slide-render-changed`,
+`slide-stale-analysis`, `slide-pending-edit`, `slide-readonly`.
+Japanese UI messages are in `strings.slideOperations.reasons`.
+
+Validation compares the actual rendered SVG/section attributes and contents for
+every mapped slide. Editor marks, default numeric section anchors, generated
+heading slug IDs (whose duplicate suffix depends on order), pagination values
+and random scoped-style keys are normalized. Unknown markup or any other change
+is rejected while retaining the previous usable engine analysis. Source text is
+never searched/replaced: all edits use the parser-recorded ranges.
+
+## Optional DOM adapter (text editing)
 
 `engine.applyNewline(text, runId, offset, 'line' | 'paragraph')` performs a dedicated recorded-position insertion and returns a `cursor` on the new line. The full reparsed token sequence must match the expected soft break, paragraph split or sibling list-item insertion, including all other text and attributes. Marp's derived fragment indices/counts are recomputed for incremental list items. List indentation, quote prefixes and ordered-marker style are retained. Open inline decorations, complex item splits, tabs in container prefixes and leading empty splits are conservatively rejected. StageEditor records the range edit and rerenders with the returned cursor through its existing `onCrossRun` callback.
 
@@ -35,7 +75,7 @@ Newline edits form a separate history entry from typing before and after them. S
 
 `engine.applyListIndent(text, runId, offset, 'indent' | 'outdent', endRunId?)` changes a list item's hierarchy from any mapped character position; selections must stay within that same item. Analysis records each item's parent, list, line range and marker/content columns. Only nonblank line prefixes of the item and its descendants are replaced. New ordered child lists may reset the first marker to 1. Reparse validation checks every item's expected depth and the complete remaining token/text sequence before accepting. Tabs in indentation, containers, lazy continuations and structural changes (including empty markers becoming headings or later ordered siblings becoming paragraph text) are rejected with list-specific ReadonlyCodes.
 
-The returned `SourceEdit.additional` ranges use the same original coordinates as the first range. DocumentModel applies them from the end and records one independent history entry while retaining each existing EOL. StageEditor consumes Tab/Shift+Tab only during editing, leaves composition untouched, commits retained DOM through the Enter path, and uses `onCrossRun` to rerender and restore the same run ordinal and character offset. No additional App callback is required.
+List hierarchy results return a descending `SourceEdit[]` in `result.edit`, using original source coordinates. `DocumentModel.editTransaction` applies these as one independent history entry, including explicit inserted EOLs. `DocumentModel.edit` forwards array input to that same transaction implementation for existing stage callbacks. StageEditor consumes Tab/Shift+Tab only during editing, leaves composition untouched, commits retained DOM through the Enter path, and uses `onCrossRun` to rerender and restore the same run ordinal and character offset. No additional App callback is required.
 
 `bindEditing(root, engine, { analysis, onCommit, onReject, onHistory, onFinish })` returns `begin(runElement)`, `finish()`, `getAnalysis()` and `dispose()`.
 

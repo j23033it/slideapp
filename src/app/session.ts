@@ -1,5 +1,6 @@
 import type { Cursor, DocumentModel, SaveState } from '../document'
-import type { Analysis } from '../editing'
+import type { Analysis, SlideOperation, SlideOperationResult } from '../editing'
+import { slideReason } from '../editing/slides'
 import type { MarpRenderer, RenderedDeck } from '../marp/renderer'
 import type { ThemeConfig } from '../platform'
 import { saveStateFromSnapshot, type ContentSnapshot } from './sync'
@@ -97,6 +98,43 @@ export function planHistoryRestore(
   cursor: Cursor | undefined,
   current: number,
 ): { cursor: Cursor | undefined; current: number } {
+  if (cursor?.slideIndex !== undefined) {
+    return { cursor: undefined, current: Math.max(0, Math.min(cursor.slideIndex, deck.slides.length - 1)) }
+  }
   const slide = cursor ? slideForRun(deck, cursor.runId) : undefined
   return { cursor, current: slide ?? current }
+}
+
+/**
+ * Commit pending text input/IME and call StageApi.endEditing() before invoking.
+ * Updates the model, one undo entry, analysis and deck together. The host then
+ * selects result.selectedSlide and refreshes both stage and thumbnails.
+ */
+export function applySessionSlideOperation(
+  session: EditorSession,
+  operation: SlideOperation,
+  currentSlide: number,
+): SlideOperationResult {
+  if (session.model.state === 'readonly') return { ok: false, reason: slideReason('slide-readonly') }
+  const engine = session.renderer.editing
+  const result = engine.applySlideOperation(session.model.text, operation, session.model.eols)
+  if (!result.ok) return result
+  // Build the deck before mutating document/history so a render failure cannot
+  // leave only half of the session updated.
+  try {
+    const deck = session.renderer.update(result.analysis, session.baseDir)
+    session.model.editTransaction(result.edits, {
+      before: { runId: '', offset: 0, slideIndex: currentSlide },
+      after: { runId: '', offset: 0, slideIndex: result.selectedSlide },
+    })
+    session.analysis = result.analysis
+    session.deck = deck
+    session.focus = undefined
+    return result
+  } catch {
+    const restored = engine.analyze(session.model.text)
+    session.analysis = restored
+    session.deck = session.renderer.update(restored, session.baseDir)
+    return { ok: false, reason: slideReason('slide-pending-edit') }
+  }
 }

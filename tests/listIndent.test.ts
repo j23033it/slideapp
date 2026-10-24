@@ -33,7 +33,7 @@ describe('validated list hierarchy edits', () => {
     expect(result.ok, JSON.stringify(result)).toBe(true)
     if (!result.ok) return
     expect(result.newText).toBe(expected)
-    expect(replaceRange(source, result.edit)).toBe(expected)
+    expect(result.edit.reduce((text, edit) => replaceRange(text, edit), source)).toBe(expected)
     expect(result.analysis.runs.find(run => run.id === result.cursor.runId)?.text).toBe(run.text)
     expect(result.cursor.offset).toBe(offset)
   })
@@ -71,7 +71,7 @@ describe('validated list hierarchy edits', () => {
     const result = engine.applyListIndent(model.text, run.id, 3, 'indent')
     if (!result.ok) throw new Error(result.reason.description)
     const eols = [...model.eols]
-    model.edit(result.edit, { before: { runId: run.id, offset: 3 }, after: result.cursor })
+    model.editTransaction(result.edit, { before: { runId: run.id, offset: 3 }, after: result.cursor })
     expect(model.eols).toEqual(eols)
     const expected = lines.map((line, i) => (i === 7 || i === 8 ? '  ' : '') + line + (i === lines.length - 1 ? '' : eols[i])).join('')
     expect(Buffer.from('\uFEFF' + model.serialize())).toEqual(Buffer.from('\uFEFF' + expected))
@@ -93,7 +93,7 @@ describe('validated list hierarchy edits', () => {
     model.edit(typed.edit, { before: { runId: run.id, offset: 6 }, after: { runId: run.id, offset: 7 }, time: 0 })
     const result = engine.applyListIndent(model.text, run.id, 7, 'indent')
     if (!result.ok) throw new Error(result.reason.description)
-    model.edit(result.edit, { before: { runId: run.id, offset: 7 }, after: result.cursor, time: 1 })
+    model.editTransaction(result.edit, { before: { runId: run.id, offset: 7 }, after: result.cursor })
     analysis = result.analysis; run = analysis.runs[1]
     const next = engine.applyRunEdit(model.text, run.id, 'target!!')
     if (!next.ok) throw new Error(next.reason.description)

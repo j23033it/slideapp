@@ -3,8 +3,31 @@
  * 文言の調整はこのファイルだけで完結させる（コンポーネントに直書きしない）。
  */
 import type { ReadonlyCode } from '../editing'
+import type { SlideOperationCode } from '../editing'
 
 export const strings = {
+  slideOperations: {
+    labels: {
+      add: '新しいスライド',
+      duplicate: 'スライドを複製',
+      delete: 'スライドを削除',
+      moveUp: '上へ移動',
+      moveDown: '下へ移動',
+    },
+    addTitle: '新しいスライド (Ctrl+M)',
+
+    reasons: {
+      'slide-heading-divider': 'headingDividerを使う文書ではスライドを操作できません',
+      'slide-ambiguous-boundary': 'スライドの区切り位置を特定できないため操作できません',
+      'slide-inherited-settings': 'ほかのスライドにも効く設定を含むため操作できません',
+      'slide-only-slide': '最後の1枚は削除できません',
+      'slide-invalid-index': '操作するスライドの位置が正しくありません',
+      'slide-render-changed': 'ほかのスライドや表示が変わるため操作できません',
+      'slide-stale-analysis': '元の文書が更新されています。操作をやり直してください',
+      'slide-pending-edit': '文字の編集を確定してから操作してください',
+      'slide-readonly': '読み取り専用の文書ではスライドを操作できません',
+    } satisfies Record<SlideOperationCode, string>,
+  },
   appName: 'SlideApp',
 
   toolbar: {

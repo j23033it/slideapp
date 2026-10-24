@@ -1,4 +1,7 @@
 import { replaceRange, type Cursor, type SourceEdit } from '../document/model';
+import { joinEols, type Eol } from '../document/eol';
+import { applySlideRanges, collectSlideSources, planSlideOperation, slideReason, type SlideOperation, type SlideOperationResult } from './slides';
+import { renderedSlideSignatures, validateSlideRendering } from './slideValidation';
 import { mapBlockLines, sourceRange } from './blocks';
 import type { MarpLike, Markdown, Token } from './markdown-types';
 import { getSegments, installTracking } from './tracking';
@@ -69,9 +72,13 @@ export interface EditingEngine {
   /** Uses only the latest analysis; old IDs are rejected, never silently rebound. */
   applyRunEdit(text: string, runId: string, newRunText: string): EditResult;
   applyNewline(text: string, runId: string, offset: number, kind: NewlineKind): NewlineResult;
-  applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId?: string): NewlineResult;
+  applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId?: string): ListIndentResult;
   cancelDraft(text: string): NewlineResult;
+  /** Commit pending text input/IME and finish drafts before calling. Indices are zero-based. */
+  applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult;
 }
+
+export type ListIndentResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
 
 export type NewlineResult = (Extract<EditResult, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
 
@@ -89,6 +96,10 @@ export function createEngine(marp: MarpLike): EditingEngine {
   const listSnapshots = new WeakMap<Analysis, ListSnapshot>();
   let emptyPositions: number[] = [];
   wrapRenderers(md);
+
+  md.core.ruler.before('marpit_slide', 'sm_slide_sources', state => {
+    if (pending && !emptyPositions.length) pending.slideSources = collectSlideSources(state.src, state.tokens, md);
+  });
 
   md.core.ruler.push('sm_source_map', state => {
     if (!pending) return;
@@ -148,6 +159,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
             current = analysis; return analysis;
           }
           rawTokens.set(editable, actual);
+          editable.slideSources = analysis.slideSources;
           return editable;
         }
       }
@@ -210,10 +222,10 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit: plan.edit, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset: 0 } };
   }
 
-  function applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId = runId): NewlineResult {
+  function applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId = runId): ListIndentResult {
     const before = current;
     const run = before?.runs.find(entry => entry.id === runId);
-    const fail = (why: ReadonlyReason): NewlineResult => { current = before; return { ok: false, reason: why }; };
+    const fail = (why: ReadonlyReason): ListIndentResult => { current = before; return { ok: false, reason: why }; };
     if (!before || before.text !== text || !run) return fail(reason('stale-run', 'Analyze this document revision before editing'));
     if (before.draft) return fail(reason('list-indent-target', 'Fill or finish the empty-line draft first'));
     if (!run.editable) return fail(run.reason ?? reason('ambiguous-source', 'Run has no verified source map'));
@@ -225,7 +237,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     }
     const plan = planListIndent(snapshot, runId, direction, shape);
     if (!plan.ok) return fail(plan.reason);
-    const newText = replaceRange(text, plan.edit);
+    const newText = plan.edits.reduce((next, edit) => replaceRange(next, edit), text);
     let after: Analysis;
     try { after = renderAnalysis(newText); }
     catch { return fail(reason('invalid-source', 'Parser could not validate the list indentation')); }
@@ -236,7 +248,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     }
     const target = after.runs[before.runs.indexOf(run)];
     if (!target?.editable) return fail(reason('ambiguous-source', 'The item has no verified editable caret position'));
-    return { ok: true, edit: plan.edit, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset } };
+    return { ok: true, edit: plan.edits, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset } };
   }
 
   function cancelDraft(text: string): NewlineResult {
@@ -251,7 +263,30 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit, newText, analysis, escaped: false, cursor };
   }
 
-  const engine = { analyze, applyRunEdit, applyNewline, applyListIndent, cancelDraft };
+  function applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult {
+    const before = current;
+    const fail = (code: Parameters<typeof slideReason>[0]): SlideOperationResult => {
+      current = before; return { ok: false, reason: slideReason(code) };
+    };
+    if (!before || before.text !== text) return fail('slide-stale-analysis');
+    if (before.draft) return fail('slide-pending-edit');
+    if (text.includes('\0')) return fail('slide-readonly');
+    const sources = before.slideSources;
+    if (!sources) return fail('slide-ambiguous-boundary');
+    try { joinEols(text, eols); } catch { return fail('slide-stale-analysis'); }
+    const plan = planSlideOperation(text, sources, operation, eols);
+    if ('code' in plan) return { ok: false, reason: plan };
+    const oldSlides = renderedSlideSignatures(before.html);
+    if (!oldSlides || oldSlides.length !== sources.bodies.length) return fail('slide-ambiguous-boundary');
+    const newText = applySlideRanges(text, plan.edits);
+    let after: Analysis;
+    try { after = renderAnalysis(newText); } catch { return fail('slide-render-changed'); }
+    if (!after.slideSources || after.slideSources.reason || after.slideSources.bodies.length !== plan.newToOld.length ||
+        !validateSlideRendering(before.html, after.html, plan.newToOld)) return fail('slide-render-changed');
+    return { ok: true, ...plan, newText, analysis: after };
+  }
+
+  const engine = { analyze, applyRunEdit, applyNewline, applyListIndent, cancelDraft, applySlideOperation };
   engines.set(marp, engine);
   return engine;
 }
@@ -372,6 +407,7 @@ export function makeRunEdit(run: Run, newText: string): SourceEdit | undefined {
 
 /** Restore an ordinal recorded for this history revision after a fresh analysis. */
 export function resolveCursor(analysis: Analysis, cursor: Cursor): Cursor | undefined {
+  if (cursor.slideIndex !== undefined) return cursor;
   const ordinal = /^r\d+-(\d+)$/.exec(cursor.runId)?.[1];
   const run = ordinal === undefined ? undefined : analysis.runs[Number(ordinal)];
   if (!run?.editable) return;
