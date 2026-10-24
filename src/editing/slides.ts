@@ -1,6 +1,7 @@
 import { replaceRange, preferredEol, type Eol, type SourceEdit } from '../document';
 import type { Markdown, Token } from './markdown-types';
 import type { Analysis } from './types';
+import { hasSlidePositionSelectors } from './slideValidation';
 
 export type SlideOperation =
   | { kind: 'add'; index: number }
@@ -9,7 +10,7 @@ export type SlideOperation =
   /** `to` is the final zero-based index after removing and inserting `index`. */
   | { kind: 'move'; index: number; to: number };
 export type SlideOperationCode = 'slide-heading-divider' | 'slide-ambiguous-boundary' |
-  'slide-inherited-settings' | 'slide-only-slide' | 'slide-invalid-index' |
+  'slide-inherited-settings' | 'slide-position-css' | 'slide-only-slide' | 'slide-invalid-index' |
   'slide-render-changed' | 'slide-stale-analysis' | 'slide-pending-edit' | 'slide-readonly';
 export interface SlideOperationReason { code: SlideOperationCode; description: string }
 export interface SlideSourceRange { start: number; end: number }
@@ -33,6 +34,7 @@ export function slideReason(code: SlideOperationCode): SlideOperationReason {
     'slide-heading-divider': 'headingDivider documents do not support slide operations',
     'slide-ambiguous-boundary': 'Slide source boundaries cannot be uniquely verified',
     'slide-inherited-settings': 'The affected source contains settings inherited by other slides',
+    'slide-position-css': 'Document CSS contains selectors that depend on slide numbers or order',
     'slide-only-slide': 'The only slide cannot be deleted',
     'slide-invalid-index': 'The requested slide position is invalid',
     'slide-render-changed': 'The operation changes another slide or its rendered appearance',
@@ -64,6 +66,9 @@ export function collectSlideSources(text: string, tokens: Token[], md: Markdown)
   if (Object.hasOwn(globals, 'headingDivider') || (marpit?.options.headingDivider !== undefined && marpit.options.headingDivider !== false)) {
     sources.reason = slideReason('slide-heading-divider');
   }
+  if (typeof globals.style === 'string' && hasSlidePositionSelectors(globals.style)) {
+    sources.reason ??= slideReason('slide-position-css');
+  }
   let start = 0;
   for (const token of tokens) {
     if (token.type === 'front_matter') {
@@ -82,6 +87,9 @@ export function collectSlideSources(text: string, tokens: Token[], md: Markdown)
       sources.separators.push(separator); start = separator.end;
     }
     const inspect = (item: Token, parent: Token) => {
+      if (item.type === 'marpit_style' && hasSlidePositionSelectors(item.content)) {
+        sources.reason ??= slideReason('slide-position-css');
+      }
       const directives = item.meta?.marpitParsedDirectives;
       if (directives && typeof directives === 'object') {
         const keys = Object.keys(directives);

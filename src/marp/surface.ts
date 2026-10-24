@@ -224,7 +224,9 @@ export class SlideSurface {
     const focused = this.shadow.activeElement
     const restoreListFocus = this.options.layout === 'list' && this.deck !== deck && !!focused &&
       (this.surface.contains(focused) || !!this.menu?.contains(focused))
-    if (this.deck !== deck) {
+    // Finishing text editing refreshes thumbnails after a menu/drag has started.
+    // Index-based operations remain valid while the slide count is unchanged.
+    if (this.deck && this.deck.slides.length !== deck.slides.length) {
       this.closeMenu(false)
       this.cancelDrag()
     }
@@ -261,7 +263,7 @@ export class SlideSurface {
 
     this.setActive(activeIndex, { scroll: false })
     this.applySizes()
-    if (restoreListFocus) (this.slots[this.activeIndex] ?? this.surface).focus({ preventScroll: true })
+    if (restoreListFocus && !this.menu) (this.slots[this.activeIndex] ?? this.surface).focus({ preventScroll: true })
   }
 
   setActive(index: number, { scroll = true }: { scroll?: boolean } = {}): void {

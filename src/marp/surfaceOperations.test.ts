@@ -112,7 +112,7 @@ describe('slide list context menu', () => {
     expect(f.onOperation).toHaveBeenCalledTimes(1)
   })
 
-  it('closes on Escape and outside clicks, but preserves the menu during selection-only updates', () => {
+  it('closes on Escape, outside clicks and slide-count changes, but preserves the menu during selection-only updates', () => {
     const f = fixture()
     f.context(1)
     f.surface.update(f.deck, 1)
@@ -124,8 +124,26 @@ describe('slide list context menu', () => {
     document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     expect(f.menu()).toBeNull()
     f.context()
-    f.surface.update({ ...f.deck }, 0)
+    f.surface.update({ ...f.deck, slides: f.deck.slides.slice(0, 2) }, 0)
     expect(f.menu()).toBeNull()
+  })
+
+  it('keeps the menu and keyboard focus after selection finishes a pending text edit', async () => {
+    const f = fixture()
+    let update: Promise<void> | undefined
+    f.onSelect.mockImplementation(index => {
+      update = Promise.resolve().then(() => f.surface.update({
+        ...f.deck, slides: ['<section>Edited text</section>', ...f.deck.slides.slice(1)],
+      }, index))
+    })
+    f.context(1)
+    const menu = f.menu(), focused = f.item('add')
+    await update
+    expect(f.menu()).toBe(menu)
+    expect(f.surface.root.activeElement).toBe(focused)
+    f.key('ArrowDown', {}, focused!)
+    f.key('Enter', {}, f.item('duplicate')!)
+    expect(f.onOperation).toHaveBeenCalledWith({ kind: 'duplicate', index: 1 })
   })
 
   it('clamps the menu to the viewport on all edges', () => {
@@ -209,6 +227,25 @@ describe('slide list keyboard operations', () => {
 })
 
 describe('slide list pointer reorder', () => {
+  it.each(['during-selection', 'after-selection'] as const)('keeps dragging when a text-edit update arrives %s', async timing => {
+    const f = fixture()
+    const update = () => f.surface.update({
+      ...f.deck, slides: ['<section>Edited text</section>', ...f.deck.slides.slice(1)],
+    }, 0)
+    let pending: Promise<void> | undefined
+    f.onSelect.mockImplementation(() => {
+      if (timing === 'during-selection') update()
+      else pending = Promise.resolve().then(update)
+    })
+    f.pointer('pointerdown', 20, 20, f.rows[0])
+    f.pointer('pointermove', 20, 40)
+    await pending
+    expect(f.surface.root.querySelector('.slide-drop-line')).not.toBeNull()
+    f.pointer('pointermove', 20, 175)
+    f.pointer('pointerup', 20, 175)
+    expect(f.onOperation).toHaveBeenCalledWith({ kind: 'move', index: 0, to: 2 })
+  })
+
   it('keeps movements below 4px as clicks and starts a drag at exactly 4px', () => {
     const f = fixture()
     f.pointer('pointerdown', 20, 20, f.rows[0])
@@ -247,7 +284,7 @@ describe('slide list pointer reorder', () => {
     if (mode === 'escape') f.key('Escape')
     if (mode === 'cancel') f.pointer('pointercancel', 20, 175)
     if (mode === 'readonly') { f.setReadonly(true); f.surface.refreshOperations() }
-    if (mode === 'replace') f.surface.update({ ...f.deck }, 0)
+    if (mode === 'replace') f.surface.update({ ...f.deck, slides: f.deck.slides.slice(0, 2) }, 0)
     if (mode === 'blur') window.dispatchEvent(new Event('blur'))
     if (mode === 'dispose') f.surface.dispose()
     f.pointer('pointerup', mode === 'outside' ? 250 : 20, 175)

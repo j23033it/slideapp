@@ -20,6 +20,7 @@ export const strings = {
       'slide-heading-divider': 'headingDividerを使う文書ではスライドを操作できません',
       'slide-ambiguous-boundary': 'スライドの区切り位置を特定できないため操作できません',
       'slide-inherited-settings': 'ほかのスライドにも効く設定を含むため操作できません',
+      'slide-position-css': 'スライドの番号や順番を使うCSSがあるため、スライドを操作できません',
       'slide-only-slide': '最後の1枚は削除できません',
       'slide-invalid-index': '操作するスライドの位置が正しくありません',
       'slide-render-changed': 'ほかのスライドや表示が変わるため操作できません',

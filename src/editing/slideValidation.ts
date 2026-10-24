@@ -1,3 +1,25 @@
+import postcss from 'postcss';
+
+/** Inspect document-authored CSS only, before Marpit adds theme/scope rules. */
+export function hasSlidePositionSelectors(css: string): boolean {
+  try {
+    let found = false;
+    postcss.parse(css).walkRules(rule => {
+      // CSS comments and escapes must not hide an otherwise identical selector.
+      const selector = rule.selector.replace(/\/\*[\s\S]*?\*\//g, '').replace(
+        /\\([\da-f]{1,6}[ \t\r\n\f]?|[^\r\n\f])/gi,
+        (_, escaped: string) => /^[\da-f]/i.test(escaped)
+          ? String.fromCodePoint(Math.min(parseInt(escaped.trim(), 16), 0x10ffff)) : escaped,
+      );
+      if (/\[\s*(?:id|data-marpit-pagination(?:-total)?)\b|#\d|:(?:nth-(?:last-)?(?:child|of-type)|(?:first|last|only)-(?:child|of-type))\b/i.test(selector)) found = true;
+    });
+    return found;
+  } catch {
+    // Unparseable document CSS cannot be proven independent of slide position.
+    return true;
+  }
+}
+
 /**
  * Compare the actual rendered slide markup without a DOM dependency. Marp's
  * output is tokenized with quoted attributes intact; unknown differences reject.

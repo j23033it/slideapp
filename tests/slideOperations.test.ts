@@ -248,6 +248,55 @@ describe('conservative refusals and rendering validation', () => {
   });
 });
 
+describe('document CSS depending on slide position', () => {
+  const selectors = [
+    'section[id="2"] h1', '[id]', '[ id ^= "2"]', 'section#2 h1', String.raw`section#\32 h1`,
+    '[data-marpit-pagination="2"]', '[data-marpit-pagination-total]',
+    'section:nth-child(2)', 'section:nth-of-type(2)', 'section:nth-last-child(2)', 'section:nth-last-of-type(2)',
+    'section:first-child', 'section:last-child', 'section:first-of-type', 'section:last-of-type',
+    'section:only-child', 'section:only-of-type', 'section:has(h1:first-child)',
+    'SECTION[ID="2"]', 'section:/**/nth-child(2)', String.raw`section:n\74h-child(2)`,
+  ];
+  it.each(selectors)('rejects every structural operation for %s', selector => {
+    const raw = `<style>${selector} {color:red}</style>\n\n# A\n\n---\n\n# B\n\n---\n\n# C`;
+    for (const operation of [
+      { kind: 'add', index: 0 }, { kind: 'duplicate', index: 1 },
+      { kind: 'delete', index: 1 }, { kind: 'move', index: 1, to: 2 },
+    ] satisfies SlideOperation[]) {
+      const { model, engine, analysis, operate } = setup(raw);
+      expect(operate(operation)).toMatchObject({ ok: false, reason: { code: 'slide-position-css' } });
+      expect(model.serialize()).toBe(raw);
+      expect(model.canUndo).toBe(false);
+      expect(engine.applyRunEdit(raw, analysis.runs[0].id, 'Updated').ok).toBe(true);
+    }
+  });
+  it.each([
+    '<style scoped>section:nth-child(2) {color:red}</style>',
+    '<!-- style: section[id="2"] h1 {color:red} -->',
+    '---\nstyle: |\n  section[id="2"] h1 {color:red}\n---',
+  ])('also rejects scoped style and style directives: %s', style => {
+    const { operate } = setup(`${style}\n\n# A\n\n---\n\n# B`);
+    expect(operate({ kind: 'add', index: 0 })).toMatchObject({ ok: false, reason: { code: 'slide-position-css' } });
+  });
+  it.each([
+    'section h1 {color:red}', 'section#title {color:red}', 'section[data-kind="id"] {color:red}',
+    'section {color:#123456;content:":nth-child(2) [id]"}', '/* section[id="2"] {} */ section {color:red}',
+    '@media screen { section h1 {color:red} }',
+  ])('allows unrelated CSS when adding a slide: %s', css => {
+    expect(setup(`<style>${css}</style>\n\n# A\n\n---\n\n# B`).operate({ kind: 'add', index: 0 }).ok).toBe(true);
+  });
+  it('ignores CSS-looking prose and fenced examples', () => {
+    const { operate } = setup('`section:nth-child(2)`\n\n```html\n<style>section[id="2"] h1 {color:red}</style>\n```\n\n---\n\n# B');
+    expect(operate({ kind: 'add', index: 0 }).ok).toBe(true);
+  });
+  it('does not inspect custom theme CSS', () => {
+    const { marp, engine, model } = setup('---\ntheme: positional\n---\n# A\n\n---\n\n# B');
+    marp.themeSet.add('/* @theme positional */\nsection:nth-child(2) h1 {color:red}');
+    engine.analyze(model.text);
+    expect(engine.applySlideOperation(model.text, { kind: 'add', index: 0 }, model.eols).ok).toBe(true);
+  });
+});
+
 describe('atomic history and session integration', () => {
   function session(raw = '# A\r\n\r\n---\n\n# B') {
     const model = new DocumentModel(raw, { hasBom: true });

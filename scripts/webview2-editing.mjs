@@ -346,7 +346,27 @@ try {
     await key('z', 2)
     check(await evaluate('editor.options.latest().analysis.text') === initial && await selected() === '0', 'Undo did not restore the source before duplication')
   })
-  await scenario('slide-drag-and-history', async () => {
+  await scenario('slide-context-menu-after-text-edit', async () => {
+    await click(paragraph, paragraph.length)
+    await send('Input.insertText', { text: '一覧操作' })
+    check(await evaluate('editor.editing'), 'Text editing ended before opening the menu')
+    const list = `document.querySelector('.tab-workspace:not([hidden]) .slide-list-host').shadowRoot`
+    const p = await evaluate(`(() => { const r = ${list}.querySelector('.slide-row').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2} })()`)
+    await mouse('mouseMoved', p)
+    await mouse('mousePressed', p, { button: 'right', buttons: 2, clickCount: 1 })
+    await mouse('mouseReleased', p, { button: 'right', buttons: 0, clickCount: 1 })
+    await delay(250)
+    check(await evaluate(`!!${list}.querySelector('.slide-menu')`), 'Text-edit thumbnail update dismissed the context menu')
+    check(await evaluate(`${list}.activeElement?.dataset.command`) === 'add', 'Text-edit thumbnail update stole menu focus')
+    check(!await evaluate('editor.editing'), 'Opening the context menu did not finish text editing')
+    await key('ArrowDown'); await key('Enter')
+    check(await evaluate(`${list}.querySelectorAll('.slide-row').length`) === 3, 'The context menu could not duplicate after text editing')
+    check(await evaluate('editor.options.latest().analysis.text.split("一覧操作").length') === 3, 'Duplication lost the committed text edit')
+  })
+  await scenario('slide-drag-after-text-edit-and-history', async () => {
+    await click(paragraph, paragraph.length)
+    await send('Input.insertText', { text: 'ドラッグ操作' })
+    check(await evaluate('editor.editing'), 'Text editing ended before dragging')
     const initial = await evaluate('editor.options.latest().analysis.text')
     const points = await evaluate(`(() => {
       const rows = [...document.querySelector('.tab-workspace:not([hidden]) .slide-list-host').shadowRoot.querySelectorAll('.slide-row')];
@@ -363,6 +383,7 @@ try {
     await delay(200)
     const moved = await evaluate('editor.options.latest().analysis.text')
     check(moved.indexOf('## 日本語入力のテスト') < moved.indexOf('# SlideApp 動作確認'), 'Drag did not reorder the slide bodies')
+    check(moved.includes('ドラッグ操作') && !await evaluate('editor.editing'), 'Drag did not commit and preserve the text edit')
     check(await evaluate(`document.querySelector('.slide-list-host').shadowRoot.querySelector('.slot[aria-current]').dataset.index`) === '1', 'Drag did not select the moved slide')
     await key('z', 2)
     check(await evaluate('editor.options.latest().analysis.text') === initial, 'Undo did not restore source after drag')
