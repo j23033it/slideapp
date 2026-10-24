@@ -14,6 +14,12 @@ import { DEFAULT_SETTINGS, platform, type UpdateInfo } from '../src/platform'
 import type { FileEventHandlers, SaveOutcome } from '../src/platform/types'
 import type { SlideSurface } from '../src/marp/surface'
 
+// Happy DOM lacks these native event-handler properties; Preact uses them to
+// normalize JSX drag event names to the browser's lowercase DOM event names.
+for (const name of ['ondragstart', 'ondragend', 'ondragover', 'ondrop']) {
+  Object.defineProperty(HTMLElement.prototype, name, { value: null, configurable: true, writable: true })
+}
+
 const captured = vi.hoisted(() => ({ stage: null as SlideStageProps | null }))
 vi.mock('../src/app/SlideStage', () => ({
   SlideStage: (props: SlideStageProps) => {
@@ -54,9 +60,12 @@ let events: FileEventHandlers
 let requestClose: (() => void) | undefined
 async function flush(action: () => void = () => {}) {
   await act(async () => { action(); await new Promise((resolve) => setTimeout(resolve, 0)) })
+  // A new tab mounts its own workspace before it publishes the loaded session.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
 }
 function click(text: string) {
-  const button = [...host.querySelectorAll('button')].find((item) => item.textContent === text)
+  const button = [...host.querySelectorAll('button')].find((item) => item.textContent === text && !item.closest('[hidden]'))
   expect(button, text).toBeDefined()
   button!.click()
 }
@@ -236,62 +245,20 @@ describe('App asynchronous disk callbacks', () => {
     },
   )
 
-  it.each(['read-pending', 'composition-wait'] as const)(
-    'keeps the newest disk version during watch restoration after a failed open (%s)', async (timing) => {
-      await flush(() => captured.stage!.callbacks.onHistory('undo'))
-      expect(editorSessionSaveState(session())).toBe('clean')
-      const nextPath = 'C:\\deck\\next.md'
-      const restored = deferred<ReturnType<typeof disk>>()
-      vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
-      vi.mocked(platform.openFile)
-        .mockRejectedValueOnce(new Error('cannot open next file'))
-        .mockReturnValueOnce(restored.promise)
-      await flush(() => click(strings.toolbar.open))
-      expect(platform.openFile).toHaveBeenLastCalledWith(path)
-
-      const compositionActions: (() => void)[] = []
-      if (timing === 'composition-wait') {
-        captured.stage!.apiRef.current = {
-          endEditing: () => {},
-          isComposing: () => true,
-          deferWhileComposing: (action) => { compositionActions.push(action); return true },
-        }
-        await flush(() => restored.resolve(disk('external-v1')))
-        expect(compositionActions).toHaveLength(1)
-      }
-      await flush(() => events.changed({ path, ...disk('external-v2'), hasBom: true }))
-      if (timing === 'composition-wait') {
-        captured.stage!.apiRef.current = null
-        await flush(() => compositionActions.forEach((action) => action()))
-      } else {
-        expect(session().model.serialize()).toBe('external-v2')
-        await flush(() => restored.resolve(disk('external-v1')))
-      }
-
-      expect(session().path).toBe(path)
-      expect(session().model.serialize()).toBe('external-v2')
-      expect(session().model.hasBom).toBe(true)
-      expect(session().model.diskHash).toBe('external-v2')
-      expect(session().savedSnapshot).toEqual({ text: 'external-v2', hasBom: true })
-      expect(editorSessionSaveState(session())).toBe('clean')
-    },
-  )
-
-  it('applies the restored watch read after a failed open when no newer observation arrived', async () => {
+  it('keeps the original watch and latest content when opening another tab fails', async () => {
     await flush(() => captured.stage!.callbacks.onHistory('undo'))
-    vi.mocked(platform.pickMarkdownFile).mockResolvedValue('C:\\deck\\next.md')
-    vi.mocked(platform.openFile)
-      .mockRejectedValueOnce(new Error('cannot open next file'))
-      .mockResolvedValueOnce(disk('external-v1'))
-
+    const nextPath = 'C:\\deck\\next.md'
+    vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
+    vi.mocked(platform.openFile).mockRejectedValueOnce(new Error('cannot open next file'))
     await flush(() => click(strings.toolbar.open))
-
-    expect(platform.openFile).toHaveBeenLastCalledWith(path)
+    expect(platform.openFile).toHaveBeenLastCalledWith(nextPath)
+    expect(platform.stopWatching).toHaveBeenCalledWith(nextPath)
+    expect(platform.stopWatching).not.toHaveBeenCalledWith(path)
+    await flush(() => events.changed({ path, ...disk('external-v2'), hasBom: true }))
     expect(session().path).toBe(path)
-    expect(session().model.serialize()).toBe('external-v1')
-    expect(session().model.diskHash).toBe('external-v1')
-    expect(session().savedSnapshot).toEqual({ text: 'external-v1', hasBom: false })
-    expect(editorSessionSaveState(session())).toBe('clean')
+    expect(session().model.serialize()).toBe('external-v2')
+    expect(session().model.hasBom).toBe(true)
+    expect(session().model.diskHash).toBe('external-v2')
   })
 
   it.each(['changed', 'removed', 'unreadable'] as const)(
@@ -546,8 +513,7 @@ describe('PowerPoint export', () => {
     vi.mocked(platform.pickMarkdownFile).mockResolvedValue(nextPath)
     vi.mocked(platform.openFile).mockResolvedValue(disk('next deck'))
     await flush(() => click(strings.toolbar.open))
-    expect(host.textContent).toContain(strings.confirm.title)
-    await flush(() => click(strings.confirm.discard))
+    expect(host.textContent).not.toContain(strings.confirm.title)
     expect(session().path).toBe(nextPath)
 
     await flush(() => exportResult.resolve({ bytes, report: cleanExportReport }))
@@ -715,18 +681,18 @@ describe('update installation confirmation', () => {
     expect(platform.downloadAndInstall).toHaveBeenCalledTimes(1)
   })
 
-  it('cancels a pending update approval when a close request replaces it', async () => {
+  it('keeps the current confirmation when a close request arrives during update approval', async () => {
     await offerUpdate()
     const checksBeforeClose = vi.mocked(platform.checkForUpdate).mock.calls.length
     await flush(() => click(strings.update.install))
     expect(host.textContent).toContain(strings.confirm.updateAction)
 
     await flush(() => requestClose!())
-    expect(host.textContent).toContain(strings.confirm.closeAction)
+    expect(host.textContent).toContain(strings.confirm.updateAction)
     await flush(() => click(strings.confirm.cancel))
     expect(host.textContent).toContain(strings.update.available(updateInfo.version))
 
-    // The replaced beforeInstall promise must settle false so UpdateNotice can retry.
+    // Cancel settles beforeInstall false so UpdateNotice can retry.
     await flush(() => click(strings.update.install))
     expect(host.textContent).toContain(strings.confirm.updateAction)
     await flush(() => click(strings.confirm.cancel))
@@ -741,5 +707,285 @@ describe('update installation confirmation', () => {
     expect(host.textContent).toContain(strings.update.available(updateInfo.version))
     await flush(() => click(strings.update.later))
     expect(host.textContent).not.toContain(strings.update.available(updateInfo.version))
+  })
+})
+
+function tabButton(filePath: string): HTMLButtonElement {
+  const button = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+    .find(item => item.title.toLowerCase() === filePath.toLowerCase())
+  expect(button, filePath).toBeDefined()
+  return button!
+}
+function closeButton(filePath: string): HTMLButtonElement {
+  return tabButton(filePath).parentElement!.querySelector<HTMLButtonElement>('.file-tab-close')!
+}
+async function openTab(filePath = 'C:\\deck\\second.md', text = '# Other') {
+  vi.mocked(platform.pickMarkdownFile).mockResolvedValue(filePath)
+  vi.mocked(platform.openFile).mockResolvedValue(disk(text))
+  await flush(() => click(strings.toolbar.open))
+}
+function shortcut(key: string, shiftKey = false) {
+  window.dispatchEvent(new KeyboardEvent('keydown', {
+    key, ctrlKey: true, shiftKey, bubbles: true, cancelable: true,
+  }))
+}
+
+describe('file tabs', () => {
+  it('keeps each tab model, history and current slide when switching by click and keyboard', async () => {
+    await editDocument('# First\n\n---\n\n# Second')
+    const original = session()
+    await flush(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', bubbles: true })))
+    expect(captured.stage!.current).toBe(1)
+    await openTab()
+    expect(session().path).toBe('C:\\deck\\second.md')
+    expect(captured.stage!.current).toBe(0)
+    await flush(() => tabButton(path).click())
+    expect(session()).toBe(original)
+    expect(captured.stage!.current).toBe(1)
+    expect(session().model.canUndo).toBe(true)
+    await flush(() => shortcut('Tab'))
+    expect(session().path).toBe('C:\\deck\\second.md')
+    await flush(() => shortcut('Tab', true))
+    expect(session()).toBe(original)
+    await flush(() => shortcut('PageDown'))
+    expect(session().path).toBe('C:\\deck\\second.md')
+    await flush(() => shortcut('PageUp'))
+    expect(session()).toBe(original)
+  })
+
+  it('switches to a case-insensitively matching path without opening or losing dirty edits', async () => {
+    const original = session()
+    await openTab()
+    const calls = vi.mocked(platform.openFile).mock.calls.length
+    await openTab(path.toUpperCase())
+    expect(platform.openFile).toHaveBeenCalledTimes(calls)
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2)
+    expect(session()).toBe(original)
+    expect(session().model.serialize()).toBe('mine')
+  })
+
+  it('targets save and undo/redo at the active tab only', async () => {
+    const first = session()
+    await openTab()
+    const second = session()
+    expect(second.renderer).not.toBe(first.renderer)
+    await editDocument('second edits')
+    vi.mocked(platform.saveFile).mockResolvedValue({ ok: true, hash: 'second edits', mtime: 2 })
+    await flush(() => shortcut('s'))
+    expect(platform.saveFile).toHaveBeenCalledExactlyOnceWith(second.path, 'second edits', false, '# Other')
+    expect(editorSessionSaveState(first)).toBe('dirty')
+    expect(editorSessionSaveState(second)).toBe('clean')
+    await flush(() => tabButton(path).click())
+    await flush(() => shortcut('z'))
+    expect(first.model.serialize()).toBe('base')
+    expect(second.model.serialize()).toBe('second edits')
+    await flush(() => shortcut('y'))
+    expect(first.model.serialize()).toBe('mine')
+  })
+
+  it('waits for IME commit before switching tabs', async () => {
+    await openTab()
+    const second = session()
+    let finish!: () => void
+    const endEditing = vi.fn()
+    captured.stage!.apiRef.current = {
+      endEditing, isComposing: () => true,
+      deferWhileComposing: action => { finish = action; return true },
+    }
+    await flush(() => tabButton(path).click())
+    expect(session()).toBe(second)
+    expect(endEditing).not.toHaveBeenCalled()
+    await editDocument('IME final')
+    captured.stage!.apiRef.current = { endEditing, isComposing: () => false, deferWhileComposing: () => false }
+    await flush(() => finish())
+    expect(endEditing).toHaveBeenCalledOnce()
+    expect(session().path).toBe(path)
+    await flush(() => tabButton(second.path).click())
+    expect(session().model.serialize()).toBe('IME final')
+  })
+
+  it('offers cancel/discard before closing a dirty tab, and stops only its watch', async () => {
+    const original = session()
+    await openTab()
+    await flush(() => closeButton(path).click())
+    expect(session()).toBe(original)
+    expect(host.querySelector('[role="dialog"]')?.textContent).toContain('deck.md')
+    await flush(() => click(strings.confirm.cancel))
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2)
+    expect(platform.stopWatching).not.toHaveBeenCalled()
+    await flush(() => shortcut('w'))
+    await flush(() => click(strings.confirm.discard))
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    expect(platform.stopWatching).toHaveBeenCalledExactlyOnceWith(path)
+    expect(session().path).toBe('C:\\deck\\second.md')
+  })
+
+  it('saves before closing and leaves the tab open if saving fails', async () => {
+    vi.mocked(platform.saveFile).mockResolvedValueOnce({ ok: false, kind: 'io', message: 'locked' })
+    await flush(() => closeButton(path).click())
+    await flush(() => click(strings.confirm.saveAndContinue))
+    expect(platform.stopWatching).not.toHaveBeenCalled()
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    vi.mocked(platform.saveFile).mockResolvedValueOnce({ ok: true, hash: 'mine', mtime: 2 })
+    await flush(() => closeButton(path).click())
+    await flush(() => click(strings.confirm.saveAndContinue))
+    expect(platform.saveFile).toHaveBeenLastCalledWith(path, 'mine', false, 'base')
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(0)
+    expect(host.querySelector('.empty-open-button')).not.toBeNull()
+    expect(document.title).toBe(strings.windowTitle(null, false))
+  })
+
+  it('keeps a dirty tab open if typing continues while its save is pending', async () => {
+    const save = deferred<SaveOutcome>()
+    vi.mocked(platform.saveFile).mockReturnValue(save.promise)
+    await flush(() => closeButton(path).click())
+    await flush(() => click(strings.confirm.saveAndContinue))
+    await editDocument('later input')
+    await flush(() => save.resolve({ ok: true, hash: 'mine', mtime: 2 }))
+    expect(host.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(platform.stopWatching).not.toHaveBeenCalled()
+    expect(session().model.serialize()).toBe('later input')
+    await flush(() => click(strings.confirm.cancel))
+  })
+
+  it('reloads a clean background tab while keeping its model independent', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    const first = session()
+    await openTab()
+    const second = session()
+    await flush(() => events.changed({ path, ...disk('# Reloaded') }))
+    expect(session()).toBe(second)
+    expect(first.model.serialize()).toBe('# Reloaded')
+    await flush(() => tabButton(path).click())
+    expect(session()).toBe(first)
+    expect(editorSessionSaveState(session())).toBe('clean')
+    expect(session().model.canUndo).toBe(false)
+  })
+
+  it('marks a dirty background tab without overwriting it, and shows conflict choices when activated', async () => {
+    const first = session()
+    await openTab()
+    const second = session()
+    await flush(() => events.changed({ path, ...disk('outside') }))
+    expect(session()).toBe(second)
+    expect(first.model.serialize()).toBe('mine')
+    expect(tabButton(path).textContent).toContain('⚠')
+    expect(host.querySelector('.tab-workspace:not([hidden]) .banner')).toBeNull()
+    await flush(() => tabButton(path).click())
+    expect(host.querySelector('.tab-workspace:not([hidden]) .banner')?.textContent)
+      .toContain(strings.banner.conflict.load)
+  })
+
+  it('keeps background deletion/reappearance independent and ignores events after closing', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    await openTab()
+    await flush(() => events.removed({ path }))
+    expect(tabButton(path).textContent).toContain('⚠')
+    await flush(() => events.changed({ path, ...disk('reappeared') }))
+    expect(tabButton(path).textContent).not.toContain('⚠')
+    await flush(() => closeButton(path).dispatchEvent(new MouseEvent('auxclick', { button: 1, bubbles: true })))
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    await flush(() => events.changed({ path, ...disk('closed file changed') }))
+    expect(session().path).toBe('C:\\deck\\second.md')
+    expect(session().model.serialize()).toBe('# Other')
+  })
+
+  it.each(['close', 'update'] as const)('confirms every dirty tab before whole-window %s', async mode => {
+    await openTab()
+    await editDocument('second mine')
+    if (mode === 'update') {
+      await offerUpdate()
+      await flush(() => click(strings.update.install))
+    } else {
+      await flush(() => requestClose!())
+    }
+    expect(session().path).toBe(path)
+    await flush(() => click(strings.confirm.discard))
+    expect(session().path).toBe('C:\\deck\\second.md')
+    expect(platform.forceClose).not.toHaveBeenCalled()
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+    await flush(() => click(strings.confirm.cancel))
+    expect(platform.forceClose).not.toHaveBeenCalled()
+    expect(platform.downloadAndInstall).not.toHaveBeenCalled()
+    // The first discard only authorizes the operation; cancellation preserves all models.
+    await flush(() => tabButton(path).click())
+    expect(session().model.serialize()).toBe('mine')
+  })
+
+  it('keeps a background close from changing the active tab', async () => {
+    await openTab('C:\\deck\\second.md')
+    await openTab('C:\\deck\\third.md')
+    const third = session()
+    await flush(() => closeButton('C:\\deck\\second.md').click())
+    expect(session()).toBe(third)
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2)
+  })
+
+  it('retains the deletion marker after its banner is dismissed until the file reappears', async () => {
+    await flush(() => captured.stage!.callbacks.onHistory('undo'))
+    await flush(() => events.removed({ path }))
+    await flush(() => click(strings.banner.dismiss))
+    expect(tabButton(path).textContent).toContain('⚠')
+    await flush(() => events.changed({ path, ...disk('base') }))
+    expect(tabButton(path).textContent).not.toContain('⚠')
+  })
+
+  it('does not close after a pending save confirmation is cancelled', async () => {
+    const save = deferred<SaveOutcome>()
+    vi.mocked(platform.saveFile).mockReturnValue(save.promise)
+    await flush(() => closeButton(path).click())
+    await flush(() => click(strings.confirm.saveAndContinue))
+    await flush(() => click(strings.confirm.cancel))
+    await flush(() => save.resolve({ ok: true, hash: 'mine', mtime: 2 }))
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    expect(platform.stopWatching).not.toHaveBeenCalled()
+  })
+
+  it('waits for earlier settings writes and persists the final tab order before closing the window', async () => {
+    const firstWrite = deferred<void>()
+    vi.mocked(platform.settingsSet).mockReturnValueOnce(firstWrite.promise)
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 280)) })
+    await flush(() => requestClose!())
+    await flush(() => click(strings.confirm.discard))
+    expect(platform.forceClose).not.toHaveBeenCalled()
+    await flush(() => firstWrite.resolve())
+    expect(platform.forceClose).toHaveBeenCalledOnce()
+    expect(platform.settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({
+      openTabs: [path], activeTab: path,
+    }))
+  })
+
+  it('restores order and active tab, omits disappeared paths, and persists later reordering', async () => {
+    await flush(() => render(null, host))
+    const second = 'C:\\deck\\second.md'
+    const missing = 'C:\\deck\\missing.md'
+    vi.mocked(platform.settingsGet).mockResolvedValue({
+      ...DEFAULT_SETTINGS, openTabs: [path, missing, second, path.toUpperCase()], activeTab: second,
+    })
+    vi.mocked(platform.openFile).mockImplementation(async filePath => {
+      if (filePath === missing) throw new Error('file not found')
+      return disk(filePath === second ? 'restored second' : 'restored first')
+    })
+    vi.mocked(platform.settingsSet).mockClear()
+    vi.mocked(platform.recentFilesAdd).mockClear()
+    await flush(() => render(<App />, host))
+    expect([...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].map(button => button.title))
+      .toEqual([path.toUpperCase(), second])
+    expect(session().path).toBe(second)
+    expect(platform.recentFilesAdd).not.toHaveBeenCalled()
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    const from = tabButton(second).parentElement!
+    const target = tabButton(path).parentElement!
+    await flush(() => {
+      from.dispatchEvent(new Event('dragstart', { bubbles: true, cancelable: true }))
+      target.dispatchEvent(new Event('drop', { bubbles: true, cancelable: true }))
+    })
+    expect([...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].map(button => button.title))
+      .toEqual([second, path.toUpperCase()])
+    await flush()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 280)) })
+    expect(platform.settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({
+      openTabs: [second, path.toUpperCase()], activeTab: second,
+    }))
   })
 })

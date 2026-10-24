@@ -5,6 +5,12 @@
 import type { ReadonlyCode } from '../editing'
 
 export const strings = {
+  tabs: {
+    label: '開いているファイル',
+    open: 'ファイルを新しいタブで開く',
+    close: (name: string) => `${name}を閉じる`,
+    warning: '外部変更またはファイルの問題があります',
+  },
   appName: 'SlideApp',
 
   toolbar: {

@@ -9,6 +9,8 @@ export interface AppSettings {
   sidebarCollapsed: boolean
   /** 起動時に新しい版を確認する（既定は true） */
   checkUpdatesOnStartup: boolean
+  openTabs: string[]
+  activeTab: string | null
 }
 
 /** 更新確認で見つかった新しい版 */
@@ -136,8 +138,8 @@ export interface Platform {
   saveFile(path: string, text: string, hasBom: boolean, expectedHash: string): Promise<SaveOutcome>
   /** 既存ファイルを上書きせずに新規作成する */
   writeNewFile(path: string, text: string, hasBom: boolean): Promise<SaveOutcome>
-  /** 監視を止める。`open_file` が監視を開始する */
-  stopWatching(): Promise<void>
+  /** 指定パスだけ（省略時は全対象）の監視を止める。`open_file` が監視を開始する */
+  stopWatching(path?: string): Promise<void>
   /** `file-changed` / `file-removed` / `file-unreadable` を購読する */
   listenFileEvents(handlers: FileEventHandlers): Promise<() => void>
 
@@ -154,4 +156,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sidebarWidth: 180,
   sidebarCollapsed: false,
   checkUpdatesOnStartup: true,
+  openTabs: [],
+  activeTab: null,
 }

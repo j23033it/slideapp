@@ -59,8 +59,16 @@ fn write_new_file(
 }
 
 #[tauri::command]
-fn stop_watching(service: tauri::State<'_, FileService>) {
-    service.stop();
+fn stop_watching(
+    service: tauri::State<'_, FileService>,
+    path: Option<String>,
+) -> Result<(), String> {
+    if let Some(path) = path {
+        service.stop_path(Path::new(&path))
+    } else {
+        service.stop();
+        Ok(())
+    }
 }
 
 /// 開いたMarkdownの近くにあるMarpのテーマ設定を読み、

@@ -120,9 +120,9 @@ export const tauriPlatform: Platform = {
     }
   },
 
-  async stopWatching(): Promise<void> {
+  async stopWatching(path?: string): Promise<void> {
     if (!isTauri()) return
-    await invoke<void>('stop_watching')
+    await invoke<void>('stop_watching', { path: path ?? null })
   },
 
   async listenFileEvents(handlers: FileEventHandlers): Promise<() => void> {
