@@ -4,6 +4,7 @@ import type { MarpLike, Markdown, Token } from './markdown-types';
 import { getSegments, installTracking } from './tracking';
 import { planNewline, type NewlineKind } from './newline';
 import { emptyItemPositions, tokenSignature, withoutEmptyItemShells } from './empty';
+import { captureLists, planListIndent, type ListSnapshot, type ListIndentDirection } from './listIndent';
 import { reason, type Analysis, type Block, type EditResult, type ReadonlyReason, type Run } from './types';
 
 const engines = new WeakMap<object, EditingEngine>();
@@ -68,6 +69,7 @@ export interface EditingEngine {
   /** Uses only the latest analysis; old IDs are rejected, never silently rebound. */
   applyRunEdit(text: string, runId: string, newRunText: string): EditResult;
   applyNewline(text: string, runId: string, offset: number, kind: NewlineKind): NewlineResult;
+  applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId?: string): NewlineResult;
   cancelDraft(text: string): NewlineResult;
 }
 
@@ -84,6 +86,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
   let revision = 0;
   const analysisTokens = new WeakMap<Analysis, Token[]>();
   const rawTokens = new WeakMap<Analysis, Token[]>();
+  const listSnapshots = new WeakMap<Analysis, ListSnapshot>();
   let emptyPositions: number[] = [];
   wrapRenderers(md);
 
@@ -132,6 +135,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
         analysis.readonly.push({ blockId: run.blockId, runId: run.id, tokenType: 'text', reason: run.reason });
       }
       for (const block of analysis.blocks) block.editable = block.runs.some(id => analysis.runs.find(run => run.id === id)?.editable);
+      listSnapshots.set(analysis, captureLists(text, analysisTokens.get(analysis) ?? [], token => tokenRuns.get(token)));
       if (!probes) {
         const actual = analysisTokens.get(analysis) ?? [];
         const positions = emptyItemPositions(text, actual);
@@ -206,6 +210,35 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit: plan.edit, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset: 0 } };
   }
 
+  function applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId = runId): NewlineResult {
+    const before = current;
+    const run = before?.runs.find(entry => entry.id === runId);
+    const fail = (why: ReadonlyReason): NewlineResult => { current = before; return { ok: false, reason: why }; };
+    if (!before || before.text !== text || !run) return fail(reason('stale-run', 'Analyze this document revision before editing'));
+    if (before.draft) return fail(reason('list-indent-target', 'Fill or finish the empty-line draft first'));
+    if (!run.editable) return fail(run.reason ?? reason('ambiguous-source', 'Run has no verified source map'));
+    if (!Number.isInteger(offset) || offset < 0 || offset > run.text.length) return fail(reason('ambiguous-source', 'Invalid caret offset'));
+    const snapshot = listSnapshots.get(before);
+    if (!snapshot) return fail(reason('list-indent-unsafe', 'List metadata is unavailable'));
+    if (snapshot.runItems.get(runId) !== snapshot.runItems.get(endRunId) || !before.runs.some(entry => entry.id === endRunId && entry.editable)) {
+      return fail(reason('list-indent-target', 'The selection must remain inside one list item'));
+    }
+    const plan = planListIndent(snapshot, runId, direction, shape);
+    if (!plan.ok) return fail(plan.reason);
+    const newText = replaceRange(text, plan.edit);
+    let after: Analysis;
+    try { after = renderAnalysis(newText); }
+    catch { return fail(reason('invalid-source', 'Parser could not validate the list indentation')); }
+    const nextSnapshot = listSnapshots.get(after);
+    if (!nextSnapshot || !plan.validate(nextSnapshot) || before.runs.length !== after.runs.length ||
+        before.runs.some((old, index) => old.text !== after.runs[index].text)) {
+      return fail(reason('list-indent-unsafe', 'Indentation changes other content or Markdown structure'));
+    }
+    const target = after.runs[before.runs.indexOf(run)];
+    if (!target?.editable) return fail(reason('ambiguous-source', 'The item has no verified editable caret position'));
+    return { ok: true, edit: plan.edit, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset } };
+  }
+
   function cancelDraft(text: string): NewlineResult {
     const before = current;
     if (!before?.draft || before.text !== text) return { ok: false, reason: reason('stale-run', 'There is no current empty-line draft') };
@@ -218,7 +251,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit, newText, analysis, escaped: false, cursor };
   }
 
-  const engine = { analyze, applyRunEdit, applyNewline, cancelDraft };
+  const engine = { analyze, applyRunEdit, applyNewline, applyListIndent, cancelDraft };
   engines.set(marp, engine);
   return engine;
 }

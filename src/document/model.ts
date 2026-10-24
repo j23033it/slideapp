@@ -1,7 +1,9 @@
 import { joinEols, preferredEol, splitEols, type Eol, type NormalizedText } from './eol';
 
-export interface SourceEdit {
-  start: number; end: number; insert: string;
+export interface RangeReplacement { start: number; end: number; insert: string }
+export interface SourceEdit extends RangeReplacement {
+  /** Disjoint ranges in the same original revision; one independent history entry. */
+  additional?: RangeReplacement[];
   /** Empty paragraph/line insertion, its first text input, or its exact rollback. */
   draft?: 'begin' | 'accept' | 'cancel';
 }
@@ -9,6 +11,10 @@ export interface Cursor { runId: string; offset: number }
 export type SaveState = 'clean' | 'dirty' | 'conflict' | 'readonly';
 
 export function replaceRange(text: string, edit: SourceEdit): string {
+  if (edit.additional) {
+    for (const range of transactionRanges(edit)) text = replaceRange(text, range);
+    return text;
+  }
   if (!Number.isInteger(edit.start) || !Number.isInteger(edit.end) || edit.start < 0 || edit.end < edit.start || edit.end > text.length) {
     throw new RangeError('Invalid source range');
   }
@@ -16,8 +22,23 @@ export function replaceRange(text: string, edit: SourceEdit): string {
   return text.slice(0, edit.start) + edit.insert + text.slice(edit.end);
 }
 
+function transactionRanges(edit: SourceEdit): RangeReplacement[] {
+  const ranges = [edit, ...(edit.additional ?? [])]
+    .map(({ start, end, insert }) => ({ start, end, insert }))
+    .sort((a, b) => b.start - a.start);
+  if (edit.draft || ranges.some((range, index) => index > 0 && (range.end > ranges[index - 1].start || range.start === ranges[index - 1].start))) {
+    throw new RangeError('Transaction ranges must be disjoint and cannot contain a draft');
+  }
+  return ranges;
+}
+
 /** Existing newline characters retain their own EOL, even when lines move. */
 export function applyEdit(document: NormalizedText, edit: SourceEdit): NormalizedText {
+  if (edit.additional) {
+    let next = document;
+    for (const range of transactionRanges(edit)) next = applyEdit(next, range);
+    return next;
+  }
   const text = replaceRange(document.text, edit);
   joinEols(document.text, document.eols); // Check the caller's invariant before changing anything.
   const startLine = document.text.slice(0, edit.start).split('\n').length - 1;
@@ -64,6 +85,22 @@ export class DocumentModel {
 
   edit(edit: SourceEdit, options: { before?: Cursor; after?: Cursor; time?: number; group?: boolean } = {}): void {
     if (this.state === 'readonly') throw new Error('NUL source is read-only');
+    if (edit.additional) {
+      if (this.draft) throw new Error('Finish the pending empty-line edit first');
+      let next: NormalizedText = this;
+      const changes: HistoryChange[] = [];
+      for (const range of transactionRanges(edit)) {
+        const after = applyEdit(next, range);
+        changes.push({ forward: range,
+          reverse: { start: range.start, end: range.start + range.insert.length, insert: next.text.slice(range.start, range.end) },
+          beforeEols: [...next.eols], afterEols: [...after.eols] });
+        next = after;
+      }
+      if (next.text === this.text) return;
+      this.past.push({ changes, before: options.before, after: options.after, time: options.time ?? Date.now() });
+      this.text = next.text; this.eols = next.eols; this.future = []; this.groupBoundary = true;
+      return;
+    }
     if (edit.draft === 'cancel') {
       const pending = this.draft;
       if (!pending || edit.start !== pending.change.reverse.start || edit.end !== pending.change.reverse.end || edit.insert !== '') {

@@ -2,7 +2,8 @@ import type { SourceEdit } from '../document/model';
 
 export type ReadonlyCode = 'table' | 'code' | 'math' | 'image' | 'html' | 'emoji' | 'front-matter' |
   'comment' | 'generated' | 'ambiguous-source' | 'renderer-transform' | 'dom-mismatch' | 'nul' |
-  'invalid-source' | 'stale-run' | 'structure-changed' | 'newline' | 'cross-run' | 'format' | 'history' | 'unsupported-input';
+  'invalid-source' | 'stale-run' | 'structure-changed' | 'newline' | 'cross-run' | 'format' | 'history' | 'unsupported-input' |
+  'list-indent-target' | 'list-indent-first' | 'list-indent-top' | 'list-indent-unsafe';
 export interface ReadonlyReason { code: ReadonlyCode; description: string }
 export function reason(code: ReadonlyCode, description: string): ReadonlyReason { return { code, description }; }
 export interface Segment { start: number; end: number; text: string; kind: 'literal' | 'special' }

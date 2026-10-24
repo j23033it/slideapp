@@ -83,7 +83,10 @@ describe.each(['\n', '\r\n'])('empty target events with %j', eol => {
         expect(document.getSelection()?.anchorOffset).toBe(1)
         s.type(target, 'AB')
       }
-      expect(s.notices).toEqual([]); expect(s.model.serialize()).toBe((source + 'B').split('\n').join(eol))
+      // Tab is now consumed with a hierarchy-change notice; the explicit
+      // selection move above still cancels the unfilled draft as before.
+      expect(s.notices).toEqual(movement === 'Tab' ? ['list-indent-target'] : [])
+      expect(s.model.serialize()).toBe((source + 'B').split('\n').join(eol))
       expect(s.model.hasBom).toBe(true)
       s.key(target, 'z', { ctrlKey: true })
       expect(s.model.serialize()).toBe(source.split('\n').join(eol)); expect(s.model.canUndo).toBe(false)
