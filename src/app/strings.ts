@@ -107,6 +107,10 @@ export const strings = {
       format: '書式の変更には対応していません',
       history: '元に戻す・やり直すはアプリの機能で行ってください',
       'unsupported-input': 'この入力操作には対応していません',
+      'list-indent-target': '箇条書きの項目内でTabを押すと階層を変更できます',
+      'list-indent-first': '先頭の項目は、これ以上深くできません',
+      'list-indent-top': '最上位の項目は、これ以上浅くできません',
+      'list-indent-unsafe': '字下げや項目の対応を安全に確認できないため、階層を変更できません',
     } satisfies Record<ReadonlyCode, string>,
   },
 

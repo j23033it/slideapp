@@ -235,6 +235,14 @@ export class StageEditor {
 
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
+    if (event.key === 'Tab' && this.editing) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.isComposing || event.keyCode === 229 || this.hasPendingComposition()) return
+      this.settleComposition()
+      this.changeListIndent(event.shiftKey ? 'outdent' : 'indent')
+      return
+    }
     if (event.isComposing || event.keyCode === 229) return
     const wasComposing = this.hasPendingComposition()
     if (event.key === 'Enter' && performance.now() <= this.suppressEnterUntil) {
@@ -388,6 +396,16 @@ export class StageEditor {
     this.endEditingSilently()
     this.options.onCrossRun(result, result.cursor)
     return true
+  }
+
+  private changeListIndent(direction: 'indent' | 'outdent'): void {
+    const before = this.currentCursor(false), end = this.currentCursor(true)
+    if (!before || !end) { this.options.onNotice('list-indent-target'); return }
+    const result = this.engine.applyListIndent(this.analysis.text, before.runId, before.offset, direction, end.runId)
+    if (!result.ok) { this.options.onNotice(result.reason.code); return }
+    this.analysis = result.analysis
+    this.endEditingSilently()
+    this.options.onCrossRun(result, result.cursor, before)
   }
 
   private insertNewline(kind: 'line' | 'paragraph'): void {
