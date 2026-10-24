@@ -46,7 +46,7 @@ async function waitFor(expression, timeout = 10000) {
   throw new Error(`Timed out: ${expression}`)
 }
 async function key(key, modifiers = 0) {
-  const code = { Enter: 13, Backspace: 8, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, z: 90 }[key]
+  const code = { Tab: 9, Enter: 13, Backspace: 8, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, z: 90 }[key]
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await delay(180)
@@ -257,6 +257,28 @@ try {
     check((await evaluate('state()')).text.includes(item+'\n- '), 'List Enter did not create a new item')
     await send('Input.insertText',{text:'次'}); await delay(180)
     check((await evaluate('state()')).modelText?.includes(item+'\n- 次'), 'New list item did not accept text')
+  })
+  await scenario('list-tab', async () => {
+    await evaluate(`document.querySelector('.slide-list-host').shadowRoot.querySelector('[data-index="1"]').click()`)
+    await delay(200)
+    await click('太字の部分', 2); await key('ArrowLeft')
+    const original = await evaluate('state().text')
+    const offset = await evaluate('state().scoped.anchorOffset')
+    await key('Tab')
+    check(await evaluate('state().modelText') === original.replace('\n- **太字', '\n  - **太字'), 'Tab did not indent only the selected item')
+    check(await evaluate('state().scoped.anchorOffset') === offset, 'Tab did not restore the character offset')
+    check(await evaluate(`state().scoped.anchor?.text === '太字の部分' && state().editing`), 'Tab lost the editing caret')
+    await key('Tab', 8)
+    check(await evaluate('state().modelText') === original, 'Shift+Tab did not restore the original hierarchy')
+    await key('z', 2)
+    check(await evaluate('state().modelText') === original.replace('\n- **太字', '\n  - **太字'), 'One Undo did not undo Shift+Tab')
+    await key('z', 2)
+    check(await evaluate('state().modelText') === original, 'One Undo did not undo Tab')
+  })
+  await scenario('paragraph-tab-rejected', async () => {
+    await click(paragraph, 3); await key('Tab')
+    check(await evaluate(`trace.some(e => e.type === 'callback.onNotice' && e.detail === 'list-indent-target')`), 'Paragraph Tab did not report its rejection')
+    check(await evaluate('state().editing && state().scoped.anchorOffset === 3'), 'Rejected Tab moved the editing caret')
   })
   await scenario('ime-confirmation', async () => {
     await click(paragraph)
