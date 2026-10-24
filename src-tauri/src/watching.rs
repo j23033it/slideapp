@@ -125,8 +125,17 @@ impl FileService {
     ) -> Result<OpenedFile, String> {
         let mut active = lock(&self.active);
         let target = absolute_path(path).map_err(|error| error.to_string())?;
-        if active.iter().any(|watch| same_target(&watch.path, &target)) {
-            return files::read_open_file(&target).map_err(|error| error.to_string());
+        if let Some(watch) = active
+            .iter()
+            .find(|watch| same_target(&watch.path, &target))
+        {
+            // Serialize the read and baseline update with save and observation.
+            // A failed read leaves the last known state intact.
+            let mut known = lock(&watch.known);
+            let opened = files::read_open_file(&target).map_err(|error| error.to_string())?;
+            known.hash = Some(opened.hash.clone());
+            known.removed = false;
+            return Ok(opened);
         }
         let (sender, receiver) = mpsc::channel();
         let callback_sender = sender.clone();
@@ -276,8 +285,8 @@ fn watch_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 deadline = None;
                 let mut known = lock(&known);
-                // Read and emit under the same lock used by save; a pre-save read
-                // must not be emitted after the save has advanced the known hash.
+                // Read and emit under the same lock used by open/save; an older
+                // read must not be emitted after either advances the known hash.
                 // Keep short sharing violations silent, then report once while
                 // continuing to retry. The wait happens in recv_timeout, outside
                 // this lock, so Stop/open/save never wait for an entire retry loop.
@@ -395,6 +404,94 @@ mod tests {
             FileEvent::Changed(changed) => changed,
             event => panic!("expected changed, got {event:?}"),
         }
+    }
+
+    // Keep the real worker, but deliver notifications explicitly so it cannot
+    // observe an intermediate write before the test finishes reopening the file.
+    fn manual_notifications(service: &FileService) -> mpsc::Sender<WatchMessage> {
+        let mut active = lock(&service.active);
+        let watch = &mut active[0];
+        watch.watcher.take();
+        watch.sender.clone()
+    }
+
+    #[test]
+    fn reopening_a_watched_file_detects_a_return_to_the_previous_contents() {
+        let (_directory, path, service, opened, receiver) = watching();
+        let notifications = manual_notifications(&service);
+        fs::write(&path, b"external\r\n").unwrap();
+        let reopened = service
+            .open(&path, |_| {
+                panic!("reopening must preserve the original event sink")
+            })
+            .unwrap();
+        assert_eq!(reopened.text, "external\r\n");
+        assert_ne!(reopened.hash, opened.hash);
+
+        // The external writer restores A before the pending observation of B.
+        fs::write(&path, b"initial\r\n").unwrap();
+        notifications
+            .send(WatchMessage::Event(Ok(Event::new(EventKind::Modify(
+                notify::event::ModifyKind::Any,
+            ))
+            .add_path(path.clone()))))
+            .unwrap();
+        let event = changed(&receiver);
+        assert_eq!(event.path, path.to_string_lossy());
+        assert_eq!(event.file.text, opened.text);
+        assert_eq!(event.file.hash, opened.hash);
+        no_event(&receiver);
+    }
+
+    #[test]
+    fn failed_reopening_preserves_the_known_hash_and_removed_state() {
+        let (_directory, path, service, opened, _receiver) = watching();
+        let _notifications = manual_notifications(&service);
+        fs::write(&path, [0xFF, 0xFE]).unwrap();
+        assert!(service.open(&path, |_| {}).is_err());
+        {
+            let active = lock(&service.active);
+            let known = lock(&active[0].known);
+            assert_eq!(known.hash.as_ref(), Some(&opened.hash));
+            assert!(!known.removed);
+        }
+
+        fs::remove_file(&path).unwrap();
+        assert!(service.open(&path, |_| {}).is_err());
+        let active = lock(&service.active);
+        let known = lock(&active[0].known);
+        assert_eq!(known.hash.as_ref(), Some(&opened.hash));
+        assert!(!known.removed);
+    }
+
+    #[test]
+    fn reopening_a_reappeared_file_clears_the_removed_state() {
+        let (_directory, path, service, _opened, _receiver) = watching();
+        let _notifications = manual_notifications(&service);
+        fs::remove_file(&path).unwrap();
+        let known = lock(&service.active)[0].known.clone();
+        {
+            let emit: EventSink = Arc::new(|_| {});
+            assert!(observe_file(
+                &path,
+                &path.to_string_lossy(),
+                &mut lock(&known),
+                &emit,
+                false,
+            ));
+        }
+        assert!(service.open(&path, |_| {}).is_err());
+        {
+            let known = lock(&known);
+            assert!(known.hash.is_none());
+            assert!(known.removed);
+        }
+
+        fs::write(&path, b"reappeared\r\n").unwrap();
+        let reopened = service.open(&path, |_| {}).unwrap();
+        let known = lock(&known);
+        assert_eq!(known.hash.as_ref(), Some(&reopened.hash));
+        assert!(!known.removed);
     }
 
     #[test]
