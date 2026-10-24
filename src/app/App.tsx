@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { Marp } from '@marp-team/marp-core'
 
 import { DocumentModel, type Cursor, type SaveState } from '../document'
-import type { Analysis, ReadonlyCode } from '../editing'
+import type { Analysis, ReadonlyCode, SlideOperation, SlideOperationResult } from '../editing'
 import type { ExportReport } from '../export/pptx'
 import { resolveCursor } from '../editing'
 import { MarpRenderer } from '../marp/renderer'
@@ -20,7 +20,7 @@ import {
 import { basename, dirname } from '../platform/paths'
 import { EmptyState } from './EmptyState'
 import type { EditorSession, StageApi } from './session'
-import { editorSessionSaveState, planHistoryRestore } from './session'
+import { applySessionSlideOperation, editorSessionSaveState, planHistoryRestore } from './session'
 import { SettingsPanel } from './SettingsPanel'
 import { SlideList } from './SlideList'
 import { SlideStage, type SlideStageCallbacks } from './SlideStage'
@@ -221,7 +221,11 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
 
   const renderer = useMemo(() => new MarpRenderer((path) => platform.convertFileSrc(path)), [])
   const activeWorkspaceRef = useRef(active)
+  const activationGeneration = useRef(0)
+  if (activeWorkspaceRef.current !== active) activationGeneration.current += 1
   activeWorkspaceRef.current = active
+  const viewRef = useRef(view)
+  viewRef.current = view
   const rendererRef = useRef(renderer)
   const workspaceAlive = useRef(true)
   const sessionRef = useRef<EditorSession | null>(null)
@@ -824,11 +828,11 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const restoreNow = useCallback(
     (direction: 'undo' | 'redo') => {
       const session = sessionRef.current
-      if (!session) return
+      if (!session || !activeWorkspaceRef.current || pendingRef.current ||
+        updateInstallLockedRef.current || openingRef.current || viewRef.current.busy) return
       stageApi.current?.endEditing()
-      const before = session.model.text
+      if (direction === 'undo' ? !session.model.canUndo : !session.model.canRedo) return
       const cursor = direction === 'undo' ? session.model.undo() : session.model.redo()
-      if (session.model.text === before) return
       const { analysis, deck } = session.renderer.analyze(session.model.text, session.baseDir)
       const resolved = cursor ? resolveCursor(analysis, cursor) ?? cursor : undefined
       session.analysis = analysis
@@ -877,6 +881,33 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     },
     [goTo],
   )
+
+  const onSlideOperation = useCallback(async (operation: SlideOperation): Promise<SlideOperationResult | void> => {
+    const session = sessionRef.current
+    const blocked = () => !workspaceAlive.current || !activeWorkspaceRef.current ||
+      pendingRef.current !== null || updateInstallLockedRef.current || openingRef.current !== null ||
+      viewRef.current.busy || session?.model.state === 'readonly' || session?.conflict
+    if (!session || blocked()) return
+    const activation = activationGeneration.current
+    const pendingOperation = pendingOperationRef.current
+    const observation = diskObservationRef.current
+    const savedSnapshot = session.savedSnapshot
+    await waitForComposition()
+    // A queued command belongs to the tab and disk version where it was requested.
+    if (blocked() || sessionRef.current !== session || activation !== activationGeneration.current ||
+      pendingOperation !== pendingOperationRef.current ||
+      !canApplyDiskResult(observation, diskObservationRef.current) || savedSnapshot !== session.savedSnapshot) return
+    stageApi.current?.endEditing()
+    const result = applySessionSlideOperation(session, operation, currentRef.current)
+    if (!result.ok) {
+      sync({ detail: strings.slideOperations.reasons[result.reason.code] })
+      return result
+    }
+    editingRef.current = false
+    currentRef.current = result.selectedSlide
+    syncDeck({ current: result.selectedSlide, detail: null })
+    return result
+  }, [sync, syncDeck, waitForComposition])
 
   const handleExternalNow = useCallback(
     async (change: ExternalChange, observation: DiskObservation, requestId: number) => {
@@ -1103,7 +1134,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         void runPptxExport()
         return
       }
-      if (event.isComposing) return
+      if (event.isComposing || event.keyCode === 229) return
       if (mod && !event.altKey && event.key.toLowerCase() === 's') {
         event.preventDefault()
         void runSave()
@@ -1115,6 +1146,12 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         return
       }
       if (isEditableTarget(event.target)) return
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && event.key.toLowerCase() === 'm') {
+        if (editingRef.current) return
+        event.preventDefault()
+        void onSlideOperation({ kind: 'add', index: currentRef.current })
+        return
+      }
       if (mod && !event.altKey && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')) {
         if (editingRef.current) return
         event.preventDefault()
@@ -1159,7 +1196,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [active, goBy, goTo, openDialog, restore, runPptxExport, runSave])
+  }, [active, goBy, goTo, onSlideOperation, openDialog, restore, runPptxExport, runSave])
 
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((previous) => ({ ...previous, ...patch }))
@@ -1208,6 +1245,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   apiRef.current = {
     leave: async () => {
       if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
+      activationGeneration.current += 1
       await waitForComposition()
       if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
       const cursor = stageApi.current?.captureCursor?.()
@@ -1217,6 +1255,8 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         const resolved = resolveCursor(session.analysis, cursor)
         if (resolved) session.focus = nextFocus(resolved)
       }
+      // Invalidate commands queued during IME before the parent publishes the next tab.
+      activationGeneration.current += 1
       return true
     },
     prepare: (reason) => { confirmReasonRef.current = reason; return beforeUpdateInstall() },
@@ -1347,6 +1387,9 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
                 version={view.thumbVersion}
                 current={view.current}
                 onSelect={goTo}
+                onSlideOperation={onSlideOperation}
+                readOnly={!active || !session || session.model.state === 'readonly' || session.conflict ||
+                  view.busy || pending !== null || updateInstallLocked}
                 onCollapse={() => updateSettings({ sidebarCollapsed: true })}
               />
             </aside>
