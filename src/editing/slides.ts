@@ -142,6 +142,15 @@ export function planSlideOperation(
     insert: text.slice(range.start, range.end),
     eols: eols.slice(atLine(range.start), atLine(range.end)) as Exclude<Eol, ''>[],
   });
+  const beforeSeparator = (copy: ReturnType<typeof slice>, ending: Exclude<Eol, ''>) => {
+    // A single final EOL still lets --- become a setext heading underline.
+    if (copy.insert && !/(?:^|\n)[ \t]*\n$/.test(copy.insert)) {
+      const padding = copy.insert.endsWith('\n') ? '\n' : '\n\n';
+      copy.insert += padding;
+      copy.eols.push(...Array<Exclude<Eol, ''>>(padding.length).fill(ending));
+    }
+    return copy;
+  };
   const insertion = (position: number, insert: string, endings?: Exclude<Eol, ''>[]): SourceEdit => ({
     start: position, end: position, insert,
     eols: endings ?? Array<Exclude<Eol, ''>>(insert.split('\n').length - 1).fill(eol),
@@ -152,10 +161,10 @@ export function planSlideOperation(
     // without a final EOL. Existing bytes (including any blank lines) stay put.
     const prefix = (body.end > 0 && text[body.end - 1] !== '\n' ? '\n\n' : '\n') + '---\n';
     const copy = operation.kind === 'duplicate' ? slice(body) : { insert: '', eols: [] };
-    const suffix = index < count - 1 && copy.insert && !copy.insert.endsWith('\n') ? '\n' : '';
-    const insert = prefix + copy.insert + suffix;
+    if (index < count - 1) beforeSeparator(copy, eol);
+    const insert = prefix + copy.insert;
     const edit = insertion(body.end, insert, [
-      ...Array<Exclude<Eol, ''>>(prefix.split('\n').length - 1).fill(eol), ...copy.eols, ...(suffix ? [eol] : []),
+      ...Array<Exclude<Eol, ''>>(prefix.split('\n').length - 1).fill(eol), ...copy.eols,
     ]);
     newToOld.splice(index + 1, 0, operation.kind === 'duplicate' ? index : null);
     return { edits: [edit], selectedSlide: index + 1, newToOld };
@@ -170,9 +179,7 @@ export function planSlideOperation(
     const oldIndex = newToOld[target]!;
     if (oldIndex === target) continue;
     const copy = slice(sources.bodies[oldIndex]);
-    if (target < count - 1 && copy.insert && !copy.insert.endsWith('\n')) {
-      copy.insert += '\n\n'; copy.eols.push(eol, eol);
-    }
+    if (target < count - 1) beforeSeparator(copy, eols[atLine(sources.separators[target].start)] || preferredEol(eols));
     edits.push({ ...sources.bodies[target], ...copy });
   }
   return { edits: edits.reverse(), selectedSlide: operation.to, newToOld };

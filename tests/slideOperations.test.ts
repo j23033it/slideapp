@@ -86,6 +86,50 @@ describe('slide addition and duplication', () => {
     expect(result.newToOld).toEqual(index === 0 ? [0, 0, 1] : [0, 1, 1]);
     model.undo(); expect(model.serialize()).toBe(raw);
   });
+  it.each([
+    ['LF', '# A\n\n---\n\nparagraph\n***\n\nlast\n',
+      '# A\n\n---\n\nparagraph\n\n---\n\nparagraph\n\n***\n\nlast\n'],
+    ['CRLF', '# A\r\n\r\n---\r\n\r\nparagraph\r\n***\r\n\r\nlast\r\n',
+      '# A\r\n\r\n---\r\n\r\nparagraph\r\n\r\n---\r\n\r\nparagraph\r\n\r\n***\r\n\r\nlast\r\n'],
+    ['mixed EOLs', '# A\r\n\r\n---\r\n\nparagraph\r\n***\n\nlast\r\n',
+      '# A\r\n\r\n---\r\n\nparagraph\r\n\n---\n\nparagraph\r\n\n***\n\nlast\r\n'],
+  ])('separates a duplicated paragraph with one trailing EOL from the following delimiter: %s', (_, raw, expected) => {
+    const { model, operate } = setup(raw);
+    const result = apply(model, operate({ kind: 'duplicate', index: 1 }));
+    expect(model.serialize()).toBe(expected);
+    expect(result.newToOld).toEqual([0, 1, 1, 2]);
+    expect(result.analysis.blocks.map(block => block.tag)).toEqual(['h1', 'p', 'p', 'p']);
+    model.undo(); expect(model.serialize()).toBe(raw); expect(model.canUndo).toBe(false);
+    model.redo(); expect(model.serialize()).toBe(expected);
+  });
+  it.each(['', '\n', '\n\n'])('preserves a final duplicate ending in %j and safely moves it before ---', ending => {
+    const raw = '# A\n\n---\n\nlast' + ending;
+    const { model, operate } = setup(raw);
+    const duplicate = apply(model, operate({ kind: 'duplicate', index: 1 }));
+    const finalBody = duplicate.analysis.slideSources!.bodies[2];
+    expect(model.text.slice(finalBody.start, finalBody.end)).toBe('\nlast' + ending);
+    const duplicatedRaw = model.serialize();
+    const moved = apply(model, operate({ kind: 'move', index: 2, to: 0 }));
+    expect(moved.newToOld).toEqual([2, 0, 1]);
+    expect(model.text.startsWith('\nlast\n\n---\n')).toBe(true);
+    model.undo(); expect(model.serialize()).toBe(duplicatedRaw);
+    model.undo(); expect(model.serialize()).toBe(raw);
+  });
+  it.each([
+    ['LF', '# A\n\n---\n\nlast\n', '\n---\n', '\nlast\n'],
+    ['CRLF', '# A\r\n\r\n---\r\n\r\nlast\r\n', '\r\n---\r\n', '\r\nlast\r\n'],
+    ['mixed EOLs', '# A\r\n\r\n---\r\n\nlast\n', '\r\n---\r\n', '\nlast\n'],
+  ])('adds or duplicates after a final paragraph with one trailing EOL: %s', (_, raw, separator, copy) => {
+    for (const kind of ['add', 'duplicate'] as const) {
+      const { model, operate } = setup(raw);
+      const result = apply(model, operate({ kind, index: 1 }));
+      const expected = raw + separator + (kind === 'duplicate' ? copy : '');
+      expect(model.serialize()).toBe(expected);
+      expect(result.analysis.slideSources!.bodies).toHaveLength(3);
+      model.undo(); expect(model.serialize()).toBe(raw);
+      model.redo(); expect(model.serialize()).toBe(expected);
+    }
+  });
 });
 
 describe('slide deletion', () => {
@@ -135,6 +179,49 @@ describe('slide movement', () => {
     expect(result.analysis.blocks.map(block => block.tag)).toEqual(['p', 'p']);
     expect(result.analysis.runs.map(run => run.text)).toEqual(['last', 'first']);
     expect(model.text).toBe('\nlast\n\n---\nfirst\n\n');
+  });
+  it.each([
+    ['LF', '# A\n\n---\n\nlast\n', '\nlast\n\n---\n# A\n\n'],
+    ['CRLF', '# A\r\n\r\n---\r\n\r\nlast\r\n', '\r\nlast\r\n\r\n---\r\n# A\r\n\r\n'],
+    ['mixed EOLs', '# A\r\n\n---\r\n\nlast\n', '\nlast\n\r\n---\r\n# A\r\n\n'],
+  ])('moves a final paragraph with one trailing EOL before ---: %s', (_, raw, expected) => {
+    const { model, operate } = setup(raw);
+    const result = apply(model, operate({ kind: 'move', index: 1, to: 0 }));
+    expect(model.serialize()).toBe(expected);
+    expect(result.analysis.blocks.map(block => block.tag)).toEqual(['p', 'h1']);
+    expect(result.analysis.runs.map(run => run.text)).toEqual(['last', 'A']);
+    model.undo(); expect(model.serialize()).toBe(raw); expect(model.canUndo).toBe(false);
+    model.redo(); expect(model.serialize()).toBe(expected);
+  });
+  it.each([
+    [0, '\nlast\n\n---\n# A\n\n---\r\n\nmiddle\r\n\r\n', [2, 0, 1]],
+    [1, '# A\n\n---\n\nlast\n\r\n---\r\n\nmiddle\r\n\r\n', [0, 2, 1]],
+  ] as const)('pads only relocated bodies when moving the final paragraph to %i', (to, expected, mapping) => {
+    const raw = '# A\n\n---\n\nmiddle\r\n\r\n---\r\n\nlast\n';
+    const { model, analysis, operate } = setup(raw);
+    const result = apply(model, operate({ kind: 'move', index: 2, to }));
+    expect(model.serialize()).toBe(expected);
+    expect(result.newToOld).toEqual(mapping);
+    expect(result.edits.every(edit => analysis.slideSources!.bodies.some(body => body.start === edit.start && body.end === edit.end))).toBe(true);
+    if (to === 1) expect(result.edits.some(edit => edit.start === 0)).toBe(false);
+    model.undo(); expect(model.serialize()).toBe(raw);
+    model.redo(); expect(model.serialize()).toBe(expected);
+  });
+  it.each(['\n', '\n\n', '\n \t\n'])('keeps a middle paragraph ending %j unchanged when moving it to the end', ending => {
+    const raw = '# A\r\n\r\n---\r\n\nmiddle' + ending + '***\n\nlast\n';
+    const expected = '# A\r\n\r\n---\r\n\nlast\n\n***\n\nmiddle' + ending;
+    const { model, operate } = setup(raw);
+    const result = apply(model, operate({ kind: 'move', index: 1, to: 2 }));
+    expect(model.serialize()).toBe(expected);
+    expect(result.analysis.runs.map(run => run.text)).toEqual(['A', 'last', 'middle']);
+    model.undo(); expect(model.serialize()).toBe(raw);
+  });
+  it.each(['\n\n', '\n \t\n'])('does not pad a moved paragraph that already ends with a blank line %j', ending => {
+    const raw = '# A\n\n---\n\nlast' + ending;
+    const { model, operate } = setup(raw);
+    apply(model, operate({ kind: 'move', index: 1, to: 0 }));
+    expect(model.serialize()).toBe('\nlast' + ending + '---\n# A\n\n');
+    model.undo(); expect(model.serialize()).toBe(raw);
   });
 });
 
