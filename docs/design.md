@@ -108,7 +108,7 @@ slideapp/
 |---|---|
 | `open_file(path)` | バイト列を読み、`{ text, hasBom, hash, mtime }` を返す。監視を開始し、資産プロトコルの許可範囲に親フォルダを加える |
 | `save_file(path, text, hasBom, expectedHash)` | ディスクの現在のハッシュが `expectedHash` と違えば保存せず `Conflict` を返す。同じなら原子的に保存し、新しいハッシュを返す |
-| `read_theme_config(markdownPath)` | .mdのフォルダから上へ（`.git` のあるフォルダかドライブ直下まで）`.marprc.yml` / `.marprc.yaml` / `.marprc.json` / `.vscode/settings.json` を探し、最初に見つかった設定のテーマCSSを `{ themes: [{ path, css }], warnings }` で返す。JS設定・URLテーマは読まず警告にする |
+| `read_theme_config(markdownPath)` | .mdのフォルダから上へ（`.git` のあるフォルダかドライブ直下まで）`.marprc.yml` / `.marprc.yaml` / `.marprc.json` / `.vscode/settings.json` を探し、最初に見つかった設定のテーマCSSを `{ themes: [{ path, css }], warnings }` で返す。JS設定・URLテーマは読まず警告にする（JS設定は実行せず、本文に `themeSet` を含むときだけ警告する。`engine` などテーマに関係しない設定では警告しない） |
 | `recent_files_get / recent_files_add` | 最近使ったファイル（最大10件）。アプリ設定フォルダのJSONに保存 |
 | `settings_get / settings_set` | テーマ（system/light/dark）、更新確認の有無、サイドバー幅、openTabs（タブのパスの並び）とactiveTab（アクティブなパス）など |
 | `stop_watching(path?)` | 指定パスの監視を停止する。省略時は全対象を停止する |
