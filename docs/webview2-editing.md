@@ -8,18 +8,17 @@ Windows、Node 24、`npm ci` 済みのワークツリーで実行する。追加
 node scripts/webview2-editing.mjs --launch
 ```
 
-`--launch` は `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` を渡して `npm run tauri dev` を起動する。終了時は成功・失敗のどちらでも、自分で起動したアプリと開発サーバーのプロセスツリーを停止する。起動に使うポートが使用中なら開始しない。起動ログは出力先の `launch.log` に残す。
+`--launch` は `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` を渡して Tauri CLI の `dev` を起動する。終了時は成功・失敗のどちらでも、自分で起動したアプリと開発サーバーのプロセスツリーを停止する。起動に使うポートが使用中なら開始しない。起動ログは出力先の `launch.log` に残す。
 
-MSVC がない環境では、既存の **Tauri デバッグ実行ファイル** をホストにできる。この場合も、このワークツリーの Vite と実際の WebView2・Rust のファイル読み込みを使う。
+実行ごとに一意な Tauri 識別子を指定して起動し、ユーザーの設定・最近使ったファイルと隔離する。終了時はプロセスの終了を待ち、その識別子に完全一致する Roaming と Local のテスト用フォルダを削除する。削除できない場合は警告を表示する。各シナリオの再読み込み時も設定の読み書きと最近使ったファイルへの登録を抑止する。隔離を保証するため、既存プロセスへの接続と `WEBVIEW2_HOST_EXE` は使用できない。
+
+MSVC がなく GNU ツールチェーンが利用できる環境では、例えば次のように指定する。
 
 ```powershell
-$env:WEBVIEW2_HOST_EXE = 'C:\Users\taiki\Documents\slideapp\src-tauri\target\debug\slideapp.exe'
+$env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-gnu'
+$env:CARGO_TARGET_DIR = 'C:\Users\taiki\Documents\slideapp\src-tauri\target'
 node scripts/webview2-editing.mjs --launch
 ```
-
-今回の環境では Microsoft のリンカーがなく、`cargo run` が Git 付属の `link.exe` を呼んで失敗したため、後者で確認した。インストール版を再ビルドしての確認ではない。
-
-すでに自分で起動した開発版へ接続する場合は `--launch` を省く。この場合、そのアプリとサーバーの停止は起動した側の責任になる。
 
 任意の設定:
 
@@ -33,9 +32,9 @@ $env:TRACE_DIR = Join-Path $env:TEMP 'slideapp-webview2-final'
 node scripts/webview2-editing.mjs --launch
 ```
 
-`SAMPLE_MD` の元ファイルは読み込みだけで、保存しない。コピーのディスク内容が変わっていないことも最後に照合する。最近使ったファイルへの登録だけを抑止する。コピーの確認で Windows のクリップボードに選択文字列が入る。
+`SAMPLE_MD` の元ファイルは読み込みだけで、保存しない。コピーのディスク内容が変わっていないことも最後に照合する。設定の読み書きと最近使ったファイルへの登録を抑止する。コピーの確認で Windows のクリップボードに選択文字列が入る。
 
-ファイルダイアログの返り値を一時コピーのパスに差し替え、通常の開くボタンから実際の `open_file` を呼ぶ。編集入力は `Input.dispatchMouseEvent`、`Input.dispatchKeyEvent`、`Input.imeSetComposition`、`Input.insertText` を使う。テスト専用の起動引数や本番用グローバル関数は追加していない。クラスの状態記録は CDP から開発モジュールの prototype を一時的にラップし、ページの再読み込みで破棄する。
+ファイルダイアログの返り値を一時コピーのパスに差し替え、通常の開くボタンから実際の `open_file` を呼ぶ。編集入力は `Input.dispatchMouseEvent`、`Input.dispatchKeyEvent`、`Input.imeSetComposition`、`Input.insertText` を使う。本番用の起動引数やグローバル関数は追加していない。クラスの状態記録は CDP から開発モジュールの prototype を一時的にラップし、ページの再読み込みで破棄する。
 
 ## 記録
 

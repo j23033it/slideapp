@@ -1,9 +1,10 @@
 // Real WebView2 input regression runner. See docs/webview2-editing.md.
-import { mkdir, mkdtemp, open, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFile, spawn, spawnSync } from 'node:child_process'
 import { promisify } from 'node:util'
+import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 
 const port = Number(process.env.CDP_PORT ?? 9222)
@@ -13,9 +14,10 @@ const fixtureDirectory = await mkdtemp(join(output, 'fixture-'))
 const fixture = join(fixtureDirectory, 'sample.md')
 const sample = process.env.SAMPLE_MD
   ? await readFile(process.env.SAMPLE_MD)
-  : Buffer.from('---\nmarp: true\ntheme: default\npaginate: true\n---\n\n# SlideApp 動作確認\n\n文字をクリックして直接編集できるか試すためのサンプル。・・\n\n---\n\n## 日本語入力のテスト\n\n- この行をクリックして、日本語を入力・変換してみる\n- **太字の部分**と*斜体の部分*も編集してみる\n')
+  : Buffer.from('---\nmarp: true\ntheme: default\npaginate: true\n---\n\n# SlideApp 動作確認\n\n文字をクリックして直接編集できるか試すためのサンプル。・・\n\n| 表見出し | 列見出し |\n|---|---|\n| 表の前<br>表の後 | 表セル<br> |\n\n---\n\n## 日本語入力のテスト\n\n- この行をクリックして、日本語を入力・変換してみる\n- **太字の部分**と*斜体の部分*も編集してみる\n')
 await writeFile(fixture, sample)
-let child, appChild, ws, launchLog, launchError
+let child, childClosed, ws, launchLog, launchError, testIdentifier
+let profilePaths = []
 const execFileAsync = promisify(execFile)
 async function clipboardText() {
   const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile','-NonInteractive','-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::Write((Get-Clipboard -Raw))'], {windowsHide:true,encoding:'utf8'})
@@ -46,7 +48,7 @@ async function waitFor(expression, timeout = 10000) {
   throw new Error(`Timed out: ${expression}`)
 }
 async function key(key, modifiers = 0) {
-  const code = { Tab: 9, Enter: 13, Backspace: 8, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, m: 77, y: 89, z: 90 }[key]
+  const code = { Tab: 9, Enter: 13, Backspace: 8, Delete: 46, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, m: 77, y: 89, z: 90 }[key]
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await delay(180)
@@ -82,7 +84,33 @@ async function drag(text, start, end) {
 }
 async function setup() {
   const navigation = String(sequence)
-  const { identifier } = await send('Page.addScriptToEvaluateOnNewDocument', {source:`window.editingProbeNavigation = ${JSON.stringify(navigation)}`})
+  const { identifier } = await send('Page.addScriptToEvaluateOnNewDocument', {source:`
+    window.editingProbeNavigation = ${JSON.stringify(navigation)};
+    const wrapInternals = internals => {
+      if (!internals) return internals;
+      let invoke = internals.invoke;
+      Object.defineProperty(internals, 'invoke', {
+        configurable: true,
+        get: () => invoke,
+        set: original => {
+          invoke = function(command, ...args) {
+            if (command === 'settings_get') return Promise.resolve({openTabs: [], activeTab: null});
+            if (command === 'settings_set') return Promise.resolve();
+            if (command === 'recent_files_get' || command === 'recent_files_add') return Promise.resolve([]);
+            return original.call(this, command, ...args);
+          };
+        },
+      });
+      if (invoke) internals.invoke = invoke;
+      return internals;
+    };
+    let internals = wrapInternals(window.__TAURI_INTERNALS__);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      get: () => internals,
+      set: value => { internals = wrapInternals(value) },
+    });
+  `})
   try {
     await send('Page.reload')
     await waitFor(`window.editingProbeNavigation === ${JSON.stringify(navigation)} && !!document.querySelector('.empty-open-button')`)
@@ -164,28 +192,30 @@ async function scenario(name, run) {
 function check(value, message) { if (!value) throw new Error(message) }
 const paragraph = '文字をクリックして直接編集できるか試すためのサンプル。・・'
 try {
+  if (!process.argv.includes('--launch') || process.env.WEBVIEW2_HOST_EXE) {
+    throw new Error('Use --launch without WEBVIEW2_HOST_EXE to isolate the test settings')
+  }
   if (process.argv.includes('--launch')) {
     for (const url of [`http://localhost:${port}/json/version`,'http://localhost:1420/']) {
       const occupied = await fetch(url).then(()=>true,()=>false)
       if (occupied) throw new Error('Refusing to launch while a required port is occupied: '+url)
     }
     const env = { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` }
-    // An existing Tauri *debug* executable can host this checkout's Vite code
-    // when the local MSVC build environment is unavailable. No backend is mocked.
-    const hostExe = process.env.WEBVIEW2_HOST_EXE
-    launchLog = await open(join(output,'launch.log'),'w')
-    child = spawn(process.env.ComSpec ?? 'cmd.exe', ['/d','/s','/c',hostExe ? 'npm.cmd run dev' : 'npm.cmd run tauri dev'], { windowsHide: true, env, stdio: ['ignore',launchLog.fd,launchLog.fd] })
-    child.on('error',error=>{launchError=error})
-    if (hostExe) {
-      for (let i=0;i<100;i++) {
-        if (launchError) throw launchError
-        if (child.exitCode !== null) throw new Error('Vite launch failed; see '+join(output,'launch.log'))
-        if (await fetch('http://localhost:1420/').then(()=>true,()=>false)) break
-        await delay(200)
-      }
-      appChild = spawn(hostExe,[],{windowsHide:true,env,stdio:['ignore',launchLog.fd,launchLog.fd]})
-      appChild.on('error',error=>{launchError=error})
+    // A fresh identifier isolates preferences even before CDP can attach.
+    const config = join(fixtureDirectory, 'tauri-test.conf.json')
+    testIdentifier = 'io.github.j23033it.slideapp.webviewtest' + randomUUID().replaceAll('-', '')
+    if (!/^io\.github\.j23033it\.slideapp\.webviewtest[0-9a-f]{32}$/.test(testIdentifier)) throw new Error('Invalid test identifier')
+    if (!process.env.APPDATA || !process.env.LOCALAPPDATA) throw new Error('APPDATA and LOCALAPPDATA are required')
+    profilePaths = [process.env.APPDATA, process.env.LOCALAPPDATA].map(root => join(root, testIdentifier))
+    for (const path of profilePaths) {
+      try { await access(path); throw new Error('Test profile already exists: ' + path) }
+      catch (error) { if (error.code !== 'ENOENT') throw error }
     }
+    await writeFile(config, JSON.stringify({ identifier: testIdentifier }))
+    launchLog = await open(join(output,'launch.log'),'w')
+    child = spawn(process.execPath, [resolve('node_modules/@tauri-apps/cli/tauri.js'), 'dev', '--config', config], { windowsHide: true, env, stdio: ['ignore',launchLog.fd,launchLog.fd] })
+    child.on('error',error=>{launchError=error})
+    childClosed = new Promise(resolve => child.once('close', resolve))
   }
   let target
   for (let i = 0; i < 600; i++) {
@@ -207,6 +237,20 @@ try {
   await send('Page.enable'); await send('Runtime.enable')
   await waitFor('!!window.__TAURI_INTERNALS__ && !!document.querySelector(".empty-open-button")')
   await writeFile(join(output,'environment.json'),JSON.stringify({version:await send('Browser.getVersion'),targetUrl:target.url,fixture},null,2))
+  await scenario('table-cell-edit-and-break-undo', async () => {
+    await click('表セル'); await send('Input.insertText', { text: '修正' }); await delay(180)
+    check((await evaluate('state().modelText'))?.includes('| 表の前<br>表の後 | 表セル修正<br> |'), 'Table cell text was not edited')
+    await click('表の後', 0); await key('Backspace')
+    check((await evaluate('state().modelText'))?.includes('| 表の前表の後 | 表セル修正<br> |'), 'Table break was not deleted')
+    await key('z', 2)
+    check((await evaluate('state().modelText'))?.includes('| 表の前<br>表の後 | 表セル修正<br> |'), 'One undo did not restore the table break')
+    await click('表セル修正'); await key('Delete')
+    check((await evaluate('state().modelText'))?.includes('| 表の前<br>表の後 | 表セル修正 |'), 'Trailing table break was not deleted')
+    await key('z', 2)
+    check((await evaluate('state().modelText'))?.includes('| 表の前<br>表の後 | 表セル修正<br> |'), 'One undo did not restore the trailing table break')
+    await click('表セル修正'); await key('Tab')
+    check(await evaluate(`trace.some(e => e.type === 'callback.onNotice' && e.detail === 'table-input')`), 'Table Tab did not report its rejection')
+  })
   await scenario('paragraph-enter-direct', async () => {
     await click(paragraph); await key('Enter')
     check(!!await evaluate('state().draft && state().editing && state().adapter'), 'Direct paragraph Enter did not retain a draft')
@@ -396,7 +440,12 @@ try {
   if (results.some(r=>!r.passed)) process.exitCode = 1
 } finally {
   ws?.close()
-  if (appChild?.pid) spawnSync('taskkill', ['/PID',String(appChild.pid),'/T','/F'], { windowsHide:true, stdio:'ignore' })
   if (child?.pid) spawnSync('taskkill', ['/PID',String(child.pid),'/T','/F'], { windowsHide:true, stdio:'ignore' })
+  const stopped = !child || await Promise.race([childClosed.then(() => true), delay(10000).then(() => false)])
   await launchLog?.close()
+  if (!stopped) console.warn('Warning: test process did not exit; leaving its profiles in place')
+  else if (child?.pid) for (const path of profilePaths) {
+    try { await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) }
+    catch (error) { console.warn('Warning: could not remove test profile ' + path + ': ' + error.message) }
+  }
 }
