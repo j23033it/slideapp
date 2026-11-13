@@ -72,10 +72,19 @@ pub fn read_theme_config(markdown_path: &Path) -> ThemeConfig {
     config
 }
 
+/// JS設定は実行できないので、テーマを指定していそうなとき（`themeSet` を含むとき）だけ警告する。
+/// `engine` だけの設定などで毎回警告が出ないようにする。
 fn warn_js_configs(directory: &Path, warnings: &mut Vec<String>) {
     for name in JS_CONFIG_NAMES {
         let path = directory.join(name);
-        if path.is_file() {
+        if !path.is_file() {
+            continue;
+        }
+        let mentions_theme_set = fs::read(&path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).contains("themeSet"))
+            // 読めないときは念のため警告する
+            .unwrap_or(true);
+        if mentions_theme_set {
             warn(
                 warnings,
                 format!(
@@ -765,7 +774,10 @@ mod tests {
     #[test]
     fn warns_about_js_config() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(&dir.path().join("marp.config.js"), "module.exports = {}");
+        write_file(
+            &dir.path().join("marp.config.js"),
+            "module.exports = { themeSet: ['./themes'] }",
+        );
         write_file(
             &dir.path().join(".marprc.yml"),
             "themeSet: ./themes/one.css\n",
@@ -779,6 +791,19 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("JS") && warning.contains("marp.config.js")));
+    }
+
+    #[test]
+    fn ignores_js_config_without_theme_set() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            &dir.path().join("marp.config.mjs"),
+            "export default {\n  engine: './marp.engine.mjs',\n}\n",
+        );
+        write_file(&dir.path().join("deck.md"), "# deck");
+
+        let config = read_theme_config(&dir.path().join("deck.md"));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
     #[test]
