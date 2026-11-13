@@ -205,6 +205,12 @@ export function bindEditing(root: HTMLElement, engine: EditingEngine, options: D
     if (active.textContent === original.text) { beforeSelection = undefined; return; }
     const result = engine.applyRunEdit(analysis.text, active.dataset.smRun!, active.textContent ?? '');
     if (!result.ok) { reject(result.reason); return; }
+    if (result.cursor) {
+      analysis = result.analysis;
+      deactivate();
+      options.onCommit(result);
+      return;
+    }
     // Rebind the existing DOM without rerendering (validated edits retain IDs).
     for (let i = 0; i < analysis.runs.length; i++) {
       root.querySelector<HTMLElement>(`[data-sm-run="${analysis.runs[i].id}"]`)?.setAttribute('data-sm-run', result.analysis.runs[i].id);

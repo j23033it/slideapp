@@ -61,7 +61,9 @@ export function installTracking(md: Markdown): void {
       const accepted = fn(state, silent);
       if (accepted) {
         const created = state.tokens.slice(count).filter(t => !traces.has(t));
-        if (name === 'emphasis' || name === 'strikethrough') {
+        if (name === 'html_inline') {
+          for (const token of created) if (token.type === 'html_inline') mark(token, start, state.pos, state.src);
+        } else if (name === 'emphasis' || name === 'strikethrough') {
           let offset = start;
           for (const token of created) {
             if (token.type === 'text') { mark(token, offset, offset + token.content.length, state.src); offset += token.content.length; }

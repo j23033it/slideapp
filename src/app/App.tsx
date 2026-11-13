@@ -1056,7 +1056,9 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       const session = sessionRef.current
       if (!session) return
       try {
+        if (result.separateHistory) session.model.breakHistoryGroup()
         session.model.edit(result.edit, { before, after: target })
+        if (result.separateHistory) session.model.breakHistoryGroup()
       } catch (reason) {
         sync({ detail: strings.errors.unknown })
         return

@@ -36,3 +36,31 @@ export function sourceRange(mapping: LineMapping[], start: number, end: number):
   const line = mapping.find(m => start >= m.inlineStart && end <= m.inlineEnd);
   if (line) return { start: line.sourceStart + start - line.inlineStart, end: line.sourceStart + end - line.inlineStart };
 }
+
+/** Map cells by column using markdown-it table's escapedSplit delimiter rules. */
+export function tableCells(source: string, line: number): (LineMapping & { escaped: boolean })[] | undefined {
+  const lines = source.split('\n'), raw = lines[line];
+  if (raw === undefined || /^[ \t]/.test(raw)) return;
+  const lineStart = lines.slice(0, line).reduce((n, value) => n + value.length + 1, 0);
+  const trimmed = raw.trim();
+  const base = raw.length - raw.trimStart().length;
+  const spans: { start: number; end: number; escaped: boolean }[] = [];
+  let start = 0, escaped = false, hasEscape = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === '|') {
+      if (!escaped) { spans.push({ start, end: i, escaped: hasEscape }); start = i + 1; hasEscape = false; }
+      else hasEscape = true;
+    }
+    escaped = ch === '\\';
+  }
+  spans.push({ start, end: trimmed.length, escaped: hasEscape });
+  if (spans[0]?.end === 0) spans.shift();
+  if (spans.at(-1)?.start === trimmed.length) spans.pop();
+  return spans.map(span => {
+    const part = trimmed.slice(span.start, span.end);
+    const leading = part.length - part.trimStart().length;
+    const content = part.trim();
+    return { inlineStart: 0, inlineEnd: content.length, sourceStart: lineStart + base + span.start + leading, escaped: span.escaped };
+  });
+}

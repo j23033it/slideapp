@@ -279,6 +279,18 @@ export class StageEditor {
     if (!run?.editable) return
 
     const direction = event.key === 'Backspace' ? 'backward' : 'forward'
+    const atBoundary = direction === 'backward' ? point.offset === 0 : point.offset === run.text.length
+    if (atBoundary && this.analysis.blocks.find(block => block.id === run.blockId)?.tableCell) {
+      const result = this.engine.applyTableBreakDeletion(this.analysis.text, run.id, direction)
+      event.preventDefault()
+      event.stopPropagation()
+      if (!result.ok) { this.options.onNotice(result.reason.code); return }
+      const before: Cursor = { runId: run.id, offset: point.offset }
+      this.analysis = result.analysis
+      this.endEditingSilently()
+      this.options.onCrossRun(result, result.cursor, before)
+      return
+    }
     const plan = planBoundaryDeletion(this.analysis, run, point.offset, direction)
     if (plan.kind === 'none') return
     event.preventDefault()
@@ -501,6 +513,11 @@ export class StageEditor {
         this.analysis = result.analysis
         const before = this.pendingBefore
         this.pendingBefore = undefined
+        if (result.cursor) {
+          this.endEditingSilently()
+          this.options.onCrossRun(result, result.cursor, before)
+          return
+        }
         this.options.onCommit(result, { before, after: this.currentCursor(true) })
       },
       onReject: (why) => {
