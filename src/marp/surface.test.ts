@@ -90,6 +90,12 @@ describe('scrollTopForVisibleRow', () => {
 })
 
 describe('SlideSurface list appearance and interaction', () => {
+  it('reserves a stable scrollbar gutter for list sizing', () => {
+    const s = setup()
+    const style = [...s.surface.root.querySelectorAll('style')].map(node => node.textContent).join('\n')
+    expect(style).toMatch(/\.surface\[data-layout='list'\]\s*\{[^}]*scrollbar-gutter:\s*stable/)
+  })
+
   it('numbers each thumbnail and synchronizes selection and aria-current', () => {
     const s = setup()
     s.surface.update(deck(), 1)

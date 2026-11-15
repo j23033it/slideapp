@@ -47,6 +47,7 @@ export interface StageEditorOptions {
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor, selectionEnd?: Cursor): void
   onElementBold?(result: EditSuccess, elementId: string): void
   canBold?(): boolean
+  canEdit?(): boolean
   onBoldState?(active: boolean): void
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete?(id: string): boolean
@@ -79,6 +80,8 @@ export class StageEditor {
   private deck: RenderedDeck
   private current = 0
   private editing = false
+  private svgLabels = new Map<SVGTextElement, { group: number; label: number }>()
+  private svgInput?: { input: HTMLInputElement; element: SVGTextElement; group: number; label: number; value: string; visibility: string; priority: string }
   private suppressFinish = false
   private pendingBefore: Cursor | undefined
   private rejectionCount = 0
@@ -333,6 +336,7 @@ export class StageEditor {
       this.compositionEndTimer = null
       if (token !== this.composition.markEnded()) return
       this.adapter?.settleComposition()
+      this.commitSvgLabel()
       this.composition.flush(token)
     }, 0)
   }
@@ -344,6 +348,13 @@ export class StageEditor {
   }
 
   private readonly onBlur = (event: Event): void => {
+    if (this.svgInput && event.composedPath()[0] === this.svgInput.input) {
+      if (this.composition.isComposing) {
+        this.composition.defer(() => this.finishSvgLabel())
+        return
+      }
+      this.finishSvgLabel()
+    }
     this.settleComposition()
     if (!this.analysis.draft) return
     // 同じ空行ブロック内でのフォーカス移動では下書きを取り消さない
@@ -367,11 +378,27 @@ export class StageEditor {
   private readonly onClick = (raw: Event): void => {
     const event = raw as MouseEvent
     if (event.button !== 0) return
+    if (this.svgInput && this.hasPendingComposition()) return
     this.suppressEnterUntil = 0
     this.settleComposition()
     const target = event.composedPath()[0]
     const element = target instanceof Element ? target : null
     if (!element || !this.root.contains(element)) return
+    if (this.svgInput && element === this.svgInput.input) return
+    const svgText = element.closest<SVGTextElement>('svg text')
+    const svgLabel = svgText && this.svgLabels.get(svgText)
+    if (svgText && svgLabel) {
+      this.endEditing()
+      this.clearElementSelection()
+      this.beginSvgLabel(svgLabel.group, svgLabel.label)
+      return
+    }
+    if (element.closest('svg:not([data-marpit-svg])')) {
+      this.endEditing()
+      this.clearElementSelection()
+      this.options.onNotice('html')
+      return
+    }
     // ドラッグやダブルクリックで作った選択を、その直後の click で崩さない。
     // 選択の置換は今回の対象外なので、編集を始めずそのまま残す。
     const previousSelection = this.pointerSelection
@@ -462,6 +489,34 @@ export class StageEditor {
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
     if (event.composedPath().some(node => node instanceof Element && node.hasAttribute('data-sm-table-menu'))) return
+    if (this.svgInput && event.composedPath()[0] === this.svgInput.input) {
+      if (event.isComposing || event.keyCode === 229 || this.hasPendingComposition()) return
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && ['z', 'y'].includes(event.key.toLowerCase())) {
+        event.preventDefault(); event.stopPropagation()
+        this.finishSvgLabel()
+        this.options.onHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 'redo' : 'undo')
+        return
+      }
+      if ((event.key === 'Enter' || event.key === 'Escape') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault(); event.stopPropagation()
+        if (event.key !== 'Enter' || performance.now() > this.suppressEnterUntil) {
+          const { group, label } = this.svgInput
+          this.finishSvgLabel()
+          const next = [...this.svgLabels].find(([, entry]) => entry.group === group && entry.label === label)?.[0]
+          next?.focus({ preventScroll: true })
+        }
+      }
+      return
+    }
+    const target = event.composedPath()[0]
+    const label = target instanceof SVGTextElement && this.svgLabels.get(target)
+    if (label && (event.key === 'Enter' || event.key === ' ') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing) {
+      event.preventDefault(); event.stopPropagation()
+      this.endEditing()
+      this.clearElementSelection()
+      this.beginSvgLabel(label.group, label.label)
+      return
+    }
     if ((this.editing || this.selectedElement) && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'b') {
       event.preventDefault(); event.stopPropagation()
       if (!event.isComposing && event.keyCode !== 229 && !this.hasPendingComposition()) this.toggleBold()
@@ -584,6 +639,7 @@ export class StageEditor {
   }
 
   private readonly onBeforeInputCapture = (event: Event): void => {
+    if (this.svgInput && event.composedPath()[0] === this.svgInput.input) return
     if (!this.editing) return
     if (!(event instanceof InputEvent && event.isComposing) && this.cancelAbandonedDraft() && event instanceof InputEvent) {
       // The event's original target was removed by rollback. Replay text into the
@@ -770,6 +826,7 @@ export class StageEditor {
     this.surface.update(deck, current)
     this.bindEditingSession(analysis)
     this.decorate(this.analysis)
+    this.mapSvgLabels()
     this.selectedElement = null
     if (this.pendingElementSelection) {
       const pending = this.pendingElementSelection
@@ -805,6 +862,8 @@ export class StageEditor {
 
   /** 編集中なら残ったDOMをコミットして終了する（再描画は onFinish 経由）。 */
   endEditing(): void {
+    if (this.svgInput && this.composition.defer(() => this.endEditing())) return
+    this.finishSvgLabel()
     this.settleComposition()
     this.adapter?.finish()
   }
@@ -896,12 +955,168 @@ export class StageEditor {
       this.bindEditingSession(this.analysis)
     }
     this.decorate(this.analysis)
+    this.mapSvgLabels()
     this.editing = false
     this.pendingBefore = undefined
     this.options.onEnd()
   }
 
+  /** Bind source ranges only when all diagrams and their text match the rendered slide. */
+  private mapSvgLabels(): void {
+    for (const text of this.svgLabels.keys()) {
+      text.removeAttribute('data-sm-svg-label')
+      text.removeAttribute('tabindex')
+      text.removeAttribute('role')
+      text.removeAttribute('aria-label')
+    }
+    this.svgLabels.clear()
+    const groups = this.engine.svgLabelGroups()
+      .map((entry, group) => ({ ...entry, group }))
+      .filter(entry => entry.slide === this.current)
+    const section = this.root.querySelector('.slot[data-active="true"] section')
+    if (!section || !groups.length) return
+    const diagrams = [...section.querySelectorAll<SVGSVGElement>('svg')]
+    if (diagrams.length !== groups.length) return
+    const matches: Array<{ text: SVGTextElement; group: number; label: number; value: string }> = []
+    for (let i = 0; i < diagrams.length; i++) {
+      const diagram = diagrams[i]!
+      const source = new DOMParser().parseFromString(groups[i]!.markup, 'image/svg+xml')
+      const sourceRoot = source.documentElement
+      const original = [sourceRoot, ...sourceRoot.querySelectorAll('*')]
+      const rendered = [diagram, ...[...diagram.querySelectorAll('*')].filter(node => !node.closest('[data-sm-marker-copy]'))]
+      const comparable = (node: Element) => [...node.attributes]
+        .filter(attr => !['style', 'font-family', 'xmlns'].includes(attr.name.toLowerCase()) && !attr.name.startsWith('data-sm-') && !(node.hasAttribute('data-sm-svg-label') && ['tabindex', 'role', 'aria-label'].includes(attr.name.toLowerCase())))
+        .map(attr => [attr.name.toLowerCase(), attr.value]).sort((a, b) => a[0]!.localeCompare(b[0]!))
+      const texts = [...diagram.querySelectorAll<SVGTextElement>('text')].filter(node => !node.closest('[data-sm-marker-copy]'))
+      const labels = groups[i]!.labels
+      if (source.querySelector('parsererror') || original.length !== rendered.length || original.some((node, j) =>
+        node.localName !== rendered[j]!.localName || JSON.stringify(comparable(node)) !== JSON.stringify(comparable(rendered[j]!))) ||
+        texts.length !== labels.length || texts.some((text, j) => text.children.length !== 0 || text.textContent !== labels[j]!.text)) {
+        this.svgLabels.clear()
+        return
+      }
+      for (let j = 0; j < texts.length; j++) matches.push({ text: texts[j]!, group: groups[i]!.group, label: j, value: labels[j]!.text })
+    }
+    for (const { text, group, label, value } of matches) {
+      text.setAttribute('data-sm-svg-label', '')
+      text.setAttribute('tabindex', '0')
+      text.setAttribute('role', 'button')
+      text.setAttribute('aria-label', `図の文字を編集: ${value}`)
+      this.svgLabels.set(text, { group, label })
+    }
+  }
+
+  private beginSvgLabel(group: number, label: number): void {
+    if (this.options.canEdit && !this.options.canEdit()) { this.options.onNotice('element-readonly'); return }
+    const element = [...this.svgLabels].find(([, entry]) => entry.group === group && entry.label === label)?.[0]
+    const source = this.engine.svgLabelGroups()[group]?.labels[label]
+    const frame = element?.closest<HTMLElement>('.frame')
+    if (!element || !source || !frame) return
+    if (this.options.latest().analysis !== this.analysis || element.textContent !== source.text) {
+      this.options.onNotice('stale-run')
+      return
+    }
+    const bounds = element.getBoundingClientRect(), frameBounds = frame.getBoundingClientRect()
+    const scaleX = frameBounds.width / frame.offsetWidth, scaleY = frameBounds.height / frame.offsetHeight
+    const matrix = element.getScreenCTM()
+    if (!scaleX || !scaleY || !matrix) return
+    const style = getComputedStyle(element)
+    const fontSize = (Number.parseFloat(style.fontSize) || 16) * Math.hypot(matrix.c, matrix.d) / scaleY
+    let left = bounds.left, top = bounds.top
+    if (!bounds.width || !bounds.height) {
+      const x = element.x.baseVal.numberOfItems ? element.x.baseVal.getItem(0).value : 0
+      const y = element.y.baseVal.numberOfItems ? element.y.baseVal.getItem(0).value : 0
+      const point = new DOMPoint(x, y).matrixTransform(matrix)
+      left = point.x
+      top = point.y - fontSize * scaleY
+    }
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.value = source.text
+    input.setAttribute('aria-label', '図の文字を編集')
+    Object.assign(input.style, { position: 'absolute', zIndex: '20', boxSizing: 'border-box',
+      left: `${(left - frameBounds.left) / scaleX}px`, top: `${(top - frameBounds.top) / scaleY}px`,
+      width: `${Math.max(80, bounds.width / scaleX + 24)}px`, height: `${Math.max(24, fontSize + 4, bounds.height / scaleY + 4)}px`,
+      fontFamily: style.fontFamily, fontSize: `${fontSize}px`, fontWeight: style.fontWeight, color: 'var(--sm-text, #222)',
+      background: 'var(--sm-surface, white)', border: '1px solid var(--sm-accent, #0f6cbd)', padding: '0 2px' })
+    const context = document.createElement('canvas').getContext('2d')
+    const availableWidth = Math.max(24, frame.offsetWidth - (left - frameBounds.left) / scaleX)
+    const resizeInput = () => {
+      if (context) context.font = `${style.fontWeight} ${fontSize}px ${style.fontFamily}`
+      const textWidth = context?.measureText(input.value).width ?? 0
+      input.style.width = `${Math.min(availableWidth, Math.max(80, bounds.width / scaleX + 24, textWidth + 16))}px`
+    }
+    resizeInput()
+    const visibility = element.style.getPropertyValue('visibility'), priority = element.style.getPropertyPriority('visibility')
+    this.svgInput = { input, element, group, label, value: source.text, visibility, priority }
+    element.style.setProperty('visibility', 'hidden', 'important')
+    for (const type of ['beforeinput', 'paste']) input.addEventListener(type, event => event.stopPropagation())
+    input.addEventListener('input', event => {
+      event.stopPropagation()
+      resizeInput()
+      if (!(event as InputEvent).isComposing && !this.hasPendingComposition()) this.commitSvgLabel()
+    })
+    input.addEventListener('keydown', event => {
+      if (!(event.ctrlKey && ['s', 'e', 'o'].includes(event.key.toLowerCase()))) event.stopPropagation()
+    })
+    frame.append(input)
+    this.editing = true
+    this.options.onBegin(strings.status.editing.paragraph)
+    input.focus({ preventScroll: true })
+    input.select()
+  }
+
+  private commitSvgLabel(): boolean {
+    const state = this.svgInput
+    if (!state || state.input.value === state.value) return true
+    if (this.options.latest().analysis !== this.analysis) {
+      this.options.onNotice('stale-run')
+      return false
+    }
+    if (this.options.canEdit && !this.options.canEdit()) {
+      state.input.value = state.value
+      this.options.onNotice('element-readonly')
+      return false
+    }
+    const previous = state.value
+    const result = this.engine.applySvgLabelEdit(this.analysis.text, state.group, state.label, state.input.value)
+    if (!result.ok) { this.options.onNotice(result.reason.code); return false }
+    this.analysis = result.analysis
+    state.value = state.input.value
+    state.element.textContent = state.value
+    const runId = `svg-${this.current}-${state.group}-${state.label}`
+    this.options.onCommit(result, {
+      before: { runId, offset: previous.length, slideIndex: this.current },
+      after: { runId, offset: state.value.length, slideIndex: this.current },
+    })
+    return true
+  }
+
+  private finishSvgLabel(): void {
+    const state = this.svgInput
+    if (!state) return
+    const committed = this.commitSvgLabel()
+    this.svgInput = undefined
+    state.input.remove()
+    if (state.visibility) state.element.style.setProperty('visibility', state.visibility, state.priority)
+    else state.element.style.removeProperty('visibility')
+    this.editing = false
+    this.root.removeEventListener('compositionend', this.onCompositionEndSettled)
+    this.adapter?.dispose()
+    this.adapter = null
+    const latest = this.options.latest()
+    this.analysis = latest.analysis
+    this.deck = latest.deck
+    this.surface.update(this.deck, this.current)
+    this.bindEditingSession(this.analysis)
+    this.decorate(this.analysis)
+    this.mapSvgLabels()
+    this.options.onEnd()
+    if (!committed) this.options.onNotice('structure-changed')
+  }
+
   private endEditingSilently(): void {
+    this.finishSvgLabel()
     this.root.removeEventListener('compositionend', this.onCompositionEndSettled)
     if (!this.adapter) {
       this.editing = false

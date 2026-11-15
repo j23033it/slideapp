@@ -4,6 +4,7 @@ import { createEngine, type Analysis, type EditingEngine } from '../editing'
 import { installImagePathRule, rewriteCssUrls, type MarkdownItLike } from './urls'
 import { registerThemes, type ThemeCss, type ThemeRegistrationResult } from './themes'
 import { createBoxMarp } from './boxHtml'
+import { svgHtmlAllowlist } from '../export/pptx/svgAllowlist'
 
 /** 1デッキ分の描画結果 */
 export interface RenderedDeck {
@@ -104,7 +105,7 @@ export class MarpRenderer {
   private last: RenderedAnalysis | null = null
 
   constructor(private readonly toAssetUrl: (absolutePath: string) => string) {
-    this.marp = createBoxMarp()
+    this.marp = createBoxMarp({ svgHtmlAllowlist })
     installImagePathRule(this.marp.markdown as MarkdownItLike, () => this.baseDir, toAssetUrl)
     this.engine = createEngine(this.marp)
   }

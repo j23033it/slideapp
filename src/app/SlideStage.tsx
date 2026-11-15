@@ -70,6 +70,7 @@ export function SlideStage({
       onCrossRun: (result, target, before, selectionEnd) => callbacksRef.current.onCrossRun(result, target, before, selectionEnd),
       onElementBold: (result, id) => callbacksRef.current.onElementBold(result, id),
       canBold: () => callbacksRef.current.canBold(),
+      canEdit: () => callbacksRef.current.canBold(),
       onBoldState: active => callbacksRef.current.onBoldState(active),
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
       onElementDelete: (id) => callbacksRef.current.onElementDelete(id),
