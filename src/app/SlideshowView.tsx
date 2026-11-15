@@ -97,7 +97,7 @@ export function Slideshow({ deck, current, start, onExit, onIndex }: SlideshowPr
   }, [])
 
   return <div role="region" aria-label={strings.toolbar.slideshow} style={{ position: 'fixed', inset: 0, zIndex: 2147483647, background: state.blank === 'white' ? '#fff' : '#000', color: '#fff', cursor: hidden ? 'none' : 'default', userSelect: 'none' }}>
-    <div ref={hostRef} style={{ width: '100%', height: '100%', display: state.blank || state.ended ? 'none' : 'block', pointerEvents: 'none' }} />
+    <div ref={hostRef} style={{ width: '100%', height: '100%', display: state.blank || state.ended ? 'none' : 'flex', pointerEvents: 'none' }} />
     {state.ended && !state.blank ? <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: '16px Segoe UI, sans-serif' }}>{strings.slideshow.end}</div> : null}
   </div>
 }

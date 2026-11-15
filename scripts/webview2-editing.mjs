@@ -865,6 +865,8 @@ try {
     await startShow()
     checkBounds(table, await evaluate(bounds(showRoot,'table')), 'Table')
     checkBounds(box, await evaluate(bounds(showRoot,'[data-box]')), 'Text box')
+    const margins = await evaluate(`(() => { const r=${showRoot}.querySelector('section').getBoundingClientRect(); return [r.left, innerWidth-r.right, r.top, innerHeight-r.bottom] })()`)
+    check(Math.abs(margins[0]-margins[1]) < 2 && Math.abs(margins[2]-margins[3]) < 2, 'Slideshow slide is not centered: ' + JSON.stringify(margins))
     check(await evaluate(`!${showRoot}.querySelector('[data-sm-selected], [data-sm-box-handle], [contenteditable="true"]')`), 'Editing decorations leaked into slideshow')
     await key('ArrowRight'); await waitFor(`${showText}?.includes('日本語入力のテスト')`)
     await key('Escape'); await waitFor(`!${show}`)
