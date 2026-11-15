@@ -84,6 +84,18 @@ export const strings = {
   },
   appName: 'SlideApp',
 
+  git: {
+    label: 'コミット', title: '開いているファイルの変更をコミット',
+    branch: (branch: string) => `ブランチ ${branch} にコミット`, detached: '現在のHEADにコミット',
+    placeholder: 'コミットメッセージ', cancel: 'キャンセル', working: 'コミット中…',
+    success: (commit: string) => `コミットしました（${commit}）`,
+    failed: (message: string) => `コミットできませんでした：${message}`,
+    conflict: 'ファイルが外部で変更されたため、コミットしませんでした',
+    unavailable: 'Gitが見つかりません', outside: 'Gitで管理されていないファイルです',
+    ignored: '.gitignoreで除外されたファイルです', clean: 'コミットする変更がありません',
+    error: (message: string) => `Gitの状態を確認できません：${message}`,
+  },
+
   toolbar: {
     slideshow: 'スライドショー', slideshowTitle: '最初から開始 (F5)',
     bold: 'B', boldTitle: '太字 (Ctrl+B)', boldUnavailable: 'この要素は太字にできません',

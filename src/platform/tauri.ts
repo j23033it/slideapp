@@ -11,6 +11,7 @@ import {
   type FileEventHandlers,
   type FileRemovedEvent,
   type FileUnreadableEvent,
+  type GitFileStatus,
   type OpenedFile,
   type Platform,
   type SaveOutcome,
@@ -54,6 +55,14 @@ export const tauriPlatform: Platform = {
 
   writeBinary(path: string, bytes: Uint8Array): Promise<void> {
     return invoke<void>('write_binary', { path, bytes: Array.from(bytes) })
+  },
+
+  gitFileStatus(path: string): Promise<GitFileStatus> {
+    return invoke<GitFileStatus>('git_file_status', { path })
+  },
+
+  gitCommitFile(path: string, message: string, expectedHash: string): Promise<{ commit: string }> {
+    return invoke<{ commit: string }>('git_commit_file', { path, message, expectedHash })
   },
 
   openFile(path: string): Promise<OpenedFile> {

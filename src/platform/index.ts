@@ -7,6 +7,7 @@ export const platform: Platform = tauriPlatform
 export { DEFAULT_SETTINGS } from './types'
 export type {
   AppSettings,
+  GitFileStatus,
   OpenedFile,
   Platform,
   ThemeConfig,
