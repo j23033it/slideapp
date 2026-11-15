@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createEngine, resolveCursor } from '../src/editing';
 import { applyEdit, joinEols, splitEols } from '../src/document';
 import { mapBlockLines } from '../src/editing/blocks';
-import type { Token } from '../src/editing/markdown-types';
+import type { CoreState, Token } from '../src/editing/markdown-types';
 
 function setup(source: string, options = {}) {
   const marp = new Marp({ script: false, ...options });
@@ -22,6 +22,34 @@ function editRun(source: string, oldText: string, next: string, occurrence = 0) 
 }
 
 describe('source mappings and validated edits', () => {
+  it.each(['target', 'other'])('rejects element bold when %s inline has no position', missing => {
+    const source = 'target\n\nother';
+    const marp = new Marp({ script: false });
+    const engine = createEngine(marp);
+    marp.markdown.core.ruler.before('sm_source_map', 'test_missing_inline_position', (state: CoreState) => {
+      const inline = state.tokens.find(token => token.type === 'inline' && token.content === missing);
+      if (inline) inline.map = null;
+    });
+    const analysis = engine.analyze(source);
+    const element = analysis.elementSources!.elements.find(item => item.kind === 'paragraph' && item.start === 0)!;
+    expect(engine.applyElementBold(source, element.id)).toMatchObject({ ok: false, reason: { code: 'bold-invalid-position' } });
+  });
+  it.each(['header', 'footer'])('rejects element bold if generated %s text changes during reanalysis', margin => {
+    const source = '---\nmarp: true\nheader: Generated\nfooter: Footer\n---\n\ntarget';
+    const marp = new Marp({ script: false });
+    const engine = createEngine(marp);
+    let renders = 0;
+    marp.markdown.core.ruler.before('sm_source_map', 'test_changed_header', (state: CoreState) => {
+      if (state.inlineMode) return;
+      if (++renders < 2) return;
+      const index = state.tokens.findIndex(token => token.type === `marpit_${margin}_open`);
+      const child = state.tokens[index + 1]?.children?.find(token => token.type === 'text');
+      if (child) child.content = 'Changed';
+    });
+    const analysis = engine.analyze(source);
+    const element = analysis.elementSources!.elements.find(item => item.kind === 'paragraph')!;
+    expect(engine.applyElementBold(source, element.id)).toMatchObject({ ok: false, reason: { code: 'bold-invalid-position' } });
+  });
   it.each([
     'before <b>HTML</b> after',
     'before <b><i>HTML</i></b> after',

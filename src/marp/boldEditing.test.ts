@@ -3,6 +3,25 @@ import { MarpRenderer } from './renderer'
 import { DocumentModel } from '../document'
 
 describe('bold editing', () => {
+  it('toggles a text selection while preserving generated headers and footers', () => {
+    const source = '---\nmarp: true\npaginate: true\nheader: Global **header**\nfooter: Global *footer*\n---\n\nfirst\n\n---\n\n<!-- header: Local header -->\n<!-- footer: Local footer -->\n\nhello world'
+    const renderer = new MarpRenderer(path => path)
+    const analysis = renderer.analyze(source, null).analysis
+    const run = analysis.runs.find(item => item.text === 'hello world')!
+    const margins = (html: string) => (html.match(/<(header|footer)\b[^>]*>[\s\S]*?<\/\1>/g) ?? []).map(value => value.replace(/ data-sm-run="[^"]*"/g, ''))
+    const originalMargins = margins(analysis.html)
+    expect(originalMargins).toHaveLength(4)
+    const added = renderer.editing.applyBold(source, { runId: run.id, offset: 0 }, { runId: run.id, offset: 5 })
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    expect(added.newText).toBe(source.slice(0, -11) + '**hello** world')
+    expect(margins(added.analysis.html)).toEqual(originalMargins)
+    const removed = renderer.editing.applyBold(added.newText, added.cursor, added.selectionEnd)
+    expect(removed.ok).toBe(true)
+    if (!removed.ok) return
+    expect(removed.newText).toBe(source)
+    expect(margins(removed.analysis.html)).toEqual(originalMargins)
+  })
   it.each([
     ['hello world', 0, 5, '**hello** world'],
     ['hello world', 6, 11, 'hello **world**'],

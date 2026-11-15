@@ -40,6 +40,37 @@ describe('element bold', () => {
     const element = renderer.analyze(source, null).analysis.elementSources!.elements[0]
     expect(renderer.editing.applyElementBold(source, element.id)).toMatchObject({ ok: false, reason: { code: 'bold-invalid-position' } })
   })
+  it.each([
+    ['paragraph', 'hello', '**hello**'],
+    ['list', '- one\n- two', '- **one**\n- **two**'],
+    ['table', '| head | other |\n| --- | --- |\n| one | two |', '| **head** | **other** |\n| --- | --- |\n| **one** | **two** |'],
+    ['box', '<div data-box style="position:absolute; left:1px; top:2px; width:100px">\n\none\n\ntwo\n\n</div>', '<div data-box style="position:absolute; left:1px; top:2px; width:100px">\n\n**one**\n\n**two**\n\n</div>'],
+  ] as const)('toggles %s with global and local headers and footers', (kind, body, expected) => {
+    const global = '---\nmarp: true\npaginate: true\nheader: Global **header**\nfooter: Global *footer*\n---\n\n'
+    const local = '\n\n---\n\n<!-- header: Local **header** -->\n<!-- footer: Local *footer* -->\n\n'
+    for (const [prefix, suffix, slide] of [[global, local + 'other slide', 0], [global + 'other slide' + local, '', 1]] as const) {
+      const source = prefix + body + suffix
+      const renderer = new MarpRenderer(path => path)
+      const analysis = renderer.analyze(source, null).analysis
+      const element = analysis.elementSources!.elements.find(item => item.kind === kind && item.slide === slide)!
+      expect(element, JSON.stringify(analysis.elementSources)).toBeDefined()
+      const margins = (html: string) => (html.match(/<(header|footer)\b[^>]*>[\s\S]*?<\/\1>/g) ?? []).map(value => value.replace(/ data-sm-run="[^"]*"/g, ''))
+      const originalMargins = margins(analysis.html)
+      expect(originalMargins).toHaveLength(4)
+      expect(originalMargins.join(' ')).toContain('Global')
+      expect(originalMargins.join(' ')).toContain('Local')
+      const added = renderer.editing.applyElementBold(source, element.id)
+      expect(added.ok).toBe(true)
+      if (!added.ok) return
+      expect(added.newText).toBe(prefix + expected + suffix)
+      expect(margins(added.analysis.html)).toEqual(originalMargins)
+      const removed = renderer.editing.applyElementBold(added.newText, added.elementId)
+      expect(removed.ok).toBe(true)
+      if (!removed.ok) return
+      expect(removed.newText).toBe(source)
+      expect(margins(removed.analysis.html)).toEqual(originalMargins)
+    }
+  })
   it('preserves mixed EOL and BOM and uses one undo/redo', () => {
     const model = new DocumentModel('- one\r\n- two\n\r\nafter\r\n', { hasBom: true })
     const original = model.serialize()

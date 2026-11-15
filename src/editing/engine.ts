@@ -93,7 +93,7 @@ export type ListIndentResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> 
 export type BoldResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor; selectionEnd: Cursor }) | Extract<EditResult, { ok: false }>;
 
 export type ElementBoldResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { elementId: string }) | Extract<EditResult, { ok: false }>;
-interface InlineRange { token: Token; lines?: [number, number]; start?: number; end?: number }
+interface InlineRange { token: Token; lines?: [number, number]; start?: number; end?: number; marginal: boolean }
 
 interface StrongRange { open: Token; close: Token; start: number; end: number; closeStart: number; closeEnd: number; runs: Run[]; textOnly: boolean }
 
@@ -122,7 +122,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
   wrapRenderers(md);
 
   md.core.ruler.before('marpit_slide', 'sm_slide_sources', state => {
-    if (!pending) return;
+    if (!pending || state.inlineMode) return;
     const slides = collectSlideSources(state.src, state.tokens, md);
     if (!emptyPositions.length) {
       pending.slideSources = slides;
@@ -152,7 +152,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
   });
 
   md.core.ruler.push('sm_source_map', state => {
-    if (!pending) return;
+    if (!pending || state.inlineMode) return;
     collect(state.src, state.tokens, pending, ++revision, reuseIds, (ranges, runs, inlines) => { strongRanges.set(pending!, ranges); boldRuns.set(pending!, runs); inlineRanges.set(pending!, inlines); });
     if (emptyPositions.length) {
       const probePositions = emptyPositions.map((position, index) => position + index);
@@ -393,6 +393,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     const starts = [0];
     for (let i = 0; i < analysis.text.length; i++) if (analysis.text[i] === '\n') starts.push(i + 1);
     return all.filter(entry => {
+      if (entry.marginal) return false;
       if (entry.start !== undefined && entry.end !== undefined) return entry.start >= element.start && entry.end <= element.end;
       const map = entry.lines;
       return map && (starts[map[0]] ?? -1) >= element.start && (starts[map[1]] ?? analysis.text.length) <= element.end;
@@ -419,7 +420,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     const fail = (): ElementBoldResult => { current = before; return { ok: false, reason: reason('bold-invalid-position', 'bold-invalid-position') }; };
     if (!before || before.text !== text || before.draft) return fail();
     const entries = elementInlines(before, elementId);
-    if (!entries?.length || (inlineRanges.get(before) ?? []).some(entry => entry.token.content.trim() && !entry.lines && entry.start === undefined) ||
+    if (!entries?.length || (inlineRanges.get(before) ?? []).some(entry => !entry.marginal && entry.token.content.trim() && !entry.lines && entry.start === undefined) ||
         entries.some(entry => entry.start === undefined || entry.end === undefined || entry.start >= entry.end)) return fail();
     const remove = entries.every(wholeStrong);
     const ranges = rawStrongRanges.get(before) ?? strongRanges.get(before) ?? [];
@@ -681,7 +682,10 @@ function collect(source: string, tokens: Token[], analysis: Analysis, revision: 
       if (table && row?.map) block.lines = row.map;
       const left = token.content.length - token.content.trimStart().length, right = token.content.trimEnd().length;
       const first = mapping && sourceRange(mapping, left, left), last = mapping && sourceRange(mapping, right, right);
-      inlines.push({ token, lines: table ? row?.map ?? undefined : token.map ?? undefined, start: first?.start, end: last?.end });
+      // Marpit wraps directive-generated content in these tokens; pagination is
+      // represented by slide attributes, not inline tokens.
+      const marginal = stack.some(parent => parent.type === 'marpit_header_open' || parent.type === 'marpit_footer_open');
+      inlines.push({ token, lines: table ? row?.map ?? undefined : token.map ?? undefined, start: first?.start, end: last?.end, marginal });
       const html = htmlContents(token.children ?? []);
       const blocked = analysis.text.includes('\0') ? reason('nul', 'NUL source is read-only') :
         table && inContainer ? reason('table', 'Tables inside containers are read-only') :

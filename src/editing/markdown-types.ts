@@ -17,7 +17,7 @@ export interface Ruler<T> {
   before(name: string, newName: string, rule: T): void;
   push(name: string, rule: T): void;
 }
-export interface CoreState { src: string; tokens: Token[] }
+export interface CoreState { src: string; tokens: Token[]; inlineMode?: boolean }
 export type RenderRule = (tokens: Token[], index: number, options: unknown, env: unknown, self: Renderer) => string;
 export interface Renderer { rules: Record<string, RenderRule>; renderToken: RenderRule }
 export interface Markdown {
