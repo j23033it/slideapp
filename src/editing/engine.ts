@@ -9,6 +9,7 @@ import { planNewline, type NewlineKind } from './newline';
 import { emptyItemPositions, tokenSignature, withoutEmptyItemShells } from './empty';
 import { captureLists, planListIndent, type ListSnapshot, type ListIndentDirection } from './listIndent';
 import { collectElements, elementReason, planElementOperation, type ElementOperation, type ElementOperationResult } from './elements';
+import { captureTableSnapshots, planTableOperation, validateTableOperation, type TableOperation, type TableResult } from './tableOperations';
 import { reason, type Analysis, type Block, type EditResult, type ReadonlyReason, type Run } from './types';
 
 const engines = new WeakMap<object, EditingEngine>();
@@ -79,6 +80,7 @@ export interface EditingEngine {
   /** Commit pending text input/IME and finish drafts before calling. Indices are zero-based. */
   applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult;
   applyElementOperation(text: string, operation: ElementOperation, eols: readonly Eol[]): ElementOperationResult;
+  applyTableOperation(text: string, operation: TableOperation, eols: readonly Eol[]): TableResult;
 }
 
 export type ListIndentResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
@@ -186,14 +188,16 @@ export function createEngine(marp: MarpLike): EditingEngine {
           // Permanent empty items may gain only their editable paragraph shell.
           if (extraEmpty === undefined && tokenSignature(withoutEmptyTableInlines(withoutEmptyItemShells(actual)), shape) !==
               tokenSignature(withoutEmptyTableInlines(withoutEmptyItemShells(analysisTokens.get(editable) ?? [])), shape)) {
-            current = analysis; return analysis;
+            captureTableSnapshots(analysis); current = analysis; return analysis;
           }
           rawTokens.set(editable, actual);
           editable.slideSources = analysis.slideSources;
           editable.elementSources = analysis.elementSources;
+          captureTableSnapshots(editable);
           return editable;
         }
       }
+      captureTableSnapshots(analysis);
       current = analysis;
       return analysis;
     } finally { pending = undefined; reuseIds = undefined; emptyPositions = []; }
@@ -425,7 +429,27 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit: plan, newText, analysis: after };
   }
 
-  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation, applyElementOperation };
+  function applyTableOperation(text: string, operation: TableOperation, eols: readonly Eol[]): TableResult {
+    const before = current;
+    const fail = (code: import('./tableOperations').TableReasonCode): TableResult => {
+      current = before; return { ok: false, reason: { code, description: code } };
+    };
+    if (!before || before.text !== text || before.draft) return fail('element-ambiguous');
+    if (text.includes('\0')) return fail('element-readonly');
+    try { joinEols(text, eols); } catch { return fail('element-ambiguous'); }
+    const edits = planTableOperation(before, operation, eols);
+    if (!Array.isArray(edits)) return fail(edits.code);
+    let newText = text;
+    try {
+      for (const edit of edits) newText = replaceRange(newText, edit);
+      const analysis = renderAnalysis(newText);
+      const validated = validateTableOperation(before, analysis, operation);
+      if (!validated) return fail('element-structure-changed');
+      return { ok: true, edits, newText, analysis, ...validated };
+    } catch { return fail('element-structure-changed'); }
+  }
+
+  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation };
   engines.set(marp, engine);
   return engine;
 }

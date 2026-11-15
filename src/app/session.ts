@@ -37,6 +37,8 @@ export function editorSessionSaveState(session: EditorSession): SaveState {
 /** 表示中のスライドに渡す操作 */
 export interface StageApi {
   endEditing(): void
+  insertionAnchor?(): string | undefined
+  selectElementOnRender?(id: string): void
   /** 最後に編集面内で観測したカーソル。タブを戻したときに使う */
   captureCursor?(): Cursor | undefined
   /** IME変換中か。変換中は確定とコミットが終わるまで操作を保留する */

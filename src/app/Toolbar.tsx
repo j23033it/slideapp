@@ -1,5 +1,6 @@
 import type { ThemePreference } from '../platform'
 import { strings } from './strings'
+import { TablePicker } from './TablePicker'
 
 export interface ToolbarProps {
   theme: ThemePreference
@@ -10,6 +11,9 @@ export interface ToolbarProps {
   exporting: boolean
   canUndo: boolean
   canRedo: boolean
+  tableDisabledReason?: string
+  onTableOpen: () => void
+  onInsertTable: (columns: number, rows: number) => void
   onOpen: () => void
   onSave: () => void
   onExportPptx: () => void
@@ -36,6 +40,9 @@ export function Toolbar({
   exporting,
   canUndo,
   canRedo,
+  tableDisabledReason,
+  onTableOpen,
+  onInsertTable,
   onOpen,
   onSave,
   onExportPptx,
@@ -102,6 +109,8 @@ export function Toolbar({
         ↷
       </button>
 
+      <div class="toolbar-divider" />
+      <TablePicker disabled={busy || !!tableDisabledReason} disabledReason={tableDisabledReason} onOpen={onTableOpen} onInsert={onInsertTable} />
       <div class="toolbar-divider" />
 
       <button

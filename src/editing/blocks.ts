@@ -37,6 +37,23 @@ export function sourceRange(mapping: LineMapping[], start: number, end: number):
   if (line) return { start: line.sourceStart + start - line.inlineStart, end: line.sourceStart + end - line.inlineStart };
 }
 
+/** Delimiter coordinates use the same escapedSplit rule as cell mapping. */
+export function tablePipes(source: string, line: number): { positions: number[]; escaped: boolean } | undefined {
+  const lines = source.split('\n'), raw = lines[line];
+  if (raw === undefined || /^[ \t]/.test(raw)) return;
+  const lineStart = lines.slice(0, line).reduce((n, value) => n + value.length + 1, 0);
+  const positions: number[] = [];
+  let escaped = false, hasEscape = false;
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === '|') {
+      if (escaped) hasEscape = true;
+      else positions.push(lineStart + i);
+    }
+    escaped = raw[i] === '\\';
+  }
+  return { positions, escaped: hasEscape };
+}
+
 /** Map cells by column using markdown-it table's escapedSplit delimiter rules. */
 export function tableCells(source: string, line: number): (LineMapping & { escaped: boolean })[] | undefined {
   const lines = source.split('\n'), raw = lines[line];

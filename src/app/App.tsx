@@ -45,6 +45,8 @@ import {
   type DiskObservation,
 } from './sync'
 import { Toolbar } from './Toolbar'
+import { tableOperationReason, applyTableTransaction, insertTableTransaction, type TableCommand } from '../editing/tableOperations'
+import type { TableMenuTarget } from './tableMenu'
 
 const MIN_SIDEBAR_WIDTH = 120
 const MAX_SIDEBAR_WIDTH = 480
@@ -240,6 +242,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const bannerRef = useRef<Banner | null>(null)
   const fileProblemRef = useRef(false)
   const focusSeq = useRef(0)
+  const tableAnchor = useRef<string | undefined>()
   const externalRef = useRef<(change: ExternalChange) => void>(() => {})
   const pendingUpdateExternalRef = useRef<{ change: ExternalChange; observation: DiskObservation } | null>(null)
   const externalChangeRequest = useRef(0)
@@ -1019,7 +1022,55 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   )
   externalRef.current = handleExternal
 
+  const runTableInsertion = async (columns: number, rows: number) => {
+    const target = sessionRef.current, activation = activationGeneration.current
+    const anchor = tableAnchor.current
+    if (!target) return
+    await waitForComposition()
+    if (!workspaceAlive.current || !activeWorkspaceRef.current || activation !== activationGeneration.current ||
+      sessionRef.current !== target || pendingRef.current || openingRef.current || viewRef.current.busy ||
+      updateInstallLockedRef.current || target.conflict || target.model.state === 'readonly') return
+    const before = stageApi.current?.captureCursor?.()
+    stageApi.current?.endEditing()
+    const result = insertTableTransaction(target.model, target.renderer.editing, currentRef.current, columns, rows, { anchor, before })
+    if (!result.ok) { sync({ detail: strings.tableOperations.reasons[result.reason.code] }); return }
+    analyzeSession(target, result.analysis)
+    target.focus = result.cursor ? nextFocus(result.cursor) : undefined
+    syncDeck({ detail: null })
+  }
+
+  const tableReason = (target: TableMenuTarget, command: TableCommand | 'delete-table') => {
+    const session = sessionRef.current
+    if (!session || session.conflict || session.model.state === 'readonly' || updateInstallLockedRef.current || viewRef.current.busy) return 'element-readonly' as const
+    if (session.analysis.slideSources?.reason?.code === 'slide-heading-divider') return 'element-heading-divider' as const
+    if (command === 'delete-table') {
+      const element = session.analysis.elementSources?.elements.find(entry => entry.id === target.elementId && entry.kind === 'table')
+      return !element || element.unsafe ? 'element-ambiguous' as const : undefined
+    }
+    return tableOperationReason(session.analysis, { ...target, command })?.code
+  }
+
+  const runTableCommand = async (target: TableMenuTarget, command: TableCommand | 'delete-table') => {
+    const session = sessionRef.current, activation = activationGeneration.current
+    if (!session) return
+    await waitForComposition()
+    if (!workspaceAlive.current || !activeWorkspaceRef.current || activation !== activationGeneration.current ||
+      sessionRef.current !== session || pendingRef.current || openingRef.current || viewRef.current.busy ||
+      updateInstallLockedRef.current || session.conflict || session.model.state === 'readonly') return
+    const before = stageApi.current?.captureCursor?.()
+    stageApi.current?.endEditing()
+    if (command === 'delete-table') { stageCallbacks.onElementDelete(target.elementId); return }
+    const result = applyTableTransaction(session.model, session.renderer.editing, session.analysis, { ...target, command }, { before })
+    if (!result.ok) { sync({ detail: strings.tableOperations.reasons[result.reason.code] }); return }
+    analyzeSession(session, result.analysis)
+    session.focus = result.cursor ? nextFocus(result.cursor) : undefined
+    if (!result.cursor) stageApi.current?.selectElementOnRender?.(result.elementId)
+    syncDeck({ detail: null })
+  }
+
   const stageCallbacks: SlideStageCallbacks = {
+    onTableReason: tableReason,
+    onTableCommand: (target, command) => { void runTableCommand(target, command) },
     onElementSelect: (kind) => sync({ detail: kind ? strings.elementOperations.selected[kind] : null }),
     onElementDelete: (id) => {
       const session = sessionRef.current
@@ -1335,6 +1386,10 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         theme={settings.theme}
         sidebarCollapsed={sidebarCollapsed}
         busy={view.busy}
+        tableDisabledReason={!session ? strings.toolbar.noFile : session.conflict ? strings.toolbar.conflict :
+          view.saveState === 'readonly' ? strings.toolbar.readonly : session.analysis.slideSources?.reason?.code === 'slide-heading-divider' ? strings.toolbar.headingDivider : undefined}
+        onTableOpen={() => { tableAnchor.current = stageApi.current?.insertionAnchor?.() }}
+        onInsertTable={(columns, rows) => { void runTableInsertion(columns, rows) }}
         canSave={session !== null && view.saveState !== 'readonly'}
         canExport={session !== null}
         exporting={exporting}

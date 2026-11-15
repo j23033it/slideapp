@@ -81,6 +81,7 @@ export class StageEditor {
   private recoveringDraftSelection = false
   private pointerSelection: Range | null | undefined
   private selectedElement: string | null = null
+  private pendingElementSelection: string | null = null
   private selectedStyle?: { element: HTMLElement; outline: string; outlinePriority: string; offset: string; offsetPriority: string; tabindex: string | null }
   private imageHandles?: HTMLDivElement
   private resizeObserver?: ResizeObserver
@@ -327,6 +328,7 @@ export class StageEditor {
 
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
+    if (event.composedPath().some(node => node instanceof Element && node.hasAttribute('data-sm-table-menu'))) return
     if (event.key === 'Tab' && this.editing) {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
       event.preventDefault()
@@ -584,12 +586,29 @@ export class StageEditor {
     this.bindEditingSession(analysis)
     this.decorate(this.analysis)
     this.selectedElement = null
-    if (selected) this.selectElement(selected, false)
+    if (this.pendingElementSelection) {
+      const pending = this.pendingElementSelection
+      this.pendingElementSelection = null
+      this.selectElement(pending)
+    } else if (selected) this.selectElement(selected, false)
     if (focus && focus.seq !== this.lastFocusSeq) {
       this.lastFocusSeq = focus.seq
       this.focusRun(focus.cursor)
     }
   }
+
+  /** Capture before moving focus to a toolbar or context menu. */
+  insertionAnchor(): string | undefined {
+    if (this.selectedElement) return this.selectedElement
+    const node = selectionFor(this.root)?.focusNode ?? null
+    return runElementOf(node)?.closest<HTMLElement>('[data-sm-element]')?.dataset.smElement
+  }
+
+  isTableActive(id: string): boolean {
+    return this.selectedElement === id || (this.editing && this.insertionAnchor() === id)
+  }
+
+  selectElementOnRender(id: string): void { this.pendingElementSelection = id }
 
   /** 編集中なら残ったDOMをコミットして終了する（再描画は onFinish 経由）。 */
   endEditing(): void {
