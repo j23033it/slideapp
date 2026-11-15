@@ -20,8 +20,9 @@ import {
 import { planBoundaryDeletion, areRunsDomAdjacent } from './runDeletion'
 import { CompositionGate } from './session'
 import { strings } from './strings'
-import { selectionOutlineWidth, toSlideRect } from './elementGeometry'
+import { limitBoxPosition, selectionOutlineWidth, toSlideRect } from './elementGeometry'
 import { beginHandleDrag } from './handleDrag'
+import type { BoxGeometry } from '../editing/boxPosition'
 
 export type EditSuccess = Extract<EditResult<SourceEdit | readonly SourceEdit[]>, { ok: true }>
 
@@ -38,15 +39,16 @@ export interface StageFocus {
 export interface StageEditorOptions {
   /** 直近に採用された解析結果とデッキ（編集終了時の再描画に使う） */
   latest(): { analysis: Analysis; deck: RenderedDeck }
-  onBegin(label: string): void
+  onBegin(label: string, elementId?: string): void
   onEnd(): void
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete?(id: string): boolean
-  onElementSelect?(kind: ElementKind | null): void
+  onElementSelect?(kind: ElementKind | null, id?: string): void
   onImageResize?(id: string, width: number, slideWidth: number): void
+  onBoxPlace?(id: string, geometry: BoxGeometry): void
 }
 
 function labelForBlock(block: HTMLElement | null): string {
@@ -193,12 +195,102 @@ export class StageEditor {
         this.positionImageHandles(element)
       }
     }
-    if (notify) this.options.onElementSelect?.(source.kind)
+    if (source.kind === 'box') {
+      const frame = element.closest<HTMLElement>('.frame')
+      if (frame) {
+        const handles = document.createElement('div')
+        handles.setAttribute('aria-hidden', 'true')
+        Object.assign(handles.style, { position: 'absolute', pointerEvents: 'none' })
+        for (const side of ['left', 'right'] as const) {
+          const handle = document.createElement('span')
+          handle.dataset.smBoxHandle = side
+          Object.assign(handle.style, { position: 'absolute', left: side === 'left' ? '0' : '100%', top: '50%', transform: 'translate(-50%, -50%)', boxSizing: 'border-box', background: 'white', borderStyle: 'solid', borderColor: 'var(--sm-accent, #0f6cbd)', pointerEvents: 'auto', cursor: 'ew-resize' })
+          handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || this.hasPendingComposition()) return
+            event.preventDefault(); event.stopPropagation()
+            this.beginBoxGesture(event, element, id, side)
+          })
+          handles.append(handle)
+        }
+        frame.append(handles)
+        this.imageHandles = handles
+        this.positionImageHandles(element)
+      }
+    }
+    if (notify) this.options.onElementSelect?.(source.kind, id)
   }
 
-  private readonly onPointerDown = (): void => {
+  private limitPosition(geometry: BoxGeometry, height: number): BoxGeometry {
+    return limitBoxPosition(geometry, height, this.deck.width, this.deck.height)
+  }
+
+  private beginBoxGesture(event: PointerEvent, element: HTMLElement, id: string, mode: 'move' | 'left' | 'right', clickThrough = false): void {
+    const frame = element.closest<HTMLElement>('.frame')
+    const source = this.analysis.elementSources?.elements.find(entry => entry.id === id && entry.slide === this.current)
+    if (!frame || !source || !this.options.onBoxPlace) return
+    const rect = toSlideRect(element.getBoundingClientRect(), frame.getBoundingClientRect(), frame.offsetWidth, frame.offsetHeight)
+    if (!rect) return
+    const original = source.boxStyle ? { left: source.boxStyle.left, top: source.boxStyle.top, width: source.boxStyle.width } :
+      { left: Math.round(rect.x), top: Math.round(rect.y), width: Math.max(40, Math.round(rect.width)) }
+    const saved = element.getAttribute('style')
+    let geometry = original, moved = false
+    const restore = () => {
+      if (saved === null) element.removeAttribute('style'); else element.setAttribute('style', saved)
+      this.positionImageHandles(element)
+      this.cancelHandleDrag = undefined
+    }
+    this.cancelHandleDrag = beginHandleDrag(event, frame, {
+      move: (dx, dy) => {
+        if (!moved && Math.hypot(dx * rect.scaleX, dy * rect.scaleY) < 4) return
+        moved = true
+        if (mode === 'move') geometry = this.limitPosition({ ...original, left: original.left + dx, top: original.top + dy }, rect.height)
+        else if (mode === 'right') geometry = this.limitPosition({ ...original, width: Math.max(40, original.width + dx) }, rect.height)
+        else {
+          const width = Math.max(40, original.width - dx)
+          geometry = this.limitPosition({ ...original, left: original.left + original.width - width, width }, rect.height)
+        }
+        if (source.kind === 'box') {
+          element.style.setProperty('width', `${geometry.width}px`, 'important')
+          const resizedHeight = element.getBoundingClientRect().height / rect.scaleY
+          geometry = this.limitPosition(geometry, resizedHeight)
+          element.style.setProperty('left', `${geometry.left}px`, 'important')
+          element.style.setProperty('top', `${geometry.top}px`, 'important')
+        } else element.style.transform = `translate(${geometry.left - original.left}px, ${geometry.top - original.top}px)`
+        this.positionImageHandles(element)
+      },
+      finish: () => { restore(); if (moved) this.options.onBoxPlace?.(id, geometry) },
+      cancel: restore,
+      clickThrough: () => clickThrough && !moved,
+    })
+  }
+
+  private readonly onPointerDown = (raw: Event): void => {
+    const event = raw as PointerEvent
     const selection = selectionFor(this.root)
     this.pointerSelection = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null
+    if (event.button !== 0 || this.hasPendingComposition()) return
+    const target = event.composedPath()[0]
+    if (!(target instanceof Element)) return
+    const selected = this.selectedElement && this.selectedStyle?.element
+    if (!this.editing && selected && (selected === target || selected.contains(target))) {
+      this.beginBoxGesture(event, selected, this.selectedElement!, 'move', true)
+      return
+    }
+    // Hit-test both sides of the six-screen-pixel border, including outside the element.
+    const boxes = [...this.root.querySelectorAll<HTMLElement>('[data-box][data-sm-element]')].reverse()
+    const box = boxes.find(item => {
+      const r = item.getBoundingClientRect(), x = event.clientX, y = event.clientY
+      return x >= r.left - 6 && x <= r.right + 6 && y >= r.top - 6 && y <= r.bottom + 6 &&
+        (Math.abs(x - r.left) <= 6 || Math.abs(x - r.right) <= 6 || Math.abs(y - r.top) <= 6 || Math.abs(y - r.bottom) <= 6)
+    })
+    const id = box?.dataset.smElement
+    if (!box || !id) return
+    if (this.editing) this.endEditing()
+    this.selectElement(id)
+    const fresh = this.selectedStyle?.element
+    if (!fresh) return
+    event.preventDefault(); event.stopPropagation()
+    this.beginBoxGesture(event, fresh, id, 'move')
   }
 
   private readonly suppressConfirmationEnter = (): void => {
@@ -309,7 +401,7 @@ export class StageEditor {
       if (!fresh) return
       const block = fresh.closest<HTMLElement>('[data-sm-block]')
       block?.focus({ preventScroll: true })
-      this.options.onBegin(labelForBlock(block))
+      this.options.onBegin(labelForBlock(block), fresh.closest<HTMLElement>('[data-sm-element]')?.dataset.smElement)
       const existing = selectionInRun(this.root, fresh)
       if (!existing || existing.collapsed || previousSelection !== undefined) {
         const point = caretInRun(fresh, event.clientX, event.clientY, this.root)
@@ -392,6 +484,22 @@ export class StageEditor {
         event.preventDefault(); event.stopPropagation(); this.clearElementSelection()
       }
       return
+    }
+    if (!this.editing && this.selectedElement && !event.ctrlKey && !event.metaKey && !event.altKey &&
+        ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      const source = this.analysis.elementSources?.elements.find(entry => entry.id === this.selectedElement && entry.kind === 'box')
+      const element = this.selectedStyle?.element, frame = element?.closest<HTMLElement>('.frame')
+      if (source?.boxStyle && element && frame) {
+        event.preventDefault(); event.stopPropagation()
+        if (wasComposing) return
+        const rect = toSlideRect(element.getBoundingClientRect(), frame.getBoundingClientRect(), frame.offsetWidth, frame.offsetHeight)
+        if (!rect) return
+        const step = event.shiftKey ? 1 : 10, style = source.boxStyle
+        const geometry = this.limitPosition({ left: style.left + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0),
+          top: style.top + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0), width: style.width }, rect.height)
+        this.options.onBoxPlace?.(source.id, geometry)
+        return
+      }
     }
     if (!this.editing && this.selectedElement && (event.key === 'Delete' || event.key === 'Backspace') && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopPropagation()
@@ -611,6 +719,7 @@ export class StageEditor {
 
   /** デッキを反映し、編集アダプタを作り直す。`focus` があればその位置へカーソルを戻す */
   render(deck: RenderedDeck, analysis: Analysis, current: number, focus?: StageFocus): void {
+    const hadSelection = !!this.selectedElement
     const selected = current === this.current && analysis === this.analysis ? this.selectedElement : null
     this.clearElementSelection(false)
     this.endEditingSilently()
@@ -626,6 +735,7 @@ export class StageEditor {
       this.pendingElementSelection = null
       this.selectElement(pending)
     } else if (selected) this.selectElement(selected, false)
+    else if (hadSelection) this.options.onElementSelect?.(null)
     if (focus && focus.seq !== this.lastFocusSeq) {
       this.lastFocusSeq = focus.seq
       this.focusRun(focus.cursor)
@@ -645,6 +755,8 @@ export class StageEditor {
 
   selectElementOnRender(id: string): void { this.pendingElementSelection = id }
 
+  cancelDrag(): void { this.cancelHandleDrag?.(); this.cancelHandleDrag = undefined }
+
   /** 編集中なら残ったDOMをコミットして終了する（再描画は onFinish 経由）。 */
   endEditing(): void {
     this.settleComposition()
@@ -662,6 +774,7 @@ export class StageEditor {
   }
 
   dispose(): void {
+    this.clearElementSelection(false)
     this.clearCompositionEndTimer()
     const root = this.root
     root.removeEventListener('pointerdown', this.onPointerDown)
@@ -773,7 +886,7 @@ export class StageEditor {
     const block = fresh.closest<HTMLElement>('[data-sm-block]')
     block?.focus({ preventScroll: true })
     setCaretInRun(fresh, cursor.offset)
-    this.options.onBegin(labelForBlock(block))
+    this.options.onBegin(labelForBlock(block), fresh.closest<HTMLElement>('[data-sm-element]')?.dataset.smElement)
   }
 
   private currentCursor(end: boolean): Cursor | undefined {

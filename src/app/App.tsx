@@ -8,6 +8,8 @@ import type { Analysis, ReadonlyCode, SlideOperation, SlideOperationResult } fro
 import type { ExportReport } from '../export/pptx'
 import { resolveCursor } from '../editing'
 import { MarpRenderer } from '../marp/renderer'
+import { createBoxMarp } from '../marp/boxHtml'
+import { svgHtmlAllowlist } from '../export/pptx/svgAllowlist'
 import { registerThemes } from '../marp/themes'
 import { installImagePathRule, type MarkdownItLike } from '../marp/urls'
 import {
@@ -49,6 +51,8 @@ import { tableOperationReason, applyTableTransaction, insertTableTransaction, ty
 import type { TableMenuTarget } from './tableMenu'
 import { chooseImage, imageLine, insertImage } from './imageInsert'
 import { resizeImage } from '../editing/images'
+import { setBoxFontSize } from '../editing/boxes'
+import { placeBox } from '../editing/boxPosition'
 
 const MIN_SIDEBAR_WIDTH = 120
 const MAX_SIDEBAR_WIDTH = 480
@@ -131,7 +135,7 @@ function themeWarningsBanner(warnings: string[]): Banner | null {
 }
 
 function createExportMarp(baseDir: string, config: ThemeConfig): Marp {
-  const marp = new Marp({ script: false, math: 'mathjax' })
+  const marp = createBoxMarp({ svgHtmlAllowlist })
   const toAssetUrl = (path: string) => platform.convertFileSrc(path)
   installImagePathRule(marp.markdown as MarkdownItLike, () => baseDir, toAssetUrl)
   registerThemes(marp, config.themes, toAssetUrl)
@@ -216,6 +220,7 @@ interface WorkspaceProps {
 function TabWorkspace({ path: initialPath, rememberRecent, active, settings, setSettings, recent,
   onRecent, onOpen, onReady, onState, apiRef, toolbarHost }: WorkspaceProps) {
   const [view, setView] = useState<ViewState>(INITIAL_VIEW)
+  const [boxTarget, setBoxTarget] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [updateInstallLocked, setUpdateInstallLocked] = useState(false)
@@ -835,6 +840,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       const session = sessionRef.current
       if (!session || !activeWorkspaceRef.current || pendingRef.current ||
         updateInstallLockedRef.current || openingRef.current || viewRef.current.busy) return
+      stageApi.current?.cancelDrag?.()
       stageApi.current?.endEditing()
       if (direction === 'undo' ? !session.model.canUndo : !session.model.canRedo) return
       const cursor = direction === 'undo' ? session.model.undo() : session.model.redo()
@@ -862,6 +868,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     (index: number) => {
       const session = sessionRef.current
       if (!session) return
+      stageApi.current?.cancelDrag?.()
       stageApi.current?.endEditing()
       const total = session.deck.slides.length
       if (total === 0) return
@@ -1016,6 +1023,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         return
       }
       if (sessionRef.current?.path !== change.path) return
+      stageApi.current?.cancelDrag?.()
       const requestId = ++externalChangeRequest.current
       if (deferIfComposing(() => void handleExternalNow(change, observation, requestId))) return
       void handleExternalNow(change, observation, requestId)
@@ -1023,6 +1031,30 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     [bufferUpdateExternal, deferIfComposing, handleExternalNow],
   )
   externalRef.current = handleExternal
+
+  const insertBoxNow = async () => {
+    const target = sessionRef.current, activation = activationGeneration.current
+    if (!target) return
+    await waitForComposition()
+    if (!workspaceAlive.current || !activeWorkspaceRef.current || activation !== activationGeneration.current ||
+      sessionRef.current !== target || pendingRef.current || openingRef.current || viewRef.current.busy ||
+      updateInstallLockedRef.current || target.conflict || target.model.state === 'readonly') return
+    stageApi.current?.endEditing()
+    const result = target.renderer.editing.insertBox(target.model.text, currentRef.current, target.deck.width, target.deck.height, target.model.eols)
+    if (!result.ok) { sync({ detail: strings.elementOperations.reasons['element-structure-changed'] }); return }
+    try {
+      const deck = target.renderer.update(result.analysis, target.baseDir)
+      target.model.edit(result.edit)
+      target.analysis = result.analysis
+      target.deck = deck
+      target.focus = nextFocus(result.cursor)
+      syncDeck({ detail: null })
+    } catch {
+      const restored = target.renderer.editing.analyze(target.model.text)
+      analyzeSession(target, restored)
+      sync({ detail: strings.elementOperations.reasons['element-ambiguous'] })
+    }
+  }
 
   const runTableInsertion = async (columns: number, rows: number) => {
     const target = sessionRef.current, activation = activationGeneration.current
@@ -1038,6 +1070,27 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     if (!result.ok) { sync({ detail: strings.tableOperations.reasons[result.reason.code] }); return }
     analyzeSession(target, result.analysis)
     target.focus = result.cursor ? nextFocus(result.cursor) : undefined
+    syncDeck({ detail: null })
+  }
+
+  const changeBoxFontSize = async (size: number | null) => {
+    const target = sessionRef.current, activation = activationGeneration.current
+    const source = target?.analysis.elementSources?.elements.find(entry => entry.id === boxTarget && entry.kind === 'box' && entry.slide === currentRef.current)
+    if (!target || !source) return
+    const start = source.start
+    await waitForComposition()
+    if (!workspaceAlive.current || !activeWorkspaceRef.current || activation !== activationGeneration.current ||
+      sessionRef.current !== target || pendingRef.current || openingRef.current || viewRef.current.busy ||
+      updateInstallLockedRef.current || target.conflict || target.model.state === 'readonly') return
+    stageApi.current?.endEditing()
+    const fresh = target.analysis.elementSources?.elements.find(entry => entry.kind === 'box' && entry.start === start)
+    if (!fresh) return
+    const result = setBoxFontSize(target.model, target.renderer.editing, target.analysis, fresh.id, size)
+    if (!result.ok) { sync({ detail: strings.elementOperations.reasons[result.reason] }); return }
+    analyzeSession(target, result.analysis)
+    target.focus = undefined
+    stageApi.current?.selectElementOnRender?.(result.elementId)
+    setBoxTarget(result.elementId)
     syncDeck({ detail: null })
   }
 
@@ -1103,6 +1156,17 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const stageCallbacks: SlideStageCallbacks = {
     onTableReason: tableReason,
     onTableCommand: (target, command) => { void runTableCommand(target, command) },
+    onBoxPlace: (id, geometry) => {
+      const session = sessionRef.current
+      if (!session) return
+      const result = placeBox(session.model, session.renderer.editing, session.analysis, id, geometry,
+        session.conflict || updateInstallLockedRef.current || !!pendingRef.current || viewRef.current.busy || !!stageApi.current?.isComposing())
+      if (!result.ok) { sync({ detail: strings.elementOperations.reasons[result.reason] }); return }
+      analyzeSession(session, result.analysis)
+      session.focus = undefined
+      stageApi.current?.selectElementOnRender?.(result.elementId)
+      syncDeck({ detail: null })
+    },
     onImageResize: (id, width, slideWidth) => {
       const session = sessionRef.current
       if (!session) return
@@ -1120,7 +1184,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       if (next) stageApi.current?.selectElementOnRender?.(next.id)
       syncDeck({ detail: null })
     },
-    onElementSelect: (kind) => sync({ detail: kind ? strings.elementOperations.selected[kind] : null }),
+    onElementSelect: (kind, id) => { setBoxTarget(kind === 'box' ? id ?? null : null); sync({ detail: kind ? strings.elementOperations.selected[kind] : null }) },
     onElementDelete: (id) => {
       const session = sessionRef.current
       if (!session || session.model.state === 'readonly' || session.conflict || updateInstallLockedRef.current) {
@@ -1148,13 +1212,15 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         return false
       }
     },
-    onBegin: (label) => {
+    onBegin: (label, id) => {
       if (updateInstallLockedRef.current) return
+      setBoxTarget(sessionRef.current?.analysis.elementSources?.elements.some(entry => entry.id === id && entry.kind === 'box') ? id ?? null : null)
       editingRef.current = true
       sync({ detail: label })
     },
     onEnd: () => {
       editingRef.current = false
+      setBoxTarget(null)
       setView((previous) => ({
         ...previous,
         tick: previous.tick + 1,
@@ -1429,6 +1495,8 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const showExportBanner = exportNotice !== null &&
     (exportNotice.kind === 'error' || !exportReportHasDetails)
 
+  const currentBox = session?.analysis.elementSources?.elements.find(entry => entry.id === boxTarget && entry.kind === 'box' && entry.slide === view.current)
+
   return (
     <div class="app" inert={updateInstallLocked}>
       {active && toolbarHost ? createPortal(<div inert={updateInstallLocked}><Toolbar
@@ -1439,6 +1507,11 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
           view.saveState === 'readonly' ? strings.toolbar.readonly : session.analysis.slideSources?.reason?.code === 'slide-heading-divider' ? strings.toolbar.headingDivider : undefined}
         onTableOpen={() => { tableAnchor.current = stageApi.current?.insertionAnchor?.() }}
         onInsertTable={(columns, rows) => { void runTableInsertion(columns, rows) }}
+        onInsertBox={() => { void insertBoxNow() }}
+        boxFontSize={currentBox?.boxStyle?.size ?? null}
+        boxFontDisabledReason={!session ? strings.toolbar.noFile : session.conflict ? strings.toolbar.conflict :
+          view.saveState === 'readonly' ? strings.toolbar.readonly : !currentBox ? strings.toolbar.fontSizeUnavailable : undefined}
+        onBoxFontSize={size => { void changeBoxFontSize(size) }}
         canSave={session !== null && view.saveState !== 'readonly'}
         canInsertImage={!!session && view.saveState !== 'readonly' && view.saveState !== 'conflict' && !session.conflict && !session.analysis.slideSources?.reason && !pending}
         imageDisabledReason={!session ? strings.toolbar.noFile : view.saveState === 'readonly' ? strings.toolbar.readonly : session.conflict ? strings.toolbar.conflict : session.analysis.slideSources?.reason?.code === 'slide-heading-divider' ? strings.toolbar.headingDivider : null}

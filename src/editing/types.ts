@@ -24,7 +24,7 @@ export interface Analysis {
   slideSources?: SlideSources;
   elementSources?: ElementSources;
   /** Unfilled paragraph/line: remove only this recorded insertion on finish. */
-  draft?: { runId: string; edit: SourceEdit; before: { runId: string; offset: number } };
+  draft?: { runId: string; edit: SourceEdit; before: import('../document/model').Cursor };
 }
 export type EditResult<TEdit = SourceEdit> = { ok: true; edit: TEdit; newText: string; analysis: Analysis; escaped: boolean; cursor?: import('../document/model').Cursor; separateHistory?: boolean } |
   { ok: false; reason: ReadonlyReason };

@@ -119,6 +119,10 @@ const BASE_CSS = `
   -webkit-user-select: text;
   user-select: text;
 }
+.surface[data-layout='single'] .frame [data-box]:hover:not([data-sm-selected]) {
+  outline: 1px dotted var(--sm-accent, #0f6cbd);
+  outline-offset: 1px;
+}
 /* 読み取り専用: ポインターを重ねたら点線の枠 */
 .surface[data-layout='single'] .frame [data-sm-readonly]:hover,
 .surface[data-layout='single'] .frame section table:hover,

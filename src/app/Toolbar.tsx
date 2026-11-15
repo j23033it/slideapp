@@ -10,6 +10,10 @@ export interface ToolbarProps {
   canInsertImage: boolean
   imageDisabledReason: string | null
   onInsertImage: () => void
+  onInsertBox: () => void
+  boxFontSize: number | null
+  boxFontDisabledReason?: string
+  onBoxFontSize: (size: number | null) => void
   canExport: boolean
   exporting: boolean
   canUndo: boolean
@@ -42,6 +46,10 @@ export function Toolbar({
   canInsertImage,
   imageDisabledReason,
   onInsertImage,
+  onInsertBox,
+  boxFontSize,
+  boxFontDisabledReason,
+  onBoxFontSize,
   canExport,
   exporting,
   canUndo,
@@ -116,11 +124,24 @@ export function Toolbar({
       </button>
 
       <div class="toolbar-divider" />
+      <button type="button" class="toolbar-button" title={tableDisabledReason ?? strings.toolbar.boxTitle}
+        onClick={onInsertBox} disabled={busy || !!tableDisabledReason}>
+        {strings.toolbar.box}
+      </button>
       <TablePicker disabled={busy || !!tableDisabledReason} disabledReason={tableDisabledReason} onOpen={onTableOpen} onInsert={onInsertTable} />
       <button type="button" class="toolbar-button" title={imageDisabledReason ?? strings.toolbar.imageTitle}
         onClick={onInsertImage} disabled={!canInsertImage || busy}>
         {strings.toolbar.image}
       </button>
+      <div class="toolbar-divider" />
+
+      <select aria-label={strings.toolbar.fontSize} title={boxFontDisabledReason ?? strings.toolbar.fontSizeTitle}
+        disabled={busy || !!boxFontDisabledReason} value={boxFontSize ?? ''}
+        onChange={event => onBoxFontSize(event.currentTarget.value ? Number(event.currentTarget.value) : null)}>
+        <option value="">{strings.toolbar.fontSizeDefault}</option>
+        {boxFontSize !== null && ![12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 72].includes(boxFontSize) ? <option value={boxFontSize}>{boxFontSize}pt</option> : null}
+        {[12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 72].map(size => <option value={size}>{size}pt</option>)}
+      </select>
       <div class="toolbar-divider" />
 
       <button

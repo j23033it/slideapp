@@ -60,13 +60,15 @@ export const strings = {
   elementOperations: {
     selected: {
       paragraph: '選択: 段落', heading: '選択: 見出し', list: '選択: リスト', quote: '選択: 引用',
-      table: '選択: 表', code: '選択: コード', image: '選択: 画像',
+      table: '選択: 表', code: '選択: コード', image: '選択: 画像', box: '選択: テキストボックス',
     },
     reasons: {
       'element-ambiguous': '要素の位置を特定できないため操作できません',
       'element-structure-changed': '前後の要素の形が変わるため操作できません',
       'element-heading-divider': 'headingDividerが有効なため操作できません',
       'element-readonly': '読み取り専用または競合中のため操作できません',
+      'box-move-failed': 'テキストボックスの位置を変更できません',
+      'box-convert-failed': 'この要素は自由に配置できません',
     },
   },
   tabs: {
@@ -78,6 +80,8 @@ export const strings = {
   appName: 'SlideApp',
 
   toolbar: {
+    box: 'テキストボックス', boxTitle: 'テキストボックスを挿入',
+    fontSize: '文字サイズ', fontSizeTitle: '文字の大きさを変更', fontSizeDefault: '既定', fontSizeUnavailable: 'テキストボックスで変更できます',
     table: '表', tableTitle: '表を挿入',
     image: '画像', imageTitle: '画像を挿入',
     noFile: 'ファイルが開かれていません', readonly: '読み取り専用のため操作できません',

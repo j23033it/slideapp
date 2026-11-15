@@ -12,3 +12,9 @@ export function selectionOutlineWidth(element: HTMLElement): number {
   const geometry = toSlideRect(element.getBoundingClientRect(), frame.getBoundingClientRect(), frame.offsetWidth, frame.offsetHeight)
   return 2 / (geometry?.scaleX || 1)
 }
+
+/** Keep at least 16 slide pixels of the box visible in each direction. */
+export function limitBoxPosition(geometry: { left: number; top: number; width: number }, height: number, slideWidth: number, slideHeight: number) {
+  return { left: Math.round(Math.max(16 - geometry.width, Math.min(slideWidth - 16, geometry.left))),
+    top: Math.round(Math.max(16 - height, Math.min(slideHeight - 16, geometry.top))), width: Math.round(geometry.width) }
+}
