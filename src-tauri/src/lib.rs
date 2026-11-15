@@ -1,4 +1,5 @@
 mod files;
+mod git;
 mod images;
 mod binary;
 mod prefs;
@@ -103,6 +104,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             binary::write_binary,
+            git::git_file_status,
+            git::git_commit_file,
             images::import_image,
             open_file,
             save_file,

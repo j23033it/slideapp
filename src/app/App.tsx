@@ -16,6 +16,7 @@ import {
   DEFAULT_SETTINGS,
   platform,
   type AppSettings,
+  type GitFileStatus,
   type ThemeConfig,
   type ThemePreference,
 } from '../platform'
@@ -233,6 +234,15 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const [exporting, setExporting] = useState(false)
   const [exportNotice, setExportNotice] = useState<ExportNotice | null>(null)
   const [exportReportOpen, setExportReportOpen] = useState(false)
+  const [gitStatus, setGitStatus] = useState<GitFileStatus | null>(null)
+  const [commitOpen, setCommitOpen] = useState(false)
+  const [commitMessage, setCommitMessage] = useState('')
+  const [commitError, setCommitError] = useState<string | null>(null)
+  const [commitBusy, setCommitBusy] = useState(false)
+  const [commitNotice, setCommitNotice] = useState<string | null>(null)
+  const gitGeneration = useRef(0)
+  const commitBusyRef = useRef(false)
+  const commitNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const renderer = useMemo(() => new MarpRenderer((path) => platform.convertFileSrc(path)), [])
   const activeWorkspaceRef = useRef(active)
@@ -299,6 +309,23 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       ...patch,
     }))
   }, [])
+
+  const refreshGit = useCallback(async (path: string) => {
+    const generation = ++gitGeneration.current
+    try {
+      const result = await platform.gitFileStatus(path)
+      if (workspaceAlive.current && sessionRef.current?.path === path && generation === gitGeneration.current) setGitStatus(result)
+    } catch (reason) {
+      if (workspaceAlive.current && sessionRef.current?.path === path && generation === gitGeneration.current)
+        setGitStatus({ kind: 'error', branch: null, message: errorMessage(reason) })
+    }
+  }, [])
+
+  useEffect(() => {
+    const refresh = () => { const session = sessionRef.current; if (session) void refreshGit(session.path) }
+    window.addEventListener('focus', refresh)
+    return () => { window.removeEventListener('focus', refresh); gitGeneration.current++; if (commitNoticeTimer.current) clearTimeout(commitNoticeTimer.current) }
+  }, [refreshGit])
 
   /** 表示HTMLも変わる変更（開く・再読み込み・履歴・ラン境界の削除） */
   const syncDeck = useCallback((patch: Partial<ViewState> = {}) => {
@@ -477,6 +504,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
           deck,
         }
         sessionRef.current = nextSession
+        void refreshGit(path)
         editingRef.current = false
         setView((previous) => ({
           ...previous,
@@ -581,6 +609,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
             session.model.breakHistoryGroup()
           }
           sync({ busy: false, error: null, banner: null })
+          void refreshGit(session.path)
           return true
         }
         if (result.kind === 'conflict') {
@@ -631,6 +660,40 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     },
     [performSave],
   )
+
+  const runCommit = useCallback(async () => {
+    const session = sessionRef.current
+    const message = commitMessage
+    if (!session || !message.trim() || commitBusyRef.current || pendingRef.current || viewRef.current.busy) return
+    const path = session.path
+    commitBusyRef.current = true
+    setCommitBusy(true)
+    setCommitError(null)
+    try {
+      await waitForComposition()
+      if (!workspaceAlive.current || sessionRef.current !== session || session.conflict || editorSessionSaveState(session) === 'readonly') return
+      if (hasUnsavedChanges(editorSessionSaveState(session))) {
+        if (!await runSave()) return
+        if (!workspaceAlive.current || sessionRef.current !== session || session.conflict || hasUnsavedChanges(editorSessionSaveState(session))) return
+      }
+      const result = await platform.gitCommitFile(path, message, session.model.diskHash)
+      if (!workspaceAlive.current) return
+      setCommitOpen(false)
+      setCommitMessage('')
+      setCommitNotice(strings.git.success(result.commit))
+      if (commitNoticeTimer.current) clearTimeout(commitNoticeTimer.current)
+      commitNoticeTimer.current = setTimeout(() => { if (workspaceAlive.current) setCommitNotice(null) }, 4000)
+      void refreshGit(path)
+    } catch (reason) {
+      if (workspaceAlive.current) {
+        const conflict = reason && typeof reason === 'object' && 'kind' in reason && reason.kind === 'conflict'
+        setCommitError(conflict ? strings.git.conflict : strings.git.failed(errorMessage(reason)))
+      }
+    } finally {
+      commitBusyRef.current = false
+      if (workspaceAlive.current) setCommitBusy(false)
+    }
+  }, [commitMessage, refreshGit, runSave, waitForComposition])
 
   /** IME確定後の内容を固定し、PPTXは元のMarkdownを保存せずに別ファイルへ出力する */
   const runPptxExport = useCallback(async (): Promise<void> => {
@@ -738,6 +801,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       const themeWarnings = registerThemeConfig(session.renderer, themeConfig)
       session.themeConfig = themeConfig
       session.model.reload(raw, hash, hasBom)
+      void refreshGit(session.path)
       session.savedSnapshot = { text: raw, hasBom }
       session.conflict = false
       const { analysis, deck } = session.renderer.analyze(session.model.text, session.baseDir)
@@ -1029,6 +1093,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
           return
         case 'synced':
           session.model.markSaved(decision.hash)
+          void refreshGit(session.path)
           session.model.hasBom = decision.hasBom
           session.savedSnapshot = { text: session.model.serialize(), hasBom: decision.hasBom }
           session.conflict = false
@@ -1512,7 +1577,8 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   apiRef.current = {
     leave: async () => {
       await finishSlideshow()
-      if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
+      if (updateInstallLockedRef.current || pendingRef.current || (view.busy && !commitBusyRef.current)) return false
+      if (view.busy && commitBusyRef.current) return true
       activationGeneration.current += 1
       await waitForComposition()
       if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
@@ -1548,6 +1614,13 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const sidebarCollapsed = settings.sidebarCollapsed
   const session = sessionRef.current
   const slideTotal = session?.deck.slides.length ?? 0
+  const commitDisabledReason = !session ? strings.toolbar.noFile : view.saveState === 'readonly' ? strings.toolbar.readonly :
+    session.conflict || view.saveState === 'conflict' ? strings.toolbar.conflict :
+    !gitStatus ? strings.git.error(strings.errors.unknown) :
+    gitStatus.kind === 'error' ? strings.git.error(gitStatus.message ?? '') :
+    gitStatus.kind === 'unavailable' ? strings.git.unavailable : gitStatus.kind === 'outside' ? strings.git.outside :
+    gitStatus.kind === 'ignored' ? strings.git.ignored :
+    gitStatus.kind === 'clean' && !hasUnsavedChanges(view.saveState) ? strings.git.clean : undefined
   const conflictBanner = view.banner?.kind === 'conflict' ? view.banner : null
   const exportReport = exportNotice?.report
   const exportReportHasDetails = exportReport ? hasExportReportDetails(exportReport) : false
@@ -1592,6 +1665,9 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
           view.saveState === 'readonly' ? strings.toolbar.readonly : !currentBox ? strings.toolbar.fontSizeUnavailable : undefined}
         onBoxFontSize={size => { void changeBoxFontSize(size) }}
         canSave={session !== null && view.saveState !== 'readonly'}
+        commit={{ disabledReason: commitDisabledReason, busy: commitBusy, status: gitStatus, open: commitOpen,
+          message: commitMessage, error: commitError, onOpen: () => { setCommitError(null); setCommitOpen(true) },
+          onClose: () => setCommitOpen(false), onMessage: setCommitMessage, onCommit: () => { void runCommit() } }}
         canInsertImage={!!session && view.saveState !== 'readonly' && view.saveState !== 'conflict' && !session.conflict && !session.analysis.slideSources?.reason && !pending}
         imageDisabledReason={!session ? strings.toolbar.noFile : view.saveState === 'readonly' ? strings.toolbar.readonly : session.conflict ? strings.toolbar.conflict : session.analysis.slideSources?.reason?.code === 'slide-heading-divider' ? strings.toolbar.headingDivider : null}
         onInsertImage={() => void insertImageNow()}
@@ -1715,7 +1791,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         saveState={view.saveState}
         slideIndex={view.current}
         slideTotal={slideTotal}
-        detail={view.detail}
+        detail={commitNotice ?? view.detail}
         exporting={exporting}
       />
 

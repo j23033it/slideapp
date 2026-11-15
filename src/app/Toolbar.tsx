@@ -1,6 +1,7 @@
 import type { ThemePreference } from '../platform'
 import { strings } from './strings'
 import { TablePicker } from './TablePicker'
+import { CommitPicker, type CommitPickerProps } from './CommitPicker'
 import { SlideshowButton } from './SlideshowButton'
 import type { SlideshowStart } from './slideshow'
 
@@ -11,6 +12,7 @@ export interface ToolbarProps {
   sidebarCollapsed: boolean
   busy: boolean
   canSave: boolean
+  commit: CommitPickerProps
   canInsertImage: boolean
   imageDisabledReason: string | null
   onInsertImage: () => void
@@ -52,6 +54,7 @@ export function Toolbar({
   sidebarCollapsed,
   busy,
   canSave,
+  commit,
   canInsertImage,
   imageDisabledReason,
   onInsertImage,
@@ -114,6 +117,7 @@ export function Toolbar({
       >
         {strings.toolbar.save}
       </button>
+      <CommitPicker {...commit} />
       <button
         type="button"
         class="toolbar-button"

@@ -35,6 +35,12 @@ export interface UpdateProgress {
   ratio: number | null
 }
 
+export interface GitFileStatus {
+  kind: 'unavailable' | 'outside' | 'error' | 'ignored' | 'changed' | 'clean'
+  branch: string | null
+  message?: string
+}
+
 /** Rust側の `open_file` の戻り値 */
 export interface OpenedFile {
   /** UTF-8の本文（BOMは除去済み） */
@@ -107,6 +113,8 @@ export interface ThemeConfig {
  * Tauri呼び出しの薄い包み。テストや将来の差し替えのため、UIはこの型だけに依存する。
  */
 export interface Platform {
+  gitFileStatus(path: string): Promise<GitFileStatus>
+  gitCommitFile(path: string, message: string, expectedHash: string): Promise<{ commit: string }>
   openFile(path: string): Promise<OpenedFile>
   /**
    * 開いたMarkdownの近くにあるMarpのテーマ設定を読み、CSS本体と警告を返す。
