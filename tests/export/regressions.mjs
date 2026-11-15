@@ -1,5 +1,6 @@
 // Review reproductions run in real WebView2, alongside the representative fixtures.
 export const regressionCases = {
+ 'encoded-image':'# Encoded image\n\n![w:100](%E6%97%A5%E6%9C%AC%20space.png)',
  'section-border':'<style>section {border:5px dashed red;border-radius:20px;background-color:rgba(0,0,255,.2);box-shadow:inset 0 0 8px black}</style>\n\n# Editable section border\n\nNative paragraph',
  'block-background':'<style>h1 {background-image:linear-gradient(90deg,#fea,#aef);border-radius:12px;border:2px dashed #888}</style>\n\n# Editable decorated heading\n\nNative paragraph',
  'list-background':'<style>ul {background-image:linear-gradient(90deg,#fea,#aef);border-radius:12px}</style>\n\n# Editable decorated list\n\n- Parent\n  - Child\n- Next',

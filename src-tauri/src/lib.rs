@@ -1,4 +1,5 @@
 mod files;
+mod images;
 mod binary;
 mod prefs;
 mod themes;
@@ -102,6 +103,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             binary::write_binary,
+            images::import_image,
             open_file,
             save_file,
             write_new_file,

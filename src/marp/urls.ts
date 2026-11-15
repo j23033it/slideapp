@@ -47,8 +47,18 @@ function normalizePath(path: string): string {
  * 変換しない場合は null を返す。
  */
 export function resolveAssetPath(baseDir: string | null, src: string): string | null {
-  const value = src.trim()
-  if (isExternalReference(value)) return null
+  const raw = src.trim()
+  if (isExternalReference(raw)) return null
+  // Decode each URL segment once, without allowing encoded separators to change its structure.
+  let value: string
+  try {
+    value = raw.split(/([\\/])/).map(segment => {
+      let decoded: string
+      try { decoded = decodeURIComponent(segment) } catch { decoded = segment }
+      if (segment !== '/' && segment !== '\\' && /[\\/\0]/.test(decoded)) throw new Error('encoded separator')
+      return decoded
+    }).join('')
+  } catch { return null }
 
   // すでに絶対パス（ドライブレター / UNC）
   if (/^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\')) {

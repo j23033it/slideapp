@@ -52,6 +52,12 @@ try {
       assert.ok(model.report.rasterizedCount > 0, `${name}: unsupported appearance must be reported`)
       assert.ok(model.slides[0].parts.some(part => part.kind === 'image'))
     }
+    if (name === 'review-encoded-image.md') {
+      assert.equal(model.report.errors?.length ?? 0, 0)
+      assert.ok(model.slides[0].parts.some(part => part.kind === 'image'), 'Encoded local image must be present in PPTX')
+      const zip = await JSZip.loadAsync(bytes)
+      assert.ok(Object.keys(zip.files).some(path => path.startsWith('ppt/media/')), 'Encoded local image must be embedded')
+    }
     if (name === 'review-section-border.md') {
       assert.equal(model.report.errors?.length ?? 0, 0)
       assert.deepEqual(model.report.rasterizedElements.map(p => p.element), ['section'])

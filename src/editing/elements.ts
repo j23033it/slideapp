@@ -6,7 +6,7 @@ export type ElementKind = 'paragraph' | 'heading' | 'list' | 'quote' | 'table' |
 export type InsertBlockKind = ElementKind | 'html';
 export type ElementReasonCode = 'element-ambiguous' | 'element-structure-changed' | 'element-heading-divider' | 'element-readonly';
 export interface ElementReason { code: ElementReasonCode; description: string }
-export interface SourceElement { id: string; kind: ElementKind; slide: number; start: number; end: number; signature: string; unsafe: boolean }
+export interface SourceElement { id: string; kind: ElementKind; slide: number; start: number; end: number; signature: string; unsafe: boolean; imageAlt?: { start: number; end: number; text: string; sizes: { name: string; value: string; start: number; end: number }[] } }
 export interface SourceGroup { slide: number; start: number; end: number; signature: string; kind?: InsertBlockKind }
 export interface ElementSources { elements: SourceElement[]; groups: SourceGroup[]; signature: string[][]; valid: boolean }
 export type ElementOperation = { kind: 'delete'; elementId: string } | {
@@ -76,7 +76,22 @@ export function collectElements(text: string, tokens: Token[], slides: SlideSour
     const prior = reuse?.elements[elements.length];
     const id = prior?.kind === kind && prior.slide === slide ? prior.id : `e${revision}-${elements.length}`;
     token.attrSet('data-sm-element', id);
-    elements.push({ id, kind, slide, start, end, signature: sig, unsafe });
+    let imageAlt: SourceElement['imageAlt'];
+    if (kind === 'image') {
+      const child = group.find(t => t.type === 'inline')?.children?.find(t => t.type === 'image');
+      const match = /^ {0,3}!\[([^\]\n]*)\]\(/.exec(text.slice(start, end));
+      if (match && child && child.content === match[1] && !match[1].includes('\\') &&
+          (child.children ?? []).every(part => part.type === 'text') &&
+          (child.children ?? []).map(part => part.content).join('') === match[1]) {
+        const altStart = start + match[0].length - match[1].length - 2;
+        const sizes = [...match[1].matchAll(/(?:^|\s)(w|width|h|height):([^\s]+)/g)].map(size => ({
+          name: size[1], value: size[2], start: altStart + size.index! + size[0].length - size[1].length - 1 - size[2].length,
+          end: altStart + size.index! + size[0].length,
+        }));
+        imageAlt = { start: altStart, end: altStart + match[1].length, text: match[1], sizes };
+      }
+    }
+    elements.push({ id, kind, slide, start, end, signature: sig, unsafe, imageAlt });
   }
   return { elements, groups, signature, valid };
 }

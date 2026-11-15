@@ -21,6 +21,7 @@ export interface SlideStageCallbacks {
   onElementSelect(kind: ElementKind | null): void
   onTableReason?(target: TableMenuTarget, command: TableCommand | 'delete-table'): TableReasonCode | undefined
   onTableCommand?(target: TableMenuTarget, command: TableCommand | 'delete-table'): void
+  onImageResize?(id: string, width: number, slideWidth: number): void
 }
 
 export interface SlideStageProps {
@@ -65,6 +66,7 @@ export function SlideStage({
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
       onElementDelete: (id) => callbacksRef.current.onElementDelete(id),
       onElementSelect: (kind) => callbacksRef.current.onElementSelect(kind),
+      onImageResize: callbacks.onImageResize ? (id, width, slideWidth) => callbacksRef.current.onImageResize?.(id, width, slideWidth) : undefined,
     })
     editorRef.current = editor
     const disposeTableMenu = attachTableMenu(surface.root, {
