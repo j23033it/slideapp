@@ -6,6 +6,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import JSZip from 'jszip'
 
 const port = Number(process.env.CDP_PORT ?? 9222)
 const output = resolve(process.env.TRACE_DIR ?? await mkdtemp(join(tmpdir(), 'slideapp-webview2-')))
@@ -258,6 +259,96 @@ try {
   await send('Page.enable'); await send('Runtime.enable')
   await waitFor('!!window.__TAURI_INTERNALS__ && !!document.querySelector(".empty-open-button")')
   await writeFile(join(output,'environment.json'),JSON.stringify({version:await send('Browser.getVersion'),targetUrl:target.url,fixture},null,2))
+  await scenario('box-empty-cancel', async () => {
+    const original = await evaluate('editor.options.latest().analysis.text')
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await key('Escape')
+    check(await evaluate('editor.options.latest().analysis.text') === original, 'Empty box was not cancelled')
+  })
+  await scenario('box-input-select-size-delete-undo', async () => {
+    const original = await evaluate('editor.options.latest().analysis.text')
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', { text: '箱の文字' }); await delay(250)
+    check((await evaluate('state().modelText'))?.includes('箱の文字'), 'Box input was not committed')
+    await key('Escape')
+    check(await evaluate(`!!document.querySelector('.stage-host').shadowRoot.querySelector('[data-box][data-sm-selected]')`), 'Escape did not select the box')
+    await evaluate(`(() => { const select = document.querySelector('select[aria-label="文字サイズ"]'); if (select.disabled) throw new Error('Font size is disabled'); select.value = '32'; select.dispatchEvent(new Event('change', {bubbles:true})) })()`)
+    await waitFor(`state().modelText.includes('font-size:32pt')`)
+    await key('z', 2)
+    check(!(await evaluate('state().modelText')).includes('font-size:32pt'), 'One undo did not restore the box font size')
+    await click('箱の文字'); await key('Escape'); await key('Delete')
+    check(!(await evaluate('state().modelText')).includes('箱の文字'), 'Delete did not remove the box')
+    await key('z', 2)
+    check((await evaluate('state().modelText')).includes('箱の文字'), 'One undo did not restore the box')
+    await key('z', 2)
+    check(await evaluate('state().modelText') === original, 'One undo did not restore the original before box insertion')
+  })
+  await scenario('box-ime-first-input-undo', async () => {
+    const original = await evaluate('editor.options.latest().analysis.text')
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.imeSetComposition', {text:'にほん', selectionStart:3, selectionEnd:3})
+    check(await evaluate('state().pendingComposition && state().modelDraft'), 'Box IME did not retain its draft')
+    await send('Input.insertText', {text:'日本'}); await delay(250)
+    check((await evaluate('state().modelText')).includes('日本'), 'Box IME text was not committed')
+    await key('z', 2)
+    check(await evaluate('state().modelText') === original, 'One undo did not remove box and IME input')
+  })
+  await scenario('box-empty-after-deletion', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'X'}); await delay(200)
+    await key('Backspace')
+    check((await evaluate('state().modelText')).includes('data-box') && !await evaluate('state().draft'), 'Deleting the last character removed the box')
+    await send('Input.insertText', {text:'Y'}); await delay(200)
+    check((await evaluate('state().modelText')).includes('Y'), 'Empty existing box did not accept input')
+  })
+  await scenario('box-font-size-during-editing', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'編集サイズ'}); await delay(200)
+    check(await evaluate(`state().editing && !document.querySelector('select[aria-label="文字サイズ"]').disabled`), 'Font size is disabled while editing box text')
+    await evaluate(`(() => { const select = document.querySelector('select[aria-label="文字サイズ"]'); select.value = '24'; select.dispatchEvent(new Event('change', {bubbles:true})) })()`)
+    await waitFor(`state().modelText.includes('font-size:24pt')`)
+  })
+  await scenario('box-theme-position-and-export', async () => {
+    const measured = await evaluate(`(async () => {
+      const { createBoxMarp } = await import('/src/marp/boxHtml.ts');
+      const { svgHtmlAllowlist } = await import('/src/export/pptx/svgAllowlist.ts');
+      const { measureDeck } = await import('/src/export/pptx/index.ts');
+      const { generatePptx } = await import('/src/export/pptx/generate.ts');
+      const source = theme => '---\\ntheme: ' + theme + '\\n---\\n\\n<div data-box style="position:absolute; left:320px; top:240px; width:640px; font-size:32pt">\\n\\nHello box\\n\\n</div>';
+      const themes = [];
+      for (const theme of ['default', 'gaia', 'uncover']) {
+        const rendered = createBoxMarp().render(source(theme));
+        const host = document.createElement('div'), root = host.attachShadow({mode:'open'});
+        root.innerHTML = '<style>' + rendered.css + '</style>' + rendered.html;
+        document.body.append(host);
+        const section = root.querySelector('section'), box = root.querySelector('[data-box]');
+        const s = section.getBoundingClientRect(), b = box.getBoundingClientRect();
+        themes.push({ theme, position:getComputedStyle(section).position, parent:box.offsetParent === section,
+          left:(b.left-s.left)*1280/s.width, top:(b.top-s.top)*1280/s.width, width:b.width*1280/s.width });
+        host.remove();
+      }
+      const exported = await measureDeck({markdown:source('default'), marp:createBoxMarp({svgHtmlAllowlist}), baseDir:''}, {fontEmbedCSS:' '});
+      const bytes = await generatePptx(exported.slides);
+      let binary = ''; for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      return {themes, parts:exported.slides[0].parts, report:exported.report, pptx:btoa(binary)};
+    })()`)
+    for (const theme of measured.themes) {
+      check(theme.position === 'relative' && theme.parent && Math.abs(theme.left - 320) < 1 && Math.abs(theme.top - 240) < 1 && Math.abs(theme.width - 640) < 1,
+        'Incorrect containing block: ' + JSON.stringify(theme))
+    }
+    const text = measured.parts.find(part => part.kind === 'text' && part.paragraph.runs.some(run => run.text.includes('Hello box')))
+    check(!!text, 'PPTX box text was not native: ' + JSON.stringify(measured.report))
+    check(Math.abs(text.paragraph.rect.x - 320) < 2 && Math.abs(text.paragraph.rect.width - 640) < 2 &&
+      Math.abs(text.paragraph.runs[0].style.fontSize - 32 * 96 / 72) < 1, 'PPTX box geometry or font size differs: ' + JSON.stringify(text))
+    const archive = await JSZip.loadAsync(Buffer.from(measured.pptx, 'base64'))
+    const xml = await archive.file('ppt/slides/slide1.xml').async('string')
+    check(xml.includes('Hello box') && /sz="3200"/.test(xml), 'Generated PPTX does not contain the editable text at 32pt')
+  })
   await scenario('table-cell-edit-and-break-undo', async () => {
     await click('表セル'); await send('Input.insertText', { text: '修正' }); await delay(180)
     check((await evaluate('state().modelText'))?.includes('| 表の前<br>表の後 | 表セル修正<br> |'), 'Table cell text was not edited')

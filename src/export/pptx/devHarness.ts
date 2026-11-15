@@ -1,4 +1,4 @@
-import { Marp } from '@marp-team/marp-core'
+import { createBoxMarp } from '../../marp/boxHtml'
 import browser from '@marp-team/marp-core/browser'
 import { toSvg } from 'html-to-image'
 import { exportPptx, measureDeck } from './index'
@@ -61,7 +61,7 @@ let previewCleanup: (() => void) | undefined
 /** Visible 1:1 Marp surface for actual WebView2 screenshots, with no app UI changes. */
 export async function showFixtureForCDP(markdown: string, baseDir: string, index: number) {
   previewCleanup?.()
-  const marp = new Marp({ script: false, math: 'mathjax' })
+  const marp = createBoxMarp()
   marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
   const rendered = marp.render(markdown), deck = splitRenderedSlides(rendered.html)
   const host = document.createElement('div')
@@ -126,7 +126,7 @@ export async function showFontFixtureForCDP(markdown: string, index: number) {
 
 const fixtures = import.meta.glob('../../../tests/fixtures/export/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
 export async function exportFixtureForCDP(markdown: string, baseDir: string, fontEmbedCSS?: string, diagrams = false) {
-  const marp = new Marp({ script: false, math: 'mathjax', ...(diagrams ? { html: svgHtmlAllowlist } : {}) })
+  const marp = createBoxMarp(diagrams ? { svgHtmlAllowlist } : {})
   marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
   let scaling: unknown[] = []
   const measured = await measureDeck({ markdown, marp, baseDir }, { fontEmbedCSS, onProgress: () => {
@@ -144,7 +144,7 @@ export async function exportFixtureForCDP(markdown: string, baseDir: string, fon
 }
 /** --inspect-dir equivalent: return diagnostics for a caller to persist outside the repo. */
 export async function inspectFixtureForCDP(markdown: string, baseDir: string) {
-  const marp = new Marp({ script: false, math: 'mathjax', html: svgHtmlAllowlist })
+  const marp = createBoxMarp({ svgHtmlAllowlist })
   marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
   const inspection: import('./index').ExportInspection[] = []
   const measured = await measureDeck({ markdown, marp, baseDir }, {
@@ -161,7 +161,7 @@ export async function exportFixtures() {
   const results = []
   for (const [path, markdown] of Object.entries(fixtures)) {
     const name = path.split('/').at(-1)!.slice(0, -3)
-    const marp = new Marp({ script: false, math: 'mathjax' })
+    const marp = createBoxMarp()
     marp.themeSet.add('/* @theme export-custom */\n@import "default"; section { width:1000px; height:600px; font-family:"Yu Gothic"; font-size:30px; padding:60px; }')
     const source = { markdown, marp, baseDir: info.baseDir }
     const options = { toAssetUrl: (absolute: string) => `/@fs/${absolute.replace(/\\/g, '/')}` }
@@ -185,7 +185,7 @@ export async function probeRasterization(theme = 'default', fontEmbedCSS = '') {
   const fonts = document.createElement('style')
   fonts.textContent = fontEmbedCSS
   document.head.append(fonts)
-  const marp = new Marp({ script: false, math: 'mathjax' })
+  const marp = createBoxMarp()
   const rendered = marp.render(`---\nmarp: true\ntheme: ${theme}\n---\n# 日本語 Test\n\n$$E=mc^2$$`)
   shadow.innerHTML = `<style>${rendered.css}</style>${rendered.html}`
   if (fontEmbedCSS) shadow.querySelector<HTMLElement>('h1')!.style.fontFamily = 'SlideAppProbeWebFont'

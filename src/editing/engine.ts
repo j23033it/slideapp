@@ -11,6 +11,7 @@ import { captureLists, planListIndent, type ListSnapshot, type ListIndentDirecti
 import { collectElements, elementReason, planElementOperation, type ElementOperation, type ElementOperationResult } from './elements';
 import { captureTableSnapshots, planTableOperation, validateTableOperation, type TableOperation, type TableResult } from './tableOperations';
 import { reason, type Analysis, type Block, type EditResult, type ReadonlyReason, type Run } from './types';
+import { findBoxPairs } from '../marp/boxPairs';
 
 const engines = new WeakMap<object, EditingEngine>();
 const tokenRuns = new WeakMap<Token, Run>();
@@ -80,6 +81,7 @@ export interface EditingEngine {
   /** Commit pending text input/IME and finish drafts before calling. Indices are zero-based. */
   applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult;
   applyElementOperation(text: string, operation: ElementOperation, eols: readonly Eol[]): ElementOperationResult;
+  insertBox(text: string, slide: number, width: number, height: number, eols: readonly Eol[]): NewlineResult;
   applyTableOperation(text: string, operation: TableOperation, eols: readonly Eol[]): TableResult;
 }
 
@@ -100,6 +102,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
   const analysisTokens = new WeakMap<Analysis, Token[]>();
   const rawTokens = new WeakMap<Analysis, Token[]>();
   const tableEmptyPositions = new WeakMap<Analysis, number[]>();
+  const boxEmptyPositions = new WeakMap<Analysis, number[]>();
   const listSnapshots = new WeakMap<Analysis, ListSnapshot>();
   let emptyPositions: number[] = [];
   wrapRenderers(md);
@@ -111,6 +114,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
       pending.slideSources = slides;
       pending.elementSources = collectElements(state.src, state.tokens, slides, ++elementRevision, reuseIds?.elementSources);
       tableEmptyPositions.set(pending, findEmptyTableCells(state.src, state.tokens));
+      boxEmptyPositions.set(pending, findEmptyBoxes(state.src, state.tokens, slides));
       return;
     }
     // Probes change source offsets and may create a temporary block. Only map
@@ -181,13 +185,14 @@ export function createEngine(marp: MarpLike): EditingEngine {
       listSnapshots.set(analysis, captureLists(text, analysisTokens.get(analysis) ?? [], token => tokenRuns.get(token)));
       if (!probes) {
         const actual = analysisTokens.get(analysis) ?? [];
-        const positions = [...emptyItemPositions(text, actual), ...(tableEmptyPositions.get(analysis) ?? [])];
+        const emptyBoxes = boxEmptyPositions.get(analysis) ?? [];
+        const positions = [...emptyItemPositions(text, actual), ...(tableEmptyPositions.get(analysis) ?? []), ...emptyBoxes];
         if (extraEmpty !== undefined) positions.push(extraEmpty);
         if (positions.length) {
           const editable = renderAnalysis(text, analysis, undefined, [...new Set(positions)].sort((a, b) => a - b));
           // Permanent empty items may gain only their editable paragraph shell.
           if (extraEmpty === undefined && tokenSignature(withoutEmptyTableInlines(withoutEmptyItemShells(actual)), shape) !==
-              tokenSignature(withoutEmptyTableInlines(withoutEmptyItemShells(analysisTokens.get(editable) ?? [])), shape)) {
+              tokenSignature(withoutEmptyBoxShells(withoutEmptyTableInlines(withoutEmptyItemShells(analysisTokens.get(editable) ?? [])), text, emptyBoxes), shape)) {
             captureTableSnapshots(analysis); current = analysis; return analysis;
           }
           rawTokens.set(editable, actual);
@@ -429,6 +434,26 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit: plan, newText, analysis: after };
   }
 
+  function insertBox(text: string, slide: number, width: number, height: number, eols: readonly Eol[]): NewlineResult {
+    const before = current;
+    const fail = (): NewlineResult => { current = before; return { ok: false, reason: reason('structure-changed', 'The empty text box could not be validated') }; };
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return fail();
+    const left = Math.round(width * 0.25), top = Math.round(height * 0.4), boxWidth = Math.round(width * 0.5);
+    const open = `<div data-box style="position:absolute; left:${left}px; top:${top}px; width:${boxWidth}px">`;
+    const inserted = applyElementOperation(text, { kind: 'insert', slide, lines: [open, '', '', '', '</div>'], expectedKinds: ['box'] }, eols);
+    if (!inserted.ok) return fail();
+    const prefixLength = /^\n*/.exec(inserted.edit.insert)![0].length;
+    const position = inserted.edit.start + prefixLength + open.length + 2;
+    let analysis: Analysis;
+    try { analysis = renderAnalysis(inserted.newText, inserted.analysis, position); } catch { return fail(); }
+    const run = analysis.runs.find(entry => entry.editable && entry.text === '' && entry.segments.length === 1 && entry.segments[0].start === position);
+    if (!run) return fail();
+    const edit: SourceEdit = { ...inserted.edit, draft: 'begin', draftPosition: position };
+    analysis.draft = { runId: run.id, edit, before: { runId: '', offset: 0, slideIndex: slide } };
+    current = analysis;
+    return { ok: true, edit, newText: inserted.newText, analysis, escaped: false, cursor: { runId: run.id, offset: 0 } };
+  }
+
   function applyTableOperation(text: string, operation: TableOperation, eols: readonly Eol[]): TableResult {
     const before = current;
     const fail = (code: import('./tableOperations').TableReasonCode): TableResult => {
@@ -449,7 +474,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     } catch { return fail('element-structure-changed'); }
   }
 
-  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation };
+  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
   engines.set(marp, engine);
   return engine;
 }
@@ -662,6 +687,31 @@ function findEmptyTableCells(source: string, tokens: Token[]): number[] {
     if (token.nesting > 0) stack.push(token);
   }
   return result;
+}
+
+function findEmptyBoxes(source: string, tokens: Token[], slides: import('./slides').SlideSources): number[] {
+  const starts = [0];
+  for (let i = 0; i < source.length; i++) if (source[i] === '\n') starts.push(i + 1);
+  return findBoxPairs(source, tokens, slides).flatMap(box => {
+    if (!box.open.map || !box.close.map) return [];
+    const start = starts[box.open.map[1]], end = starts[box.close.map[0]];
+    if (start === undefined || end === undefined) return [];
+    const interior = source.slice(start, end);
+    // Keep a blank line on either side of the synthetic paragraph.
+    if (!/^(?:[ \t]*\n){3,}$/.test(interior)) return [];
+    return [start + /^[ \t]*\n/.exec(interior)![0].length];
+  });
+}
+
+function withoutEmptyBoxShells(tokens: Token[], source: string, positions: number[]): Token[] {
+  const lines = new Set(positions.map(position => source.slice(0, position).split('\n').length - 1));
+  return tokens.filter((token, index) => {
+    const start = token.type === 'paragraph_open' ? index : token.type === 'inline' ? index - 1 : token.type === 'paragraph_close' ? index - 2 : -1;
+    if (start < 0) return true;
+    const open = tokens[start], inline = tokens[start + 1], close = tokens[start + 2];
+    return !(open?.type === 'paragraph_open' && open.map && lines.has(open.map[0]) && inline?.type === 'inline' &&
+      inline.content === '' && !(inline.children ?? []).some(child => child.type !== 'text' || child.content) && close?.type === 'paragraph_close');
+  });
 }
 
 function withoutEmptyTableInlines(tokens: Token[]): Token[] {

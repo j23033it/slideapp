@@ -38,14 +38,14 @@ export interface StageFocus {
 export interface StageEditorOptions {
   /** 直近に採用された解析結果とデッキ（編集終了時の再描画に使う） */
   latest(): { analysis: Analysis; deck: RenderedDeck }
-  onBegin(label: string): void
+  onBegin(label: string, elementId?: string): void
   onEnd(): void
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete?(id: string): boolean
-  onElementSelect?(kind: ElementKind | null): void
+  onElementSelect?(kind: ElementKind | null, id?: string): void
   onImageResize?(id: string, width: number, slideWidth: number): void
 }
 
@@ -193,7 +193,7 @@ export class StageEditor {
         this.positionImageHandles(element)
       }
     }
-    if (notify) this.options.onElementSelect?.(source.kind)
+    if (notify) this.options.onElementSelect?.(source.kind, id)
   }
 
   private readonly onPointerDown = (): void => {
@@ -309,7 +309,7 @@ export class StageEditor {
       if (!fresh) return
       const block = fresh.closest<HTMLElement>('[data-sm-block]')
       block?.focus({ preventScroll: true })
-      this.options.onBegin(labelForBlock(block))
+      this.options.onBegin(labelForBlock(block), fresh.closest<HTMLElement>('[data-sm-element]')?.dataset.smElement)
       const existing = selectionInRun(this.root, fresh)
       if (!existing || existing.collapsed || previousSelection !== undefined) {
         const point = caretInRun(fresh, event.clientX, event.clientY, this.root)
@@ -611,6 +611,7 @@ export class StageEditor {
 
   /** デッキを反映し、編集アダプタを作り直す。`focus` があればその位置へカーソルを戻す */
   render(deck: RenderedDeck, analysis: Analysis, current: number, focus?: StageFocus): void {
+    const hadSelection = !!this.selectedElement
     const selected = current === this.current && analysis === this.analysis ? this.selectedElement : null
     this.clearElementSelection(false)
     this.endEditingSilently()
@@ -626,6 +627,7 @@ export class StageEditor {
       this.pendingElementSelection = null
       this.selectElement(pending)
     } else if (selected) this.selectElement(selected, false)
+    else if (hadSelection) this.options.onElementSelect?.(null)
     if (focus && focus.seq !== this.lastFocusSeq) {
       this.lastFocusSeq = focus.seq
       this.focusRun(focus.cursor)
@@ -773,7 +775,7 @@ export class StageEditor {
     const block = fresh.closest<HTMLElement>('[data-sm-block]')
     block?.focus({ preventScroll: true })
     setCaretInRun(fresh, cursor.offset)
-    this.options.onBegin(labelForBlock(block))
+    this.options.onBegin(labelForBlock(block), fresh.closest<HTMLElement>('[data-sm-element]')?.dataset.smElement)
   }
 
   private currentCursor(end: boolean): Cursor | undefined {

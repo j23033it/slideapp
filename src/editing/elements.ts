@@ -1,12 +1,13 @@
 import { preferredEol, type DocumentModel, type Eol, type SourceEdit } from '../document';
 import type { Token } from './markdown-types';
 import type { SlideSources } from './slides';
+import { findBoxPairs } from '../marp/boxPairs';
 
-export type ElementKind = 'paragraph' | 'heading' | 'list' | 'quote' | 'table' | 'code' | 'image';
+export type ElementKind = 'paragraph' | 'heading' | 'list' | 'quote' | 'table' | 'code' | 'image' | 'box';
 export type InsertBlockKind = ElementKind | 'html';
 export type ElementReasonCode = 'element-ambiguous' | 'element-structure-changed' | 'element-heading-divider' | 'element-readonly';
 export interface ElementReason { code: ElementReasonCode; description: string }
-export interface SourceElement { id: string; kind: ElementKind; slide: number; start: number; end: number; signature: string; unsafe: boolean; imageAlt?: { start: number; end: number; text: string; sizes: { name: string; value: string; start: number; end: number }[] } }
+export interface SourceElement { id: string; kind: ElementKind; slide: number; start: number; end: number; signature: string; unsafe: boolean; boxStyle?: { size?: number; numberStart?: number; numberEnd?: number; declarationStart?: number; declarationEnd?: number; insertAt: number }; imageAlt?: { start: number; end: number; text: string; sizes: { name: string; value: string; start: number; end: number }[] } }
 export interface SourceGroup { slide: number; start: number; end: number; signature: string; kind?: InsertBlockKind }
 export interface ElementSources { elements: SourceElement[]; groups: SourceGroup[]; signature: string[][]; valid: boolean }
 export type ElementOperation = { kind: 'delete'; elementId: string } | {
@@ -45,12 +46,18 @@ export function collectElements(text: string, tokens: Token[], slides: SlideSour
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
   const elements: SourceElement[] = [], groups: SourceGroup[] = [], signature = slides.bodies.map(() => [] as string[]);
+  const boxes = new Map(findBoxPairs(text, tokens, slides).map(box => [box.open, box]));
   let valid = true;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if (token.level !== 0 || token.type === 'front_matter' || token.type === 'hr') continue;
     let endIndex = i + 1;
-    if (token.nesting === 1) {
+    const box = boxes.get(token);
+    if (box) {
+      const closeIndex = tokens.indexOf(box.close, endIndex);
+      if (closeIndex < 0) { valid = false; continue; }
+      endIndex = closeIndex + 1;
+    } else if (token.nesting === 1) {
       let depth = 1;
       while (endIndex < tokens.length && depth) depth += tokens[endIndex++].nesting;
       if (depth) { valid = false; break; }
@@ -58,10 +65,10 @@ export function collectElements(text: string, tokens: Token[], slides: SlideSour
     const group = tokens.slice(i, endIndex); i = endIndex - 1;
     const map = token.map;
     if (!map || map[0] < 0 || map[1] <= map[0] || map[0] >= starts.length || map[1] > starts.length) { valid = false; continue; }
-    const start = starts[map[0]], end = starts[map[1]] ?? text.length;
+    const start = starts[map[0]], end = box?.end ?? (starts[map[1]] ?? text.length);
     const slide = slides.bodies.findIndex(body => start >= body.start && end <= body.end);
     if (slide < 0) { valid = false; continue; }
-    let kind = kinds[token.type];
+    let kind = box ? 'box' : kinds[token.type];
     if (kind === 'paragraph') {
       const children = group.find(t => t.type === 'inline')?.children ?? [];
       const meaningful = children.filter(t => t.type !== 'text' || t.content.trim());
@@ -71,7 +78,7 @@ export function collectElements(text: string, tokens: Token[], slides: SlideSour
     signature[slide].push(sig);
     groups.push({ slide, start, end, signature: sig, kind: kind ?? (token.type === 'html_block' ? 'html' : undefined) });
     if (!kind) continue;
-    const unsafe = group.some(t => t.type === 'html_block' || t.type === 'marpit_comment' ||
+    const unsafe = group.some(t => (t.type === 'html_block' && t !== box?.open && t !== box?.close) || t.type === 'marpit_comment' ||
       (t.children ?? []).some(c => c.type === 'html_inline' || /comment/.test(c.type)));
     const prior = reuse?.elements[elements.length];
     const id = prior?.kind === kind && prior.slide === slide ? prior.id : `e${revision}-${elements.length}`;
@@ -91,7 +98,17 @@ export function collectElements(text: string, tokens: Token[], slides: SlideSour
         imageAlt = { start: altStart, end: altStart + match[1].length, text: match[1], sizes };
       }
     }
-    elements.push({ id, kind, slide, start, end, signature: sig, unsafe, imageAlt });
+    let boxStyle: SourceElement['boxStyle'];
+    if (box) {
+      const style = text.slice(box.styleStart, box.styleEnd);
+      const font = /(;[ \t]*font-size[ \t]*:[ \t]*)(\d+)pt([ \t]*)$/.exec(style);
+      const tail = /[ \t]*$/.exec(style)![0].length;
+      boxStyle = font ? { size: Number(font[2]), numberStart: box.styleStart + font.index + font[1].length,
+        numberEnd: box.styleStart + font.index + font[1].length + font[2].length,
+        declarationStart: box.styleStart + font.index, declarationEnd: box.styleEnd - font[3].length,
+        insertAt: box.styleStart + font.index } : { insertAt: box.styleEnd - tail };
+    }
+    elements.push({ id, kind, slide, start, end, signature: sig, unsafe, imageAlt, boxStyle });
   }
   return { elements, groups, signature, valid };
 }

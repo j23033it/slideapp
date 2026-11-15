@@ -78,6 +78,15 @@ export function collectSlideSources(text: string, tokens: Token[], md: Markdown)
     }
     if (token.type === 'hr' && token.level === 0) {
       const separator = range(token);
+      // headingDivider creates a hidden separator on the heading's own line.
+      // It has no source bytes, but still identifies a rendered-slide boundary.
+      // Structural slide and element operations remain disabled by reason.
+      if (token.hidden && sources.reason?.code === 'slide-heading-divider' && separator && separator.start >= start) {
+        sources.bodies.push({ start, end: separator.start });
+        sources.separators.push({ start: separator.start, end: separator.start });
+        start = separator.start;
+        continue;
+      }
       // Generated heading dividers and any synthetic/multiline boundary are unsafe.
       if (!separator || token.hidden || !token.map || token.map[1] !== token.map[0] + 1 || separator.start < start ||
           !/^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})\n?$/.test(text.slice(separator.start, separator.end))) {

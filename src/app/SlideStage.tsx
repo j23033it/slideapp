@@ -11,14 +11,14 @@ import { attachTableMenu, type TableMenuTarget } from './tableMenu'
 import type { TableCommand, TableReasonCode } from '../editing/tableOperations'
 
 export interface SlideStageCallbacks {
-  onBegin(label: string): void
+  onBegin(label: string, elementId?: string): void
   onEnd(): void
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete(id: string): boolean
-  onElementSelect(kind: ElementKind | null): void
+  onElementSelect(kind: ElementKind | null, id?: string): void
   onTableReason?(target: TableMenuTarget, command: TableCommand | 'delete-table'): TableReasonCode | undefined
   onTableCommand?(target: TableMenuTarget, command: TableCommand | 'delete-table'): void
   onImageResize?(id: string, width: number, slideWidth: number): void
@@ -58,14 +58,14 @@ export function SlideStage({
         const latest = sessionRef.current
         return { analysis: latest.analysis, deck: latest.deck }
       },
-      onBegin: (label) => callbacksRef.current.onBegin(label),
+      onBegin: (label, id) => callbacksRef.current.onBegin(label, id),
       onEnd: () => callbacksRef.current.onEnd(),
       onNotice: (code) => callbacksRef.current.onNotice(code),
       onCommit: (result, cursors) => callbacksRef.current.onCommit(result, cursors),
       onCrossRun: (result, target, before) => callbacksRef.current.onCrossRun(result, target, before),
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
       onElementDelete: (id) => callbacksRef.current.onElementDelete(id),
-      onElementSelect: (kind) => callbacksRef.current.onElementSelect(kind),
+      onElementSelect: (kind, id) => callbacksRef.current.onElementSelect(kind, id),
       onImageResize: callbacks.onImageResize ? (id, width, slideWidth) => callbacksRef.current.onImageResize?.(id, width, slideWidth) : undefined,
     })
     editorRef.current = editor

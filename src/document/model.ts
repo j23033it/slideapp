@@ -6,6 +6,8 @@ export interface SourceEdit {
   eols?: Exclude<Eol, ''>[];
   /** Empty paragraph/line insertion, its first text input, or its exact rollback. */
   draft?: 'begin' | 'accept' | 'cancel';
+  /** Source position of the editable empty run after a draft insertion. */
+  draftPosition?: number;
 }
 export interface Cursor {
   runId: string; offset: number;
@@ -117,8 +119,9 @@ export class DocumentModel {
       this.cancelDraft(); return;
     }
     if (this.draft && edit.draft !== 'accept') throw new Error('Finish the pending empty-line edit first');
-    if (edit.draft === 'begin' && (edit.start !== edit.end || !edit.insert.includes('\n'))) throw new Error('Draft must insert a newline');
-    if (edit.draft === 'accept' && (!this.draft || edit.start !== this.draft.change.reverse.end || edit.end !== edit.start)) {
+    if (edit.draft === 'begin' && (edit.start !== edit.end || !edit.insert.includes('\n') ||
+      (edit.draftPosition !== undefined && (!Number.isInteger(edit.draftPosition) || edit.draftPosition < edit.start || edit.draftPosition > edit.start + edit.insert.length)))) throw new Error('Draft must insert a newline');
+    if (edit.draft === 'accept' && (!this.draft || edit.start !== (this.draft.change.forward.draftPosition ?? this.draft.change.reverse.end) || edit.end !== edit.start)) {
       throw new Error('First draft input must use the recorded empty-run position');
     }
     const next = applyEdit(this, edit);
