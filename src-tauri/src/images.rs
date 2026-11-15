@@ -1,4 +1,8 @@
-use std::{fs, io::{self, Write}, path::{Component, Path}};
+use std::{io, path::{Component, Path}};
+#[cfg(any(test, not(windows)))]
+use std::fs;
+#[cfg(not(windows))]
+use std::io::Write;
 
 fn encoded_relative(path: &Path) -> io::Result<String> {
     let mut parts = Vec::new();
@@ -25,6 +29,14 @@ fn import(md: &Path, source: &Path) -> io::Result<String> {
     if !source.is_file() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file")); }
     let base = md.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?.canonicalize()?;
     if let Ok(relative) = source.strip_prefix(&base) { return encoded_relative(relative); }
+    #[cfg(windows)]
+    { return windows_import::copy(&base, &source, || {}, || Ok(())); }
+    #[cfg(not(windows))]
+    copy_portable(&base, &source)
+}
+
+#[cfg(not(windows))]
+fn copy_portable(base: &Path, source: &Path) -> io::Result<String> {
     let directory = base.join("images");
     fs::create_dir_all(&directory)?;
     if directory.canonicalize()? != directory { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "images directory is redirected")); }
@@ -54,6 +66,10 @@ fn import(md: &Path, source: &Path) -> io::Result<String> {
     }
     unreachable!()
 }
+
+#[cfg(windows)]
+#[path = "images_windows.rs"]
+mod windows_import;
 
 #[tauri::command]
 pub fn import_image(md_path: String, source_path: String) -> Result<String, String> {
