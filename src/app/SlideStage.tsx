@@ -16,7 +16,10 @@ export interface SlideStageCallbacks {
   onEnd(): void
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
-  onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
+  onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor, selectionEnd?: Cursor): void
+  onElementBold(result: EditSuccess, elementId: string): void
+  canBold(): boolean
+  onBoldState(active: boolean): void
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete(id: string): boolean
   onElementSelect(kind: ElementKind | null, id?: string): void
@@ -64,7 +67,10 @@ export function SlideStage({
       onEnd: () => callbacksRef.current.onEnd(),
       onNotice: (code) => callbacksRef.current.onNotice(code),
       onCommit: (result, cursors) => callbacksRef.current.onCommit(result, cursors),
-      onCrossRun: (result, target, before) => callbacksRef.current.onCrossRun(result, target, before),
+      onCrossRun: (result, target, before, selectionEnd) => callbacksRef.current.onCrossRun(result, target, before, selectionEnd),
+      onElementBold: (result, id) => callbacksRef.current.onElementBold(result, id),
+      canBold: () => callbacksRef.current.canBold(),
+      onBoldState: active => callbacksRef.current.onBoldState(active),
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
       onElementDelete: (id) => callbacksRef.current.onElementDelete(id),
       onElementSelect: (kind, id) => callbacksRef.current.onElementSelect(kind, id),
@@ -88,6 +94,7 @@ export function SlideStage({
     host.ownerDocument.addEventListener('selectionchange', rememberCursor)
     apiRef.current = {
       cancelDrag: () => editor.cancelDrag(),
+      toggleBold: () => editor.toggleBold(),
       endEditing: () => editor.endEditing(),
       insertionAnchor: () => editor.insertionAnchor(),
       selectElementOnRender: id => editor.selectElementOnRender(id),

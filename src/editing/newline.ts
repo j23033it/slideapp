@@ -12,7 +12,7 @@ function visible(tokens: Token[]): Token[] {
 }
 
 /** Map a caret using recorded segments; never split an entity or an escape. */
-function sourcePoint(run: Run, offset: number): number | undefined {
+export function sourcePoint(run: Run, offset: number): number | undefined {
   if (!Number.isInteger(offset) || offset < 0 || offset > run.text.length) return;
   let display = 0;
   for (const segment of run.segments) {

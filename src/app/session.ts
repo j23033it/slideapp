@@ -37,6 +37,7 @@ export function editorSessionSaveState(session: EditorSession): SaveState {
 /** 表示中のスライドに渡す操作 */
 export interface StageApi {
   cancelDrag?(): void
+  toggleBold?(): void
   endEditing(): void
   insertionAnchor?(): string | undefined
   selectElementOnRender?(id: string): void

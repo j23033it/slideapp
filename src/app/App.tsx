@@ -221,6 +221,8 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   onRecent, onOpen, onReady, onState, apiRef, toolbarHost }: WorkspaceProps) {
   const [view, setView] = useState<ViewState>(INITIAL_VIEW)
   const [boxTarget, setBoxTarget] = useState<string | null>(null)
+  const [boldActive, setBoldActive] = useState(false)
+  const [boldUnavailable, setBoldUnavailable] = useState(false)
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [updateInstallLocked, setUpdateInstallLocked] = useState(false)
@@ -306,9 +308,9 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     }))
   }, [])
 
-  const nextFocus = useCallback((cursor: Cursor): StageFocus => {
+  const nextFocus = useCallback((cursor: Cursor, selectionEnd?: Cursor): StageFocus => {
     focusSeq.current += 1
-    return { seq: focusSeq.current, cursor }
+    return { seq: focusSeq.current, cursor, selectionEnd }
   }, [])
 
   /** IME変換中なら操作を予約する。確定とコミットの後に実行される */
@@ -1154,6 +1156,11 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   }
 
   const stageCallbacks: SlideStageCallbacks = {
+    canBold: () => {
+      const session = sessionRef.current
+      return !!session && session.model.state !== 'readonly' && !session.conflict && !updateInstallLockedRef.current && !pendingRef.current && !viewRef.current.busy
+    },
+    onBoldState: setBoldActive,
     onTableReason: tableReason,
     onTableCommand: (target, command) => { void runTableCommand(target, command) },
     onBoxPlace: (id, geometry) => {
@@ -1184,7 +1191,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       if (next) stageApi.current?.selectElementOnRender?.(next.id)
       syncDeck({ detail: null })
     },
-    onElementSelect: (kind, id) => { setBoxTarget(kind === 'box' ? id ?? null : null); sync({ detail: kind ? strings.elementOperations.selected[kind] : null }) },
+    onElementSelect: (kind, id) => { setBoldUnavailable(kind === 'code' || kind === 'image'); setBoxTarget(kind === 'box' ? id ?? null : null); sync({ detail: kind ? strings.elementOperations.selected[kind] : null }) },
     onElementDelete: (id) => {
       const session = sessionRef.current
       if (!session || session.model.state === 'readonly' || session.conflict || updateInstallLockedRef.current) {
@@ -1245,7 +1252,15 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       if (cursors.after) session.focus = nextFocus(cursors.after)
       sync()
     },
-    onCrossRun: (result: EditSuccess, target: Cursor, before?: Cursor) => {
+    onElementBold: (result: EditSuccess) => {
+      const session = sessionRef.current
+      if (!session) return
+      try { session.model.edit(result.edit) } catch { sync({ detail: strings.errors.unknown }); return }
+      analyzeSession(session, result.analysis)
+      session.focus = undefined
+      syncDeck({ detail: null })
+    },
+    onCrossRun: (result: EditSuccess, target: Cursor, before?: Cursor, selectionEnd?: Cursor) => {
       if (updateInstallLockedRef.current) return
       const session = sessionRef.current
       if (!session) return
@@ -1258,7 +1273,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         return
       }
       analyzeSession(session, result.analysis)
-      session.focus = nextFocus(target)
+      session.focus = nextFocus(target, selectionEnd)
       editingRef.current = false
       syncDeck({ detail: null })
     },
@@ -1508,6 +1523,9 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         onTableOpen={() => { tableAnchor.current = stageApi.current?.insertionAnchor?.() }}
         onInsertTable={(columns, rows) => { void runTableInsertion(columns, rows) }}
         onInsertBox={() => { void insertBoxNow() }}
+        onBold={() => stageApi.current?.toggleBold?.()}
+        boldActive={boldActive}
+        boldDisabledReason={!session ? strings.toolbar.noFile : session.conflict ? strings.toolbar.conflict : view.saveState === 'readonly' ? strings.toolbar.readonly : boldUnavailable ? strings.toolbar.boldUnavailable : undefined}
         boxFontSize={currentBox?.boxStyle?.size ?? null}
         boxFontDisabledReason={!session ? strings.toolbar.noFile : session.conflict ? strings.toolbar.conflict :
           view.saveState === 'readonly' ? strings.toolbar.readonly : !currentBox ? strings.toolbar.fontSizeUnavailable : undefined}

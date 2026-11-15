@@ -34,6 +34,7 @@ export interface EditingCursors {
 export interface StageFocus {
   seq: number
   cursor: Cursor
+  selectionEnd?: Cursor
 }
 
 export interface StageEditorOptions {
@@ -43,7 +44,10 @@ export interface StageEditorOptions {
   onEnd(): void
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
-  onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
+  onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor, selectionEnd?: Cursor): void
+  onElementBold?(result: EditSuccess, elementId: string): void
+  canBold?(): boolean
+  onBoldState?(active: boolean): void
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete?(id: string): boolean
   onElementSelect?(kind: ElementKind | null, id?: string): void
@@ -77,6 +81,7 @@ export class StageEditor {
   private editing = false
   private suppressFinish = false
   private pendingBefore: Cursor | undefined
+  private rejectionCount = 0
   private lastFocusSeq = -1
   private readonly composition = new CompositionGate()
   private compositionEndToken: number | null = null
@@ -130,7 +135,7 @@ export class StageEditor {
     this.imageHandles?.remove()
     this.imageHandles = undefined
     this.selectedElement = null
-    if (notify && hadSelection) this.options.onElementSelect?.(null)
+    if (notify && hadSelection) { this.options.onElementSelect?.(null); this.options.onBoldState?.(false) }
   }
 
   private selectElement(id: string, notify = true): void {
@@ -217,6 +222,7 @@ export class StageEditor {
         this.positionImageHandles(element)
       }
     }
+    this.options.onBoldState?.(this.engine.isElementBold(id))
     if (notify) this.options.onElementSelect?.(source.kind, id)
   }
 
@@ -456,6 +462,11 @@ export class StageEditor {
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
     if (event.composedPath().some(node => node instanceof Element && node.hasAttribute('data-sm-table-menu'))) return
+    if ((this.editing || this.selectedElement) && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'b') {
+      event.preventDefault(); event.stopPropagation()
+      if (!event.isComposing && event.keyCode !== 229 && !this.hasPendingComposition()) this.toggleBold()
+      return
+    }
     if (event.key === 'Tab' && this.editing) {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
       event.preventDefault()
@@ -599,7 +610,37 @@ export class StageEditor {
     if (!this.pendingBefore) this.pendingBefore = this.currentCursor(false)
   }
 
-  private readonly onSelectionChange = (): void => { this.cancelAbandonedDraft() }
+  private readonly onSelectionChange = (): void => {
+    this.cancelAbandonedDraft()
+    const selection = selectionFor(this.root)
+    const run = runElementOf(selection?.focusNode ?? null)
+    this.options.onBoldState?.(this.selectedElement ? this.engine.isElementBold(this.selectedElement) : !!run && this.root.contains(run) && this.engine.isBold(run.dataset.smRun ?? ''))
+  }
+
+  toggleBold(): void {
+    if (this.hasPendingComposition()) return
+    if (!this.options.canBold?.()) { this.options.onNotice('element-readonly'); return }
+    // Commit retained DOM text before using the engine's current analysis. A
+    // rejected commit has already reported its reason and must stop formatting.
+    const rejections = this.rejectionCount
+    this.settleComposition()
+    if (this.rejectionCount !== rejections) return
+    if (this.selectedElement) {
+      if (!this.options.onElementBold) return
+      const result = this.engine.applyElementBold(this.analysis.text, this.selectedElement)
+      if (!result.ok) { this.options.onNotice(result.reason.code); return }
+      this.pendingElementSelection = result.elementId
+      this.options.onElementBold(result, result.elementId)
+      return
+    }
+    const before = this.currentCursor(false), end = this.currentCursor(true)
+    if (!before || !end) { this.options.onNotice('bold-multiple-runs'); return }
+    const result = this.engine.applyBold(this.analysis.text, before, end)
+    if (!result.ok) { this.options.onNotice(result.reason.code); return }
+    this.analysis = result.analysis
+    this.endEditingSilently()
+    this.options.onCrossRun(result, result.cursor, before, result.selectionEnd)
+  }
 
   /** Roll back an unfilled line after navigation, retaining the actual selection. */
   private cancelAbandonedDraft(): boolean {
@@ -739,6 +780,11 @@ export class StageEditor {
     if (focus && focus.seq !== this.lastFocusSeq) {
       this.lastFocusSeq = focus.seq
       this.focusRun(focus.cursor)
+      if (focus.selectionEnd) {
+        const first = this.runElement(focus.cursor.runId), last = this.runElement(focus.selectionEnd.runId)
+        const a = first && pointInRun(first, focus.cursor.offset), b = last && pointInRun(last, focus.selectionEnd.offset)
+        if (a && b) selectionFor(this.root)?.setBaseAndExtent(a.node, a.offset, b.node, b.offset)
+      }
     }
   }
 
@@ -807,6 +853,7 @@ export class StageEditor {
         this.options.onCommit(result, { before, after: this.currentCursor(true) })
       },
       onReject: (why) => {
+        this.rejectionCount++
         this.pendingBefore = undefined
         this.options.onNotice(why.code)
       },

@@ -80,6 +80,7 @@ export const strings = {
   appName: 'SlideApp',
 
   toolbar: {
+    bold: 'B', boldTitle: '太字 (Ctrl+B)', boldUnavailable: 'この要素は太字にできません',
     box: 'テキストボックス', boxTitle: 'テキストボックスを挿入',
     fontSize: '文字サイズ', fontSizeTitle: '文字の大きさを変更', fontSizeDefault: '既定', fontSizeUnavailable: 'テキストボックスで変更できます',
     table: '表', tableTitle: '表を挿入',
@@ -191,6 +192,10 @@ export const strings = {
       'list-indent-first': '先頭の項目は、これ以上深くできません',
       'list-indent-top': '最上位の項目は、これ以上浅くできません',
       'list-indent-unsafe': '箇条書きの構造を正しく確認できないため、階層を変更できません',
+      'bold-multiple-runs': '複数の文字や装飾にまたがるため太字を変更できません',
+      'bold-partial': '太字の一部だけは変更できません',
+      'bold-invalid-position': 'この位置では太字にできません',
+      'element-readonly': '読み取り専用または競合中のため操作できません',
     } satisfies Record<ReadonlyCode, string>,
   },
 
