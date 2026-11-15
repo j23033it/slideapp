@@ -50,7 +50,7 @@ async function waitFor(expression, timeout = 10000) {
   throw new Error(`Timed out: ${expression}`)
 }
 async function key(key, modifiers = 0) {
-  const code = { Tab: 9, Enter: 13, Backspace: 8, Delete: 46, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, b: 66, c: 67, m: 77, y: 89, z: 90 }[key]
+  const code = { Tab: 9, Enter: 13, Backspace: 8, Delete: 46, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, F5: 116, c: 67, m: 77, y: 89, z: 90, s: 83, b: 66, w: 87, '1': 49, '2': 50 }[key]
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await delay(180)
@@ -759,6 +759,122 @@ try {
     check(await evaluate('editor.options.latest().analysis.text') === initial, 'Undo did not restore source after drag')
     await key('y', 2)
     check(await evaluate('editor.options.latest().analysis.text') === moved, 'Redo did not restore dragged source')
+  })
+  const show = `document.querySelector('[role="region"][aria-label="スライドショー"]')`
+  const showText = `${show}?.firstElementChild?.shadowRoot?.querySelector('.frame')?.textContent`
+  const startShow = async () => { await evaluate(`document.querySelector('button[title*="F5"]').click()`); await waitFor(`!!${showText}`); await delay(300) }
+  const selectSlide = async index => { await evaluate(`document.querySelector('.slide-list-host').shadowRoot.querySelectorAll('.slot')[${index}].click()`); await delay(200) }
+  const activeSlide = `document.querySelector('.slide-list-host').shadowRoot.querySelector('.slot[data-active="true"]')`
+  await scenario('slideshow-start-navigation-shortcuts-and-window', async () => {
+    const windowState = `((await import('/node_modules/.vite/deps/@tauri-apps_api_window.js')).getCurrentWindow())`
+    await evaluate(`(async()=>{const w=${windowState}; if(await w.isFullscreen()) await w.setFullscreen(false); if(await w.isMaximized()) await w.unmaximize()})()`)
+    const secondFixture = join(fixtureDirectory, 'second.md')
+    await writeFile(secondFixture, '# Second tab\n')
+    await evaluate(`(async()=>{const {platform}=await import('/src/platform/index.ts'); platform.pickMarkdownFile=async()=>${JSON.stringify(secondFixture)}; document.querySelector('.file-tab-open').click()})()`)
+    await waitFor(`document.querySelectorAll('[role="tab"]').length === 2 && [...document.querySelectorAll('[role="tab"]')].some(e=>e.title === ${JSON.stringify(secondFixture)} && e.getAttribute('aria-selected') === 'true')`)
+    await evaluate(`[...document.querySelectorAll('[role="tab"]')].find(e=>e.title === ${JSON.stringify(fixture)}).click()`)
+    await waitFor(`document.querySelector('[role="tab"][aria-selected="true"]')?.title === ${JSON.stringify(fixture)}`)
+    await waitFor(`!!document.querySelector('.stage-host')?.shadowRoot?.querySelector('[data-sm-run]')`)
+    await click(paragraph); await send('Input.insertText',{text:'取消防止'}); await delay(200)
+    await selectSlide(1); await startShow()
+    check((await evaluate(showText)).includes('SlideApp 動作確認'), 'Toolbar did not start on first slide')
+    check(await evaluate(`(async()=>await ${windowState}.isFullscreen())()`), 'Window did not enter fullscreen')
+    await key('ArrowRight'); check((await evaluate(showText)).includes('日本語入力のテスト'), 'Right did not advance')
+    await key('ArrowLeft'); check((await evaluate(showText)).includes('SlideApp 動作確認'), 'Left did not go back')
+    await mouse('mouseWheel', {x:100,y:100}, {deltaX:0,deltaY:100}); await delay(200)
+    check((await evaluate(showText)).includes('日本語入力のテスト'), 'Wheel down did not advance')
+    await mouse('mouseWheel', {x:100,y:100}, {deltaX:0,deltaY:-100}); await delay(200)
+    check((await evaluate(showText)).includes('SlideApp 動作確認'), 'Wheel up did not go back')
+    await key('End'); check((await evaluate(showText)).includes('日本語入力のテスト'), 'End did not select last slide')
+    await key('Home'); check((await evaluate(showText)).includes('SlideApp 動作確認'), 'Home did not select first slide')
+    await key('2'); await key('Enter')
+    check((await evaluate(showText)).includes('日本語入力のテスト'), 'Number and Enter did not navigate')
+    await key('b'); check(await evaluate(`${show}.firstElementChild.style.display === 'none' && ${show}.style.background === 'rgb(0, 0, 0)'`), 'B did not blank black')
+    await key('w'); check(await evaluate(`${show}.style.background === 'rgb(255, 255, 255)'`), 'W did not blank white')
+    await key('w'); check(await evaluate(`${show}.firstElementChild.style.display !== 'none'`), 'W did not restore slide')
+    await evaluate(`(async()=>{ const {platform}=await import('/src/platform/index.ts'); const save=platform.saveFile; window.showSaveCount=0; platform.saveFile=(...args)=>{ window.showSaveCount++; return save(...args) } })()` )
+    const beforeShortcuts = await evaluate(`JSON.stringify({text:state().modelText, tab:document.querySelector('[role=tab][aria-selected=true]')?.textContent})`)
+    await key('s',2); await key('z',2); await key('Tab',2)
+    check(await evaluate(`!!${show} && JSON.stringify({text:state().modelText, tab:document.querySelector('[role=tab][aria-selected=true]')?.textContent}) === ${JSON.stringify(beforeShortcuts)} && window.showSaveCount === 0`), 'Application shortcut escaped slideshow')
+    await key('Escape'); await waitFor(`!${show}`)
+    check(await evaluate(`${activeSlide} === document.querySelector('.slide-list-host').shadowRoot.querySelectorAll('.slot')[1]`), 'Exit did not select current slide')
+    check(!await evaluate(`(async()=>await ${windowState}.isFullscreen())()`), 'Normal window was not restored')
+    await evaluate(`(async()=>await ${windowState}.maximize())()`); await delay(250)
+    await evaluate(`document.querySelector('button[aria-haspopup="menu"][aria-label="スライドショー"]').click()`)
+    await evaluate(`[...document.querySelectorAll('[role="menuitem"]')].find(e=>e.textContent.includes('現在のスライドから')).click()`)
+    await waitFor(`!!${showText}`); check((await evaluate(showText)).includes('日本語入力のテスト'), 'Menu did not start at current slide')
+    await key('Escape'); await waitFor(`!${show}`)
+    check(await evaluate(`(async()=>await ${windowState}.isMaximized())()`), 'Maximized window was not restored')
+    await evaluate(`(async()=>await ${windowState}.unmaximize())()`); await delay(200)
+    await key('F5'); await waitFor(`!!${showText}`); check((await evaluate(showText)).includes('SlideApp 動作確認'), 'F5 did not start first')
+    await key('Escape'); await waitFor(`!${show}`); await selectSlide(1)
+    await key('F5',8); await waitFor(`!!${showText}`); check((await evaluate(showText)).includes('日本語入力のテスト'), 'Shift+F5 did not start current')
+    await mouse('mousePressed',{x:100,y:100},{button:'left',buttons:1,clickCount:1}); await mouse('mouseReleased',{x:100,y:100},{button:'left',buttons:0,clickCount:1})
+    await waitFor(`${show}.textContent.includes('スライドショーの最後です')`)
+    await key('ArrowLeft'); check((await evaluate(showText)).includes('日本語入力のテスト'), 'Previous from end did not return')
+    await key('ArrowRight')
+    await mouse('mousePressed',{x:100,y:100},{button:'left',buttons:1,clickCount:1}); await mouse('mouseReleased',{x:100,y:100},{button:'left',buttons:0,clickCount:1})
+    await waitFor(`!${show}`)
+    await evaluate(`(async()=>await ${windowState}.setFullscreen(true))()`); await delay(300)
+    await startShow(); await key('Escape'); await waitFor(`!${show}`)
+    check(await evaluate(`(async()=>await ${windowState}.isFullscreen())()`), 'Originally fullscreen window was not preserved')
+    await evaluate(`(async()=>await ${windowState}.setFullscreen(false))()`); await delay(300)
+  })
+  await scenario('slideshow-edit-and-external-change', async () => {
+    await click(paragraph, paragraph.length)
+    await send('Input.insertText',{text:'確定済み'}); await delay(200)
+    await startShow()
+    check((await evaluate(showText)).includes('確定済み'), 'Slideshow omitted the committed edit')
+    check(!await evaluate('state().editing'), 'Editing was not finished')
+    try {
+      await writeFile(fixture, Buffer.concat([sample, Buffer.from('\n外部変更スライドショー\n')]))
+      await delay(1800)
+      check(!(await evaluate(showText)).includes('外部変更スライドショー'), 'External change altered slideshow snapshot')
+      check(!await evaluate(`document.body.textContent.includes('このファイルは外部で変更されました。')`), 'External conflict appeared during slideshow')
+      await key('Escape'); await waitFor(`!${show}`)
+      await waitFor(`document.body.textContent.includes('このファイルは外部で変更されました。')`)
+    } finally { await writeFile(fixture, sample) }
+  })
+  await scenario('slideshow-waits-for-composition', async () => {
+    await click(paragraph)
+    await send('Input.imeSetComposition', {text:'てん', selectionStart:2, selectionEnd:2})
+    check(await evaluate('state().pendingComposition'), 'Composition did not begin')
+    await evaluate(`document.querySelector('button[title*="F5"]').click()`)
+    await delay(200)
+    check(!await evaluate(`!!${show}`), 'Slideshow started during composition')
+    await send('Input.imeSetComposition', {text:'点', selectionStart:1, selectionEnd:1})
+    await send('Input.insertText', {text:'点'})
+    await waitFor(`${showText}?.includes('点')`)
+    check(!await evaluate('state().editing'), 'Composition was not committed before slideshow')
+    await key('Escape'); await waitFor(`!${show}`)
+  })
+  await scenario('slideshow-layout-matches-preview', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'配置比較の箱'}); await delay(200); await key('Escape')
+    const bounds = (root, selector) => `(() => {
+      const root=${root}, section=root.querySelector('section'), element=root.querySelector(${JSON.stringify(selector)});
+      if (!section || !element) throw Error('Missing layout element: ' + ${JSON.stringify(selector)});
+      const a=section.getBoundingClientRect(), b=element.getBoundingClientRect();
+      return [(b.left-a.left)/a.width,(b.top-a.top)/a.height,b.width/a.width,b.height/a.height];
+    })()`
+    const checkBounds = (a,b,name) => check(a.every((value,i) => Math.abs(value-b[i]) < 0.025), name + ' placement differs: ' + JSON.stringify({preview:a,show:b}))
+    const stage = `document.querySelector('.stage-host').shadowRoot.querySelector('.slot[data-active="true"]')`
+    const showRoot = `${show}.firstElementChild.shadowRoot`
+    const table = await evaluate(bounds(stage,'table')), box = await evaluate(bounds(stage,'[data-box]'))
+    await startShow()
+    checkBounds(table, await evaluate(bounds(showRoot,'table')), 'Table')
+    checkBounds(box, await evaluate(bounds(showRoot,'[data-box]')), 'Text box')
+    check(await evaluate(`!${showRoot}.querySelector('[data-sm-selected], [data-sm-box-handle], [contenteditable="true"]')`), 'Editing decorations leaked into slideshow')
+    await key('ArrowRight'); await waitFor(`${showText}?.includes('日本語入力のテスト')`)
+    await key('Escape'); await waitFor(`!${show}`)
+    await waitFor(`${stage}.querySelector('section')?.getBoundingClientRect().width > 0 && !!${stage}.querySelector('img')`)
+    const image = await evaluate(bounds(stage,'img'))
+    await evaluate(`document.querySelector('button[aria-haspopup="menu"][aria-label="スライドショー"]').click()`)
+    await evaluate(`[...document.querySelectorAll('[role="menuitem"]')].find(e=>e.textContent.includes('現在のスライドから')).click()`)
+    await waitFor(`!!${showText}`)
+    checkBounds(image, await evaluate(bounds(showRoot,'img')), 'Image')
+    await key('Escape'); await waitFor(`!${show}`)
   })
   await writeFile(join(output,'results.json'), JSON.stringify(results,null,2))
   console.log('Traces: ' + output)
