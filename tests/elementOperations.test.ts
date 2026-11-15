@@ -4,6 +4,24 @@ import { DocumentModel } from '../src/document';
 import { applyElementTransaction, createEngine } from '../src/editing';
 
 describe('element operations', () => {
+  it.each([
+    ['| a | b |\n| --- | --- |\n| x | |\n\nend', ['table', 'paragraph']],
+    ['- \n\nend', ['list', 'paragraph']],
+    ['- \n\nfirst\n\n---\n\n| a | b |\n| --- | --- |\n| | |\n\nend', ['list', 'paragraph', 'table', 'paragraph']],
+  ])('maps rendered element IDs to original source ranges with empty targets: %j', (raw, kinds) => {
+    const engine = createEngine(new Marp({ script: false }));
+    const analysis = engine.analyze(raw);
+    const elements = analysis.elementSources!.elements;
+    expect(elements.map(element => element.kind)).toEqual(kinds);
+    expect([...analysis.html.matchAll(/data-sm-element="([^"]+)"/g)].map(match => match[1])).toEqual(elements.map(element => element.id));
+    for (const element of elements) {
+      const source = raw.slice(element.start, element.end);
+      expect(source.trim()).not.toBe('');
+      if (element.kind === 'paragraph') expect(['first', 'end']).toContain(source.trim());
+      if (element.kind === 'list') expect(source.trim()).toBe('-');
+      if (element.kind === 'table') expect(source).toMatch(/^\| a \| b \|/);
+    }
+  });
   it('captures and deletes a block with atomic undo', () => {
     const model = new DocumentModel('# A\r\n\r\nparagraph\n\n# B', { hasBom: true });
     const engine = createEngine(new Marp({ script: false }));

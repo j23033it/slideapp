@@ -103,10 +103,31 @@ export function createEngine(marp: MarpLike): EditingEngine {
   wrapRenderers(md);
 
   md.core.ruler.before('marpit_slide', 'sm_slide_sources', state => {
-    if (pending && !emptyPositions.length) {
-      pending.slideSources = collectSlideSources(state.src, state.tokens, md);
-      pending.elementSources = collectElements(state.src, state.tokens, pending.slideSources, ++elementRevision, reuseIds?.elementSources);
+    if (!pending) return;
+    const slides = collectSlideSources(state.src, state.tokens, md);
+    if (!emptyPositions.length) {
+      pending.slideSources = slides;
+      pending.elementSources = collectElements(state.src, state.tokens, slides, ++elementRevision, reuseIds?.elementSources);
       tableEmptyPositions.set(pending, findEmptyTableCells(state.src, state.tokens));
+      return;
+    }
+    // Probes change source offsets and may create a temporary block. Only map
+    // rendered elements back to uniquely matching original source ranges.
+    const rendered = collectElements(state.src, state.tokens, slides, ++elementRevision);
+    const probePositions = emptyPositions.map((position, index) => position + index);
+    const originalOffset = (position: number) => position - probePositions.filter(probe => probe < position).length;
+    const ids = new Map<string, string>();
+    for (const element of rendered.elements) {
+      const matches = reuseIds?.elementSources?.elements.filter(original => original.kind === element.kind && original.slide === element.slide &&
+        original.start === originalOffset(element.start) && original.end === originalOffset(element.end)) ?? [];
+      if (matches.length === 1) ids.set(element.id, matches[0].id);
+    }
+    for (const token of state.tokens) {
+      const attribute = token.attrs?.find(([name]) => name === 'data-sm-element');
+      if (!attribute) continue;
+      const id = ids.get(attribute[1]);
+      if (id) attribute[1] = id;
+      else token.attrs = token.attrs!.filter(([name]) => name !== 'data-sm-element');
     }
   });
 
