@@ -30,9 +30,9 @@ fn import(md: &Path, source: &Path) -> io::Result<String> {
     let base = md.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?.canonicalize()?;
     if let Ok(relative) = source.strip_prefix(&base) { return encoded_relative(relative); }
     #[cfg(windows)]
-    { return windows_import::copy(&base, &source, || {}, || Ok(())); }
+    { windows_import::copy(&base, &source, || {}, || Ok(())) }
     #[cfg(not(windows))]
-    copy_portable(&base, &source)
+    { copy_portable(&base, &source) }
 }
 
 #[cfg(not(windows))]

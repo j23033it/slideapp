@@ -66,7 +66,7 @@ fn rename(file: &File, directory: &File, name: &str) -> io::Result<()> {
     // Vec<usize> supplies the alignment required by FILE_RENAME_INFO.
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let bytes = offset + name.len() * 2;
-    let mut storage = vec![0usize; (bytes + size_of::<usize>() - 1) / size_of::<usize>()];
+    let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*info).Anonymous.ReplaceIfExists = false;
@@ -207,7 +207,7 @@ mod tests {
         let source = temp.path().join("image.png");
         fs::write(&source, b"image contents").unwrap();
         let result = copy(&base.canonicalize().unwrap(), &source, || {}, || {
-            Err(io::Error::new(io::ErrorKind::Other, "injected failure"))
+            Err(io::Error::other("injected failure"))
         });
         assert!(result.is_err());
         assert_eq!(fs::read_dir(base.join("images")).unwrap().count(), 0);
