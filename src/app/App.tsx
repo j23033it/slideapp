@@ -1578,7 +1578,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     leave: async () => {
       await finishSlideshow()
       if (updateInstallLockedRef.current || pendingRef.current || (view.busy && !commitBusyRef.current)) return false
-      if (commitBusyRef.current) return true
+      if (view.busy && commitBusyRef.current) return true
       activationGeneration.current += 1
       await waitForComposition()
       if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false

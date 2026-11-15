@@ -10,7 +10,7 @@ const probe = vi.hoisted(() => ({
   sessions: new Map<string, EditorSession>(), callbacks: new Map<string, SlideStageCallbacks>(),
   status: { kind: 'changed', branch: 'main' } as GitFileStatus,
   composing: false, deferred: null as (() => void) | null,
-  save: vi.fn(), commit: vi.fn(), gitStatus: vi.fn(), resolve: null as ((value: { commit: string }) => void) | null,
+  save: vi.fn(), commit: vi.fn(), gitStatus: vi.fn(), ended: vi.fn(), resolve: null as ((value: { commit: string }) => void) | null,
 }))
 vi.mock('../platform', async importOriginal => {
   const actual = await importOriginal<typeof import('../platform')>()
@@ -30,7 +30,7 @@ vi.mock('./SlideStage', async () => {
   const { h } = await import('preact'); const { useEffect } = await import('preact/hooks')
   return { SlideStage: (props: { session: EditorSession; apiRef: { current: unknown }; callbacks: SlideStageCallbacks }) => {
     probe.sessions.set(props.session.path, props.session); probe.callbacks.set(props.session.path, props.callbacks)
-    useEffect(() => { props.apiRef.current = { endEditing() {}, isComposing: () => probe.composing, deferWhileComposing: (action: () => void) => { if (!probe.composing) return false; probe.deferred = action; return true } }; return () => { props.apiRef.current = null } }, [props.apiRef])
+    useEffect(() => { props.apiRef.current = { endEditing() { probe.ended(props.session.path) }, isComposing: () => probe.composing, deferWhileComposing: (action: () => void) => { if (!probe.composing) return false; probe.deferred = action; return true } }; return () => { props.apiRef.current = null } }, [props.apiRef])
     return h('div', {})
   } }
 })
@@ -47,6 +47,7 @@ function clickTab(name: string) { ([...document.querySelectorAll<HTMLButtonEleme
 function dirty(path: string) { probe.sessions.get(path)!.model.edit({ start: 0, end: 0, insert: 'dirty ' }); probe.callbacks.get(path)!.onElementSelect(null) }
 beforeEach(() => {
   probe.sessions.clear(); probe.callbacks.clear(); probe.status = { kind: 'changed', branch: 'main' }; probe.resolve = null; probe.composing = false; probe.deferred = null
+  probe.ended.mockReset()
   probe.gitStatus.mockReset().mockImplementation(async () => ({ ...probe.status }))
   probe.save.mockReset().mockResolvedValue({ ok: true, hash: 'saved', mtime: 2 })
   probe.commit.mockReset().mockImplementation(() => new Promise(resolve => { probe.resolve = resolve }))
@@ -97,6 +98,31 @@ describe('commit workspace', () => {
     await act(async () => probe.resolve!({ commit: 'abc' }))
     expect(document.querySelector('[role=tabpanel]:not([hidden])')!.textContent).not.toContain('コミットしました（abc）')
     act(() => clickTab('a.md')); await until(() => document.body.textContent?.includes('コミットしました（abc）'))
+  })
+  it('keeps editing and tab operations available during a pending commit', async () => {
+    await ready(); act(() => toolbarButton().click()); await until(() => input())
+    act(() => setMessage('pending')); act(() => { input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    await until(() => probe.commit.mock.calls.length === 1)
+    expect(document.querySelector('[role=dialog]')!.textContent).toContain('コミット中…')
+    const edit = (path: string) => {
+      const session = probe.sessions.get(path)!
+      const callbacks = probe.callbacks.get(path)!
+      expect(callbacks.canBold()).toBe(true)
+      const change = { start: 0, end: 0, insert: 'edited ' }
+      const newText = change.insert + session.model.text
+      callbacks.onCommit({ ok: true, edit: change, newText, analysis: session.renderer.editing.analyze(newText), escaped: false }, {})
+      expect(session.model.text).toBe(newText)
+    }
+    act(() => edit('C:\\a.md'))
+    probe.ended.mockClear()
+    act(() => clickTab('b.md'))
+    await until(() => document.querySelector('[role=tab][aria-selected=true]')?.textContent?.includes('b.md'))
+    expect(probe.ended).toHaveBeenCalledWith('C:\\a.md')
+    act(() => edit('C:\\b.md'))
+    act(() => clickTab('a.md'))
+    await until(() => document.querySelector('[role=tab][aria-selected=true]')?.textContent?.includes('a.md'))
+    expect(probe.sessions.get('C:\\a.md')!.model.text).toContain('edited ')
+    expect(document.querySelector('[role=dialog]')!.textContent).toContain('コミット中…')
   })
   it('preserves the message and displays the error on failure', async () => {
     probe.commit.mockRejectedValueOnce({ kind: 'error', message: 'hook failed' })

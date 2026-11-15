@@ -7,7 +7,6 @@ use std::{
     path::Path,
     process::{Command, Output, Stdio},
     thread,
-    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -62,52 +61,24 @@ fn run_git(dir: &Path, args: &[&OsStr], input: Option<&str>) -> Result<Output, s
             let _ = stdin.write_all(&bytes);
         });
     }
-    let (sender, receiver) = std::sync::mpsc::channel();
     let mut stdout = child.stdout.take().unwrap();
-    let stdout_sender = sender.clone();
-    thread::spawn(move || {
+    let out = thread::spawn(move || {
         let mut data = Vec::new();
         let _ = stdout.read_to_end(&mut data);
-        let _ = stdout_sender.send((true, data));
+        data
     });
     let mut stderr = child.stderr.take().unwrap();
-    thread::spawn(move || {
+    let err = thread::spawn(move || {
         let mut data = Vec::new();
         let _ = stderr.read_to_end(&mut data);
-        let _ = sender.send((false, data));
+        data
     });
-    let start = Instant::now();
-    let mut status = None;
-    let mut out = None;
-    let mut err = None;
-    loop {
-        if status.is_none() {
-            status = child.try_wait()?;
-        }
-        while let Ok((is_stdout, data)) = receiver.try_recv() {
-            if is_stdout {
-                out = Some(data);
-            } else {
-                err = Some(data);
-            }
-        }
-        if status.is_some() && out.is_some() && err.is_some() {
-            return Ok(Output {
-                status: status.unwrap(),
-                stdout: out.unwrap(),
-                stderr: err.unwrap(),
-            });
-        }
-        if start.elapsed() >= Duration::from_secs(60) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Git timed out after 60 seconds",
-            ));
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    let status = child.wait()?;
+    Ok(Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 fn args<'a>(values: &'a [&'a str]) -> Vec<&'a OsStr> {
     values.iter().map(OsStr::new).collect()
@@ -364,6 +335,40 @@ mod tests {
             do_commit(&star, "star").unwrap();
             assert_eq!(status(&other).unwrap().0.kind, "changed");
         }
+    }
+    #[test]
+    fn commit_drains_large_hook_output_while_writing_message() {
+        let repo = repo();
+        let dir = repo.path();
+        let file = write(dir, "slide.md", "one");
+        let hook = dir.join(".git/hooks/pre-commit");
+        fs::write(
+            &hook,
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 3000 ]; do\n  printf 'stdout:01234567890123456789012345678901234567890123456789\\n'\n  printf 'stderr:01234567890123456789012345678901234567890123456789\\n' >&2\n  i=$((i + 1))\ndone\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git(dir, &["add", "--", "slide.md"]);
+        let output = run_git(
+            dir,
+            &args(&["commit", "--only", "-F", "-", "--", "slide.md"]),
+            Some("message on stdin\n"),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{}", output_error(&output));
+        // Git may forward hook stdout through its own stderr.
+        assert!(output.stdout.len() + output.stderr.len() > 300_000);
+        assert!(output.stderr.len() > 100_000);
+        assert_eq!(
+            git(dir, &["log", "-1", "--format=%B"]).stdout,
+            b"message on stdin\n\n"
+        );
+        assert_eq!(git(dir, &["show", "HEAD:slide.md"]).stdout, b"one");
+        assert_eq!(fs::read(file).unwrap(), b"one");
     }
     #[test]
     fn conflict_and_failing_hook_do_not_commit() {
