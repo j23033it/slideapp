@@ -7,6 +7,9 @@ export interface ToolbarProps {
   sidebarCollapsed: boolean
   busy: boolean
   canSave: boolean
+  canInsertImage: boolean
+  imageDisabledReason: string | null
+  onInsertImage: () => void
   canExport: boolean
   exporting: boolean
   canUndo: boolean
@@ -36,6 +39,9 @@ export function Toolbar({
   sidebarCollapsed,
   busy,
   canSave,
+  canInsertImage,
+  imageDisabledReason,
+  onInsertImage,
   canExport,
   exporting,
   canUndo,
@@ -111,6 +117,10 @@ export function Toolbar({
 
       <div class="toolbar-divider" />
       <TablePicker disabled={busy || !!tableDisabledReason} disabledReason={tableDisabledReason} onOpen={onTableOpen} onInsert={onInsertTable} />
+      <button type="button" class="toolbar-button" title={imageDisabledReason ?? strings.toolbar.imageTitle}
+        onClick={onInsertImage} disabled={!canInsertImage || busy}>
+        {strings.toolbar.image}
+      </button>
       <div class="toolbar-divider" />
 
       <button

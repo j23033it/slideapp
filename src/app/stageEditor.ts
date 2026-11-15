@@ -21,6 +21,7 @@ import { planBoundaryDeletion, areRunsDomAdjacent } from './runDeletion'
 import { CompositionGate } from './session'
 import { strings } from './strings'
 import { selectionOutlineWidth, toSlideRect } from './elementGeometry'
+import { beginHandleDrag } from './handleDrag'
 
 export type EditSuccess = Extract<EditResult<SourceEdit | readonly SourceEdit[]>, { ok: true }>
 
@@ -45,6 +46,7 @@ export interface StageEditorOptions {
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete?(id: string): boolean
   onElementSelect?(kind: ElementKind | null): void
+  onImageResize?(id: string, width: number, slideWidth: number): void
 }
 
 function labelForBlock(block: HTMLElement | null): string {
@@ -84,6 +86,7 @@ export class StageEditor {
   private pendingElementSelection: string | null = null
   private selectedStyle?: { element: HTMLElement; outline: string; outlinePriority: string; offset: string; offsetPriority: string; tabindex: string | null }
   private imageHandles?: HTMLDivElement
+  private cancelHandleDrag?: () => void
   private resizeObserver?: ResizeObserver
   private readonly onResize = (): void => {
     const element = this.root.querySelector<HTMLElement>('[data-sm-selected]')
@@ -107,6 +110,8 @@ export class StageEditor {
   }
 
   private clearElementSelection(notify = true): void {
+    this.cancelHandleDrag?.()
+    this.cancelHandleDrag = undefined
     const hadSelection = !!this.selectedElement
     const saved = this.selectedStyle
     const element = saved?.element
@@ -151,6 +156,36 @@ export class StageEditor {
         for (const [x, y] of [['0', '0'], ['100%', '0'], ['0', '100%'], ['100%', '100%']]) {
           const handle = document.createElement('span')
           Object.assign(handle.style, { position: 'absolute', left: x, top: y, transform: 'translate(-50%, -50%)', boxSizing: 'border-box', background: 'white', borderStyle: 'solid', borderColor: 'var(--sm-accent, #0f6cbd)' })
+          if (this.options.onImageResize) {
+            handle.style.pointerEvents = 'auto'
+            handle.style.cursor = x === y ? 'nwse-resize' : 'nesw-resize'
+            handle.addEventListener('pointerdown', event => {
+              if (event.button !== 0) return
+              const rect = toSlideRect(element.getBoundingClientRect(), frame.getBoundingClientRect(), frame.offsetWidth, frame.offsetHeight)
+              if (!rect || rect.width <= 0 || rect.height <= 0 || this.deck.width < 16) return
+              event.preventDefault(); event.stopPropagation()
+              const widthStyle = element.style.getPropertyValue('width'), widthPriority = element.style.getPropertyPriority('width')
+              const heightStyle = element.style.getPropertyValue('height'), heightPriority = element.style.getPropertyPriority('height')
+              const restore = () => {
+                if (widthStyle) element.style.setProperty('width', widthStyle, widthPriority); else element.style.removeProperty('width')
+                if (heightStyle) element.style.setProperty('height', heightStyle, heightPriority); else element.style.removeProperty('height')
+                this.positionImageHandles(element)
+                this.cancelHandleDrag = undefined
+              }
+              const ratio = rect.height / rect.width, signX = x === '0' ? -1 : 1, signY = y === '0' ? -1 : 1
+              let width = rect.width
+              this.cancelHandleDrag = beginHandleDrag(event, frame, {
+                move: (dx, dy) => {
+                  width = Math.max(16, Math.min(this.deck.width, rect.width + (dx * signX + dy * signY * ratio) / (1 + ratio * ratio)))
+                  element.style.setProperty('width', `${width}px`, 'important')
+                  element.style.setProperty('height', `${width * ratio}px`, 'important')
+                  this.positionImageHandles(element)
+                },
+                finish: () => { restore(); if (Math.round(width) !== Math.round(rect.width)) this.options.onImageResize?.(id, width, this.deck.width) },
+                cancel: restore,
+              })
+            })
+          }
           handles.append(handle)
         }
         frame.append(handles)

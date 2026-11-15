@@ -27,6 +27,13 @@ export const strings = {
       'element-readonly': '読み取り専用または競合中のため操作できません',
     } satisfies Record<TableReasonCode, string>,
   },
+  imageOperations: {
+    reasons: {
+      'image-unsupported-alt': '代替テキストの形式のため大きさを変更できません',
+      'image-copy-failed': '画像をコピーできませんでした',
+      'image-unsupported-type': '対応していない画像の形式です',
+    },
+  },
   slideOperations: {
     labels: {
       add: '新しいスライド',
@@ -72,6 +79,7 @@ export const strings = {
 
   toolbar: {
     table: '表', tableTitle: '表を挿入',
+    image: '画像', imageTitle: '画像を挿入',
     noFile: 'ファイルが開かれていません', readonly: '読み取り専用のため操作できません',
     conflict: 'ファイルが競合しているため操作できません', headingDivider: 'headingDividerが有効なため操作できません',
     sidebarToggleShow: 'スライド一覧を表示',
@@ -265,6 +273,7 @@ export const strings = {
   },
 
   fileDialog: {
+    imageFilter: '画像',
     markdownFilter: 'Markdown',
   },
 } as const

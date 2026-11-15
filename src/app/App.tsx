@@ -47,6 +47,8 @@ import {
 import { Toolbar } from './Toolbar'
 import { tableOperationReason, applyTableTransaction, insertTableTransaction, type TableCommand } from '../editing/tableOperations'
 import type { TableMenuTarget } from './tableMenu'
+import { chooseImage, imageLine, insertImage } from './imageInsert'
+import { resizeImage } from '../editing/images'
 
 const MIN_SIDEBAR_WIDTH = 120
 const MAX_SIDEBAR_WIDTH = 480
@@ -1068,9 +1070,56 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     syncDeck({ detail: null })
   }
 
+  const insertImageNow = async (): Promise<void> => {
+    if (updateInstallLockedRef.current || pendingRef.current || viewRef.current.busy) return
+    if (deferIfComposing(() => void insertImageNow())) return
+    const stage = stageApi.current
+    const anchor = stage?.insertionAnchor?.()
+    stage?.endEditing()
+    const session = sessionRef.current
+    if (!session || session.model.state === 'readonly' || session.conflict || session.analysis.slideSources?.reason) return
+    const text = session.model.text, slide = currentRef.current, generation = activationGeneration.current
+    try {
+      const image = await chooseImage(session.path, platform.convertFileSrc)
+      if (!image || !workspaceAlive.current || !activeWorkspaceRef.current || generation !== activationGeneration.current ||
+          sessionRef.current !== session || session.model.text !== text || currentRef.current !== slide || session.conflict ||
+          editorSessionSaveState(session) === 'readonly' || updateInstallLockedRef.current || pendingRef.current) return
+      const line = imageLine(image.path, image.width, image.height, session.deck.width, session.deck.height)
+      const result = insertImage(session.model, session.renderer.editing, slide, line, anchor)
+      if (!result.ok) { sync({ detail: strings.elementOperations.reasons[result.reason.code] }); return }
+      const inserted = result.analysis.elementSources?.elements.find(e => e.kind === 'image' && e.slide === slide &&
+        e.start >= result.edit.start && e.end <= result.edit.start + result.edit.insert.length)
+      session.analysis = result.analysis
+      session.deck = session.renderer.update(result.analysis, session.baseDir)
+      session.focus = undefined
+      if (inserted) stageApi.current?.selectElementOnRender?.(inserted.id)
+      syncDeck({ detail: null })
+    } catch (error) {
+      const code = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
+      sync({ detail: code === 'image-unsupported-type' ? strings.imageOperations.reasons['image-unsupported-type'] : strings.imageOperations.reasons['image-copy-failed'] })
+    }
+  }
+
   const stageCallbacks: SlideStageCallbacks = {
     onTableReason: tableReason,
     onTableCommand: (target, command) => { void runTableCommand(target, command) },
+    onImageResize: (id, width, slideWidth) => {
+      const session = sessionRef.current
+      if (!session) return
+      const index = session.analysis.elementSources?.elements.findIndex(e => e.id === id) ?? -1
+      const result = resizeImage(session.model, session.renderer.editing, session.analysis, id, width, slideWidth,
+        session.conflict || updateInstallLockedRef.current || !!pendingRef.current || viewRef.current.busy)
+      if (!result.ok) {
+        const message = result.reason === 'image-unsupported-alt' ? strings.imageOperations.reasons[result.reason] : strings.elementOperations.reasons[result.reason]
+        sync({ detail: message }); return
+      }
+      session.analysis = result.analysis
+      session.deck = session.renderer.update(result.analysis, session.baseDir)
+      session.focus = undefined
+      const next = result.analysis.elementSources?.elements[index]
+      if (next) stageApi.current?.selectElementOnRender?.(next.id)
+      syncDeck({ detail: null })
+    },
     onElementSelect: (kind) => sync({ detail: kind ? strings.elementOperations.selected[kind] : null }),
     onElementDelete: (id) => {
       const session = sessionRef.current
@@ -1391,6 +1440,9 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         onTableOpen={() => { tableAnchor.current = stageApi.current?.insertionAnchor?.() }}
         onInsertTable={(columns, rows) => { void runTableInsertion(columns, rows) }}
         canSave={session !== null && view.saveState !== 'readonly'}
+        canInsertImage={!!session && view.saveState !== 'readonly' && view.saveState !== 'conflict' && !session.conflict && !session.analysis.slideSources?.reason && !pending}
+        imageDisabledReason={!session ? strings.toolbar.noFile : view.saveState === 'readonly' ? strings.toolbar.readonly : session.conflict ? strings.toolbar.conflict : session.analysis.slideSources?.reason?.code === 'slide-heading-divider' ? strings.toolbar.headingDivider : null}
+        onInsertImage={() => void insertImageNow()}
         canExport={session !== null}
         exporting={exporting}
         canUndo={view.canUndo}
