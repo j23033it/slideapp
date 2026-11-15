@@ -3,6 +3,7 @@ import browser, { type MarpCoreBrowser } from '@marp-team/marp-core/browser'
 import { applyJapaneseFonts, ensureDocumentImports, splitCssImports } from './fonts'
 import type { SlideOperation, SlideOperationResult } from '../editing'
 import type { RenderedDeck } from './renderer'
+import { isolateSvgMarkers } from './svgMarkers'
 
 export type SurfaceLayout = 'single' | 'list'
 export type SlideListCommand = 'add' | 'duplicate' | 'delete' | 'moveUp' | 'moveDown'
@@ -32,6 +33,7 @@ const BASE_CSS = `
   align-items: stretch;
   justify-content: flex-start;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   overflow-x: hidden;
   padding: 8px 0 16px;
   gap: 2px;
@@ -123,6 +125,8 @@ const BASE_CSS = `
   outline: 1px dotted var(--sm-accent, #0f6cbd);
   outline-offset: 1px;
 }
+.surface[data-layout='single'] .frame [data-sm-svg-label] { cursor: text; }
+.surface[data-layout='single'] .frame [data-sm-svg-label]:focus-visible { outline: 2px solid var(--sm-accent, #0f6cbd); }
 /* 読み取り専用: ポインターを重ねたら点線の枠 */
 .surface[data-layout='single'] .frame [data-sm-readonly]:hover,
 .surface[data-layout='single'] .frame section table:hover,
@@ -179,6 +183,7 @@ export class SlideSurface {
   private suppressTimer?: ReturnType<typeof setTimeout>
   private htmlCache: string[] = []
   private deck: RenderedDeck | null = null
+  private restoreMarkers: () => void = () => {}
   private readonly resizeObserver: ResizeObserver
   private readonly browserHandle: MarpCoreBrowser
 
@@ -234,6 +239,8 @@ export class SlideSurface {
       this.closeMenu(false)
       this.cancelDrag()
     }
+    const refreshMarkers = this.deck?.css !== deck.css || this.htmlCache.length !== deck.slides.length || deck.slides.some((html, i) => this.htmlCache[i] !== html)
+    if (refreshMarkers) this.restoreMarkers()
     this.deck = deck
 
     const { imports, css } = splitCssImports(deck.css)
@@ -266,6 +273,7 @@ export class SlideSurface {
     if (changed) this.browserHandle.update()
 
     this.setActive(activeIndex, { scroll: false })
+    if (refreshMarkers) this.restoreMarkers = isolateSvgMarkers(this.shadow)
     this.applySizes()
     if (restoreListFocus && !this.menu) (this.slots[this.activeIndex] ?? this.surface).focus({ preventScroll: true })
   }
@@ -307,6 +315,7 @@ export class SlideSurface {
     document.removeEventListener('pointercancel', this.onPointerCancel, true)
     window.removeEventListener('blur', this.onWindowBlur)
     this.resizeObserver.disconnect()
+    this.restoreMarkers()
     this.browserHandle.cleanup()
   }
 

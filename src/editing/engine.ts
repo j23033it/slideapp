@@ -12,6 +12,7 @@ import { collectElements, elementReason, planElementOperation, type ElementOpera
 import { captureTableSnapshots, planTableOperation, validateTableOperation, type TableOperation, type TableResult } from './tableOperations';
 import { reason, type Analysis, type Block, type EditResult, type ReadonlyReason, type Run } from './types';
 import { findBoxPairs } from '../marp/boxPairs';
+import { collectSvgLabelGroups, encodeSvgLabel, type SvgLabelGroup } from './svgLabels';
 
 const engines = new WeakMap<object, EditingEngine>();
 const tokenRuns = new WeakMap<Token, Run>();
@@ -74,6 +75,8 @@ export interface EditingEngine {
   analyze(text: string): Analysis;
   /** Uses only the latest analysis; old IDs are rejected, never silently rebound. */
   applyRunEdit(text: string, runId: string, newRunText: string): EditResult;
+  svgLabelGroups(): SvgLabelGroup[];
+  applySvgLabelEdit(text: string, group: number, label: number, newText: string): EditResult;
   applyTableBreakDeletion(text: string, runId: string, direction: 'backward' | 'forward'): NewlineResult;
   applyNewline(text: string, runId: string, offset: number, kind: NewlineKind): NewlineResult;
   applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId?: string): ListIndentResult;
@@ -229,6 +232,30 @@ export function createEngine(marp: MarpLike): EditingEngine {
     } finally { pending = undefined; reuseIds = undefined; emptyPositions = []; }
   }
   function analyze(text: string): Analysis { return renderAnalysis(text); }
+
+  function svgLabelGroups(): SvgLabelGroup[] {
+    return current ? collectSvgLabelGroups(current.text, rawTokens.get(current) ?? analysisTokens.get(current) ?? [], current.slideSources) : [];
+  }
+
+  function applySvgLabelEdit(text: string, group: number, label: number, value: string): EditResult {
+    const before = current;
+    const fail = (why: ReadonlyReason): EditResult => { current = before; return { ok: false, reason: why }; };
+    if (!before || before.text !== text || before.draft) return fail(reason('stale-run', 'Analyze the current document before editing SVG text'));
+    const groups = svgLabelGroups(), target = groups[group]?.labels[label], encoded = encodeSvgLabel(value);
+    if (!target) return fail(reason('ambiguous-source', 'SVG text does not have a verified source range'));
+    if (encoded === undefined) return fail(reason('unsupported-input', 'SVG text cannot contain control characters'));
+    const edit = { start: target.start, end: target.end, insert: encoded };
+    const newText = replaceRange(text, edit);
+    try {
+      const after = renderAnalysis(newText);
+      const next = svgLabelGroups();
+      if (next.length !== groups.length || next.some((entry, i) => entry.slide !== groups[i]?.slide || entry.labels.length !== groups[i]?.labels.length ||
+        entry.labels.some((item, j) => item.text !== (i === group && j === label ? value : groups[i]?.labels[j]?.text)))) {
+        return fail(reason('structure-changed', 'SVG text could not be validated after rendering'));
+      }
+      return { ok: true, edit, newText, analysis: after, escaped: encoded !== value };
+    } catch { return fail(reason('invalid-source', 'SVG text could not be validated after rendering')); }
+  }
 
   function applyRunEdit(text: string, runId: string, newRunText: string): EditResult {
     const before = current;
@@ -630,7 +657,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
     } catch { return fail('element-structure-changed'); }
   }
 
-  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, applyBold, isBold, applyElementBold, isElementBold, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
+  const engine = { analyze, applyRunEdit, svgLabelGroups, applySvgLabelEdit, applyTableBreakDeletion, applyNewline, applyListIndent, applyBold, isBold, applyElementBold, isElementBold, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
   engines.set(marp, engine);
   return engine;
 }

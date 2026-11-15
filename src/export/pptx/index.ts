@@ -2,6 +2,7 @@ import type { Marp } from '@marp-team/marp-core'
 import type { MarpCoreBrowser } from '@marp-team/marp-core/browser'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { splitRenderedSlides } from '../../marp/renderer'
+import { isolateSvgMarkers } from '../../marp/svgMarkers'
 import { rewriteCssUrls, resolveAssetPath } from '../../marp/urls'
 import { applyJapaneseFonts, JAPANESE_FONT_CSS, splitCssImports } from '../../marp/fonts'
 import { applyUnavailableFontFallbacks, resolveFonts } from './fonts'
@@ -102,6 +103,7 @@ export async function measureDeck(source: ExportSource, options: ExportOptions =
     for (const element of shadow.querySelectorAll<HTMLElement>('[style]')) element.setAttribute('style', rewriteCssUrls(element.getAttribute('style')!, source.baseDir, toAssetUrl))
     document.body.append(host)
     applyJapaneseFonts(shadow)
+    isolateSvgMarkers(shadow)
     const { default: browser } = await import('@marp-team/marp-core/browser')
     handle = browser(shadow)
     await inlineImages(shadow, undefined, (element, error) => { element.dataset.pptxAssetError = error instanceof Error ? error.message : String(error) })

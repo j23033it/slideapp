@@ -20,6 +20,8 @@ export interface SlideSources {
   separators: SlideSourceRange[];
   /** Source ranges containing settings that can affect other slides. */
   inheritedSettings: SlideSourceRange[];
+  /** Records boundary ambiguity even if another operation restriction was reported first. */
+  boundariesAmbiguous?: boolean;
   reason?: SlideOperationReason;
 }
 export type SlideOperationResult = { ok: false; reason: SlideOperationReason } | {
@@ -60,7 +62,7 @@ export function collectSlideSources(text: string, tokens: Token[], md: Markdown)
     return { start: starts[map[0]], end: starts[map[1]] ?? text.length };
   };
   const sources: SlideSources = { bodies: [], separators: [], inheritedSettings: [] };
-  const ambiguous = () => { sources.reason ??= slideReason('slide-ambiguous-boundary'); };
+  const ambiguous = () => { sources.boundariesAmbiguous = true; sources.reason ??= slideReason('slide-ambiguous-boundary'); };
   const marpit = md.marpit;
   const globals = marpit?.lastGlobalDirectives ?? {};
   if (Object.hasOwn(globals, 'headingDivider') || (marpit?.options.headingDivider !== undefined && marpit.options.headingDivider !== false)) {
