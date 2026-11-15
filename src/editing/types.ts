@@ -5,7 +5,8 @@ import type { ElementSources } from './elements';
 export type ReadonlyCode = 'table' | 'code' | 'math' | 'image' | 'html' | 'emoji' | 'front-matter' |
   'comment' | 'generated' | 'ambiguous-source' | 'renderer-transform' | 'dom-mismatch' | 'nul' |
   'invalid-source' | 'stale-run' | 'structure-changed' | 'newline' | 'cross-run' | 'format' | 'history' | 'unsupported-input' |
-  'table-input' | 'table-cell' | 'list-indent-target' | 'list-indent-first' | 'list-indent-top' | 'list-indent-unsafe';
+  'table-input' | 'table-cell' | 'list-indent-target' | 'list-indent-first' | 'list-indent-top' | 'list-indent-unsafe' |
+  'bold-multiple-runs' | 'bold-partial' | 'bold-invalid-position' | 'element-readonly';
 export interface ReadonlyReason { code: ReadonlyCode; description: string }
 export function reason(code: ReadonlyCode, description: string): ReadonlyReason { return { code, description }; }
 export interface Segment { start: number; end: number; text: string; kind: 'literal' | 'special' }

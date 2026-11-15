@@ -11,6 +11,9 @@ export interface ToolbarProps {
   imageDisabledReason: string | null
   onInsertImage: () => void
   onInsertBox: () => void
+  onBold: () => void
+  boldActive: boolean
+  boldDisabledReason?: string
   boxFontSize: number | null
   boxFontDisabledReason?: string
   onBoxFontSize: (size: number | null) => void
@@ -47,6 +50,9 @@ export function Toolbar({
   imageDisabledReason,
   onInsertImage,
   onInsertBox,
+  onBold,
+  boldActive,
+  boldDisabledReason,
   boxFontSize,
   boxFontDisabledReason,
   onBoxFontSize,
@@ -135,6 +141,9 @@ export function Toolbar({
       </button>
       <div class="toolbar-divider" />
 
+      <button type="button" class="toolbar-button" title={boldDisabledReason ?? strings.toolbar.boldTitle}
+        aria-label={strings.toolbar.boldTitle} aria-pressed={boldActive} disabled={busy || !!boldDisabledReason}
+        onMouseDown={event => event.preventDefault()} onClick={onBold}><strong>{strings.toolbar.bold}</strong></button>
       <select aria-label={strings.toolbar.fontSize} title={boxFontDisabledReason ?? strings.toolbar.fontSizeTitle}
         disabled={busy || !!boxFontDisabledReason} value={boxFontSize ?? ''}
         onChange={event => onBoxFontSize(event.currentTarget.value ? Number(event.currentTarget.value) : null)}>

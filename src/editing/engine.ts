@@ -4,8 +4,8 @@ import { applySlideRanges, collectSlideSources, planSlideOperation, slideReason,
 import { renderedSlideSignatures, validateSlideRendering } from './slideValidation';
 import { mapBlockLines, sourceRange, tableCells } from './blocks';
 import type { MarpLike, Markdown, Token } from './markdown-types';
-import { getSegments, installTracking } from './tracking';
-import { planNewline, type NewlineKind } from './newline';
+import { getSegments, getMarkerRange, installTracking } from './tracking';
+import { planNewline, sourcePoint, type NewlineKind } from './newline';
 import { emptyItemPositions, tokenSignature, withoutEmptyItemShells } from './empty';
 import { captureLists, planListIndent, type ListSnapshot, type ListIndentDirection } from './listIndent';
 import { collectElements, elementReason, planElementOperation, type ElementOperation, type ElementOperationResult } from './elements';
@@ -77,6 +77,8 @@ export interface EditingEngine {
   applyTableBreakDeletion(text: string, runId: string, direction: 'backward' | 'forward'): NewlineResult;
   applyNewline(text: string, runId: string, offset: number, kind: NewlineKind): NewlineResult;
   applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId?: string): ListIndentResult;
+  applyBold(text: string, start: Cursor, end: Cursor): BoldResult;
+  isBold(runId: string): boolean;
   cancelDraft(text: string): NewlineResult;
   /** Commit pending text input/IME and finish drafts before calling. Indices are zero-based. */
   applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult;
@@ -86,6 +88,9 @@ export interface EditingEngine {
 }
 
 export type ListIndentResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
+export type BoldResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor; selectionEnd: Cursor }) | Extract<EditResult, { ok: false }>;
+
+interface StrongRange { open: Token; close: Token; start: number; end: number; closeStart: number; closeEnd: number; runs: Run[]; textOnly: boolean }
 
 export type NewlineResult = (Extract<EditResult, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
 
@@ -104,6 +109,8 @@ export function createEngine(marp: MarpLike): EditingEngine {
   const tableEmptyPositions = new WeakMap<Analysis, number[]>();
   const boxEmptyPositions = new WeakMap<Analysis, number[]>();
   const listSnapshots = new WeakMap<Analysis, ListSnapshot>();
+  const strongRanges = new WeakMap<Analysis, StrongRange[]>();
+  const boldRuns = new WeakMap<Analysis, Set<string>>();
   let emptyPositions: number[] = [];
   wrapRenderers(md);
 
@@ -139,9 +146,14 @@ export function createEngine(marp: MarpLike): EditingEngine {
 
   md.core.ruler.push('sm_source_map', state => {
     if (!pending) return;
-    collect(state.src, state.tokens, pending, ++revision, reuseIds);
+    collect(state.src, state.tokens, pending, ++revision, reuseIds, (ranges, runs) => { strongRanges.set(pending!, ranges); boldRuns.set(pending!, runs); });
     if (emptyPositions.length) {
       const probePositions = emptyPositions.map((position, index) => position + index);
+      for (const range of strongRanges.get(pending) ?? []) {
+        const originalOffset = (position: number) => position - probePositions.filter(probe => probe < position).length;
+        range.start = originalOffset(range.start); range.end = originalOffset(range.end);
+        range.closeStart = originalOffset(range.closeStart); range.closeEnd = originalOffset(range.closeEnd);
+      }
       for (const token of state.tokens) {
         if (token.type !== 'inline') continue;
         for (const child of token.children ?? []) {
@@ -360,6 +372,67 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, edit: plan.edits, newText, analysis: after, escaped: false, cursor: { runId: target.id, offset } };
   }
 
+  function isBold(runId: string): boolean {
+    return !!current && !!boldRuns.get(current)?.has(runId);
+  }
+
+  function applyBold(text: string, start: Cursor, end: Cursor): BoldResult {
+    const before = current;
+    const fail = (code: 'bold-multiple-runs' | 'bold-partial' | 'bold-invalid-position'): BoldResult => {
+      current = before; return { ok: false, reason: reason(code, code) };
+    };
+    if (!before || before.text !== text || before.draft) return fail('bold-invalid-position');
+    const first = before.runs.find(run => run.id === start.runId), last = before.runs.find(run => run.id === end.runId);
+    if (!first?.editable || !last?.editable || first.blockId !== last.blockId ||
+        start.offset < 0 || start.offset > first.text.length || end.offset < 0 || end.offset > last.text.length) return fail('bold-multiple-runs');
+    const collapsed = first === last && start.offset === end.offset;
+    const ranges = strongRanges.get(before) ?? [];
+    const containing = ranges.filter(range => range.runs.includes(first) || range.runs.includes(last));
+    const selected = containing.find(range => collapsed ? range.runs.includes(first) :
+      range.textOnly && range.runs[0] === first && start.offset === 0 && range.runs.at(-1) === last && end.offset === last.text.length);
+    if (!selected && first !== last) return fail('bold-multiple-runs');
+    if (!selected && containing.length) return fail('bold-partial');
+    if (!selected && (boldRuns.get(before)?.has(first.id) || boldRuns.get(before)?.has(last.id))) return fail(collapsed ? 'bold-invalid-position' : 'bold-partial');
+    if (!selected && first !== last) return fail('bold-multiple-runs');
+    if (!selected && collapsed) return fail('bold-invalid-position');
+    let edits: SourceEdit[], targetStart: number, targetEnd: number;
+    if (selected) {
+      if (text.slice(selected.start, selected.end) !== selected.open.markup || text.slice(selected.closeStart, selected.closeEnd) !== selected.close.markup) return fail('bold-invalid-position');
+      edits = [{ start: selected.closeStart, end: selected.closeEnd, insert: '' }, { start: selected.start, end: selected.end, insert: '' }];
+      targetStart = selected.start; targetEnd = selected.closeStart - 2;
+    } else {
+      const value = first.text.slice(start.offset, end.offset);
+      const left = value.length - value.trimStart().length, right = value.trimEnd().length;
+      if (left >= right) return fail('bold-invalid-position');
+      const a = sourcePoint(first, start.offset + left), b = sourcePoint(first, start.offset + right);
+      if (a === undefined || b === undefined || b <= a) return fail('bold-invalid-position');
+      edits = [{ start: b, end: b, insert: '**' }, { start: a, end: a, insert: '**' }];
+      targetStart = a; targetEnd = b + 2;
+    }
+    if (edits.some(edit => edit.start < 0 || edit.end > text.length)) return fail('bold-invalid-position');
+    const newText = edits.reduce((value, edit) => replaceRange(value, edit), text);
+    let after: Analysis;
+    try { after = renderAnalysis(newText); } catch { return fail('bold-invalid-position'); }
+    const target = selected ? selected : (strongRanges.get(after) ?? []).find(range => range.start === targetStart && range.closeStart === targetEnd && range.open.markup === '**');
+    if (!target || before.structure !== after.structure ||
+        boldFingerprint(analysisTokens.get(before) ?? [], selected) !== boldFingerprint(analysisTokens.get(after) ?? [], selected ? undefined : target)) return fail('bold-invalid-position');
+    const oldBlock = before.blocks.findIndex(block => block.id === first.blockId);
+    const oldRuns = before.blocks[oldBlock]?.runs.map(id => before.runs.find(run => run.id === id)!);
+    const newRuns = after.blocks[oldBlock]?.runs.map(id => after.runs.find(run => run.id === id)!);
+    if (!oldRuns || !newRuns) return fail('bold-invalid-position');
+    const position = (run: Run, offset: number) => oldRuns.slice(0, oldRuns.indexOf(run)).reduce((sum, item) => sum + item.text.length, 0) + offset;
+    const resolve = (offset: number, forward: boolean): Cursor | undefined => {
+      for (let i = 0; i < newRuns.length; i++) {
+        const run = newRuns[i];
+        if (offset < run.text.length || (offset === run.text.length && (!forward || i === newRuns.length - 1))) return run.editable ? { runId: run.id, offset } : undefined;
+        offset -= run.text.length;
+      }
+    };
+    const cursor = resolve(position(first, start.offset), !collapsed), selectionEnd = resolve(position(last, end.offset), false);
+    if (!cursor || !selectionEnd) return fail('bold-invalid-position');
+    return { ok: true, edit: edits, newText, analysis: after, escaped: false, cursor, selectionEnd, separateHistory: true };
+  }
+
   function cancelDraft(text: string): NewlineResult {
     const before = current;
     if (!before?.draft || before.text !== text) return { ok: false, reason: reason('stale-run', 'There is no current empty-line draft') };
@@ -474,12 +547,14 @@ export function createEngine(marp: MarpLike): EditingEngine {
     } catch { return fail('element-structure-changed'); }
   }
 
-  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
+  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, applyBold, isBold, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
   engines.set(marp, engine);
   return engine;
 }
 
-function collect(source: string, tokens: Token[], analysis: Analysis, revision: number, reuse?: Analysis): void {
+function collect(source: string, tokens: Token[], analysis: Analysis, revision: number, reuse: Analysis | undefined, saveStrong: (ranges: StrongRange[], runs: Set<string>) => void): void {
+  const strong: StrongRange[] = [];
+  const bold = new Set<string>();
   let column = 0, cellColumn = 0;
   analysis.structure = JSON.stringify(tokens.filter(t => t.type !== 'inline').map(shape));
   const stack: Token[] = [];
@@ -551,9 +626,40 @@ function collect(source: string, tokens: Token[], analysis: Analysis, revision: 
         }
         tokenRuns.set(child, run); block.runs.push(run.id); analysis.runs.push(run);
       }
+      const openStack: Array<{ token: Token; range?: { start: number; end: number }; runs: Run[]; textOnly: boolean }> = [];
+      for (const child of token.children ?? []) {
+        const raw = getMarkerRange(child), marker = raw && mapping && sourceRange(mapping, raw.start, raw.end);
+        if (child.type === 'strong_open') openStack.push({ token: child, range: marker && source.slice(marker.start, marker.end) === child.markup ? marker : undefined, runs: [], textOnly: true });
+        const run = tokenRuns.get(child);
+        if (run) {
+          if (openStack.length) bold.add(run.id);
+          for (const open of openStack) open.runs.push(run);
+        }
+        if (!['text', 'strong_open', 'strong_close', 'em_open', 'em_close', 'link_open', 'link_close', 's_open', 's_close'].includes(child.type)) for (const open of openStack) open.textOnly = false;
+        if (child.type === 'strong_close') {
+          const open = openStack.pop();
+          if (open?.range && marker && source.slice(marker.start, marker.end) === child.markup) strong.push({ open: open.token, close: child, start: open.range.start, end: open.range.end, closeStart: marker.start, closeEnd: marker.end, runs: open.runs, textOnly: open.textOnly });
+        }
+      }
     }
     if (token.nesting > 0) stack.push(token);
   }
+  saveStrong(strong, bold);
+}
+
+function boldFingerprint(tokens: Token[], remove?: StrongRange): string {
+  return JSON.stringify(tokens.map(token => {
+    const children: unknown[][] = [];
+    for (const child of token.children ?? []) {
+      if (child === remove?.open || child === remove?.close || (child.type === 'text' && !child.content)) continue;
+      if (child.type === 'text') {
+        const previous = children.at(-1);
+        if (previous?.[0] === 'text') previous[1] = String(previous[1]) + child.content;
+        else children.push(['text', child.content]);
+      } else children.push(['token', shape(child)]);
+    }
+    return [shape(token), token.children ? children : null];
+  }));
 }
 
 function wrapRenderers(md: Markdown): void {

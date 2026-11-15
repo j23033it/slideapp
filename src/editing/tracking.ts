@@ -5,6 +5,11 @@ interface Trace { segments: Segment[] }
 // Marp clones every text token in its Unicode emoji pass, even without emoji.
 // An enumerable symbol survives an unchanged clone; content equality rejects splits.
 const traceKey = Symbol('slidemark-source');
+const markerKey = Symbol('slidemark-marker');
+type MarkerToken = Token & { [markerKey]?: { start: number; end: number } };
+export function getMarkerRange(token: Token): { start: number; end: number } | undefined {
+  return (token as MarkerToken)[markerKey];
+}
 type TracedToken = Token & { [traceKey]?: Trace };
 const traces = {
   get: (token: Token) => (token as TracedToken)[traceKey],
@@ -82,6 +87,19 @@ export function installTracking(md: Markdown): void {
       return accepted;
     }, { alt });
   }
+  md.inline.ruler2.before('fragments_join', 'sm_strong_ranges', state => {
+    for (let i = 0; i < state.tokens.length; i++) {
+      const token = state.tokens[i];
+      if (token.type !== 'strong_open' && token.type !== 'strong_close') continue;
+      const neighbor = state.tokens[i + (token.type === 'strong_open' ? -1 : 1)];
+      const a = traces.get(token)?.segments[0], b = neighbor && traces.get(neighbor)?.segments[0];
+      if (!a || !b) continue;
+      const start = Math.min(a.start, b.start), end = Math.max(a.end, b.end);
+      if (end - start === 2 && state.src.slice(start, end) === token.markup) {
+        (token as MarkerToken)[markerKey] = { start, end };
+      }
+    }
+  });
   md.inline.ruler2.before('fragments_join', 'sm_fragments_join', state => join(state.tokens, false));
   md.core.ruler.before('text_join', 'sm_text_join', state => {
     for (const token of state.tokens) if (token.type === 'inline' && token.children) join(token.children, true);
