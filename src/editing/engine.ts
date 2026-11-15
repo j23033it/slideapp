@@ -79,6 +79,8 @@ export interface EditingEngine {
   applyListIndent(text: string, runId: string, offset: number, direction: ListIndentDirection, endRunId?: string): ListIndentResult;
   applyBold(text: string, start: Cursor, end: Cursor): BoldResult;
   isBold(runId: string): boolean;
+  isElementBold(elementId: string): boolean;
+  applyElementBold(text: string, elementId: string): ElementBoldResult;
   cancelDraft(text: string): NewlineResult;
   /** Commit pending text input/IME and finish drafts before calling. Indices are zero-based. */
   applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult;
@@ -89,6 +91,9 @@ export interface EditingEngine {
 
 export type ListIndentResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
 export type BoldResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor; selectionEnd: Cursor }) | Extract<EditResult, { ok: false }>;
+
+export type ElementBoldResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { elementId: string }) | Extract<EditResult, { ok: false }>;
+interface InlineRange { token: Token; lines?: [number, number]; start?: number; end?: number }
 
 interface StrongRange { open: Token; close: Token; start: number; end: number; closeStart: number; closeEnd: number; runs: Run[]; textOnly: boolean }
 
@@ -111,6 +116,8 @@ export function createEngine(marp: MarpLike): EditingEngine {
   const listSnapshots = new WeakMap<Analysis, ListSnapshot>();
   const strongRanges = new WeakMap<Analysis, StrongRange[]>();
   const boldRuns = new WeakMap<Analysis, Set<string>>();
+  const rawStrongRanges = new WeakMap<Analysis, StrongRange[]>();
+  const inlineRanges = new WeakMap<Analysis, InlineRange[]>();
   let emptyPositions: number[] = [];
   wrapRenderers(md);
 
@@ -146,7 +153,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
 
   md.core.ruler.push('sm_source_map', state => {
     if (!pending) return;
-    collect(state.src, state.tokens, pending, ++revision, reuseIds, (ranges, runs) => { strongRanges.set(pending!, ranges); boldRuns.set(pending!, runs); });
+    collect(state.src, state.tokens, pending, ++revision, reuseIds, (ranges, runs, inlines) => { strongRanges.set(pending!, ranges); boldRuns.set(pending!, runs); inlineRanges.set(pending!, inlines); });
     if (emptyPositions.length) {
       const probePositions = emptyPositions.map((position, index) => position + index);
       for (const range of strongRanges.get(pending) ?? []) {
@@ -208,6 +215,8 @@ export function createEngine(marp: MarpLike): EditingEngine {
             captureTableSnapshots(analysis); current = analysis; return analysis;
           }
           rawTokens.set(editable, actual);
+          inlineRanges.set(editable, inlineRanges.get(analysis) ?? []);
+          rawStrongRanges.set(editable, strongRanges.get(analysis) ?? []);
           editable.slideSources = analysis.slideSources;
           editable.elementSources = analysis.elementSources;
           captureTableSnapshots(editable);
@@ -374,6 +383,79 @@ export function createEngine(marp: MarpLike): EditingEngine {
 
   function isBold(runId: string): boolean {
     return !!current && !!boldRuns.get(current)?.has(runId);
+  }
+
+  function elementInlines(analysis: Analysis, id: string): InlineRange[] | undefined {
+    const element = analysis.elementSources?.elements.find(entry => entry.id === id);
+    if (!element || element.unsafe || element.kind === 'code' || element.kind === 'image') return;
+    const all = inlineRanges.get(analysis) ?? [];
+    // Line maps identify the owning top-level element even for nested lists and boxes.
+    const starts = [0];
+    for (let i = 0; i < analysis.text.length; i++) if (analysis.text[i] === '\n') starts.push(i + 1);
+    return all.filter(entry => {
+      if (entry.start !== undefined && entry.end !== undefined) return entry.start >= element.start && entry.end <= element.end;
+      const map = entry.lines;
+      return map && (starts[map[0]] ?? -1) >= element.start && (starts[map[1]] ?? analysis.text.length) <= element.end;
+    }).filter(entry => entry.token.content.trim().length > 0);
+  }
+
+  function wholeStrong(entry: InlineRange): boolean {
+    const children = entry.token.children ?? [];
+    const opens = children.filter(child => child.type === 'strong_open');
+    if (opens.length !== 1 || children.filter(child => child.type === 'strong_close').length !== 1) return false;
+    const open = children.indexOf(opens[0]), close = children.findIndex(child => child.type === 'strong_close');
+    if (close <= open) return false;
+    return children.every((child, index) => index > open && index < close ||
+      (child.type === 'text' ? !child.content.trim() : ['strong_open', 'strong_close', 'em_open', 'em_close', 'link_open', 'link_close', 's_open', 's_close'].includes(child.type)));
+  }
+
+  function isElementBold(elementId: string): boolean {
+    const entries = current && elementInlines(current, elementId);
+    return !!entries?.length && entries.every(wholeStrong);
+  }
+
+  function applyElementBold(text: string, elementId: string): ElementBoldResult {
+    const before = current;
+    const fail = (): ElementBoldResult => { current = before; return { ok: false, reason: reason('bold-invalid-position', 'bold-invalid-position') }; };
+    if (!before || before.text !== text || before.draft) return fail();
+    const entries = elementInlines(before, elementId);
+    if (!entries?.length || (inlineRanges.get(before) ?? []).some(entry => entry.token.content.trim() && !entry.lines && entry.start === undefined) ||
+        entries.some(entry => entry.start === undefined || entry.end === undefined || entry.start >= entry.end)) return fail();
+    const remove = entries.every(wholeStrong);
+    const ranges = rawStrongRanges.get(before) ?? strongRanges.get(before) ?? [];
+    const edits: SourceEdit[] = [];
+    for (const entry of entries) {
+      const children = entry.token.children ?? [];
+      const own = ranges.filter(range => children.includes(range.open) && children.includes(range.close));
+      if (own.length * 2 !== children.filter(child => child.type === 'strong_open' || child.type === 'strong_close').length) return fail();
+      for (const range of own) {
+        if (text.slice(range.start, range.end) !== range.open.markup || text.slice(range.closeStart, range.closeEnd) !== range.close.markup) return fail();
+        edits.push({ start: range.start, end: range.end, insert: '' }, { start: range.closeStart, end: range.closeEnd, insert: '' });
+      }
+      if (!remove) {
+        edits.push({ start: entry.start!, end: entry.start!, insert: '**' }, { start: entry.end!, end: entry.end!, insert: '**' });
+      }
+    }
+    // Combine insertion at a deleted marker boundary into that same range.
+    for (const edit of [...edits].filter(item => item.start === item.end)) {
+      const atStart = edits.find(item => item !== edit && item.start === edit.start && item.end > item.start);
+      const atEnd = edits.find(item => item !== edit && item.end === edit.start && item.end > item.start);
+      if (atStart || atEnd) { (atStart ?? atEnd)!.insert = edit.insert; edits.splice(edits.indexOf(edit), 1); }
+    }
+    edits.sort((a, b) => b.start - a.start || b.end - a.end);
+    if (edits.some((edit, index) => index > 0 && (edit.end > edits[index - 1].start || edit.start === edits[index - 1].start))) return fail();
+    const newText = edits.reduce((value, edit) => replaceRange(value, edit), text);
+    let after: Analysis;
+    try { after = renderAnalysis(newText, before); } catch { return fail(); }
+    const oldElement = before.elementSources?.elements.find(entry => entry.id === elementId);
+    const nextElement = after.elementSources?.elements.find(entry => entry.id === elementId);
+    const next = elementInlines(after, elementId);
+    if (!oldElement || !nextElement || oldElement.kind !== nextElement.kind || !next || next.length !== entries.length ||
+        next.some(entry => remove ? (entry.token.children ?? []).some(child => child.type === 'strong_open' || child.type === 'strong_close') :
+          !wholeStrong(entry) || !(rawStrongRanges.get(after) ?? strongRanges.get(after) ?? []).some(range => (entry.token.children ?? []).includes(range.open) && (entry.token.children ?? []).includes(range.close))) ||
+        elementBoldFingerprint(rawTokens.get(before) ?? analysisTokens.get(before) ?? [], entries) !==
+          elementBoldFingerprint(rawTokens.get(after) ?? analysisTokens.get(after) ?? [], next)) return fail();
+    return { ok: true, edit: edits, newText, analysis: after, escaped: false, separateHistory: true, elementId };
   }
 
   function applyBold(text: string, start: Cursor, end: Cursor): BoldResult {
@@ -547,14 +629,15 @@ export function createEngine(marp: MarpLike): EditingEngine {
     } catch { return fail('element-structure-changed'); }
   }
 
-  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, applyBold, isBold, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
+  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, applyBold, isBold, applyElementBold, isElementBold, cancelDraft, applySlideOperation, applyElementOperation, applyTableOperation, insertBox };
   engines.set(marp, engine);
   return engine;
 }
 
-function collect(source: string, tokens: Token[], analysis: Analysis, revision: number, reuse: Analysis | undefined, saveStrong: (ranges: StrongRange[], runs: Set<string>) => void): void {
+function collect(source: string, tokens: Token[], analysis: Analysis, revision: number, reuse: Analysis | undefined, saveStrong: (ranges: StrongRange[], runs: Set<string>, inlines: InlineRange[]) => void): void {
   const strong: StrongRange[] = [];
   const bold = new Set<string>();
+  const inlines: InlineRange[] = [];
   let column = 0, cellColumn = 0;
   analysis.structure = JSON.stringify(tokens.filter(t => t.type !== 'inline').map(shape));
   const stack: Token[] = [];
@@ -596,6 +679,9 @@ function collect(source: string, tokens: Token[], analysis: Analysis, revision: 
       const mapping = table ? cellMapping : opening && mapBlockLines(source, token, opening);
       block.tableCell = table;
       if (table && row?.map) block.lines = row.map;
+      const left = token.content.length - token.content.trimStart().length, right = token.content.trimEnd().length;
+      const first = mapping && sourceRange(mapping, left, left), last = mapping && sourceRange(mapping, right, right);
+      inlines.push({ token, lines: table ? row?.map ?? undefined : token.map ?? undefined, start: first?.start, end: last?.end });
       const html = htmlContents(token.children ?? []);
       const blocked = analysis.text.includes('\0') ? reason('nul', 'NUL source is read-only') :
         table && inContainer ? reason('table', 'Tables inside containers are read-only') :
@@ -644,7 +730,24 @@ function collect(source: string, tokens: Token[], analysis: Analysis, revision: 
     }
     if (token.nesting > 0) stack.push(token);
   }
-  saveStrong(strong, bold);
+  saveStrong(strong, bold, inlines);
+}
+
+function elementBoldFingerprint(tokens: Token[], entries: InlineRange[]): string {
+  const selected = new Set(entries.map(entry => entry.token));
+  return JSON.stringify(tokens.map(token => {
+    const children: unknown[][] = [];
+    for (const child of token.children ?? []) {
+      if (selected.has(token) && (child.type === 'strong_open' || child.type === 'strong_close')) continue;
+      if (child.type === 'text' && !child.content) continue;
+      if (child.type === 'text') {
+        const previous = children.at(-1);
+        if (previous?.[0] === 'text') previous[1] = String(previous[1]) + child.content;
+        else children.push(['text', child.content]);
+      } else children.push(['token', shape(child)]);
+    }
+    return [shape(token), token.children ? children : null];
+  }));
 }
 
 function boldFingerprint(tokens: Token[], remove?: StrongRange): string {

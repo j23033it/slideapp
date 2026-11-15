@@ -17,6 +17,7 @@ export interface SlideStageCallbacks {
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor, selectionEnd?: Cursor): void
+  onElementBold(result: EditSuccess, elementId: string): void
   canBold(): boolean
   onBoldState(active: boolean): void
   onHistory(direction: 'undo' | 'redo'): void
@@ -67,6 +68,7 @@ export function SlideStage({
       onNotice: (code) => callbacksRef.current.onNotice(code),
       onCommit: (result, cursors) => callbacksRef.current.onCommit(result, cursors),
       onCrossRun: (result, target, before, selectionEnd) => callbacksRef.current.onCrossRun(result, target, before, selectionEnd),
+      onElementBold: (result, id) => callbacksRef.current.onElementBold(result, id),
       canBold: () => callbacksRef.current.canBold(),
       onBoldState: active => callbacksRef.current.onBoldState(active),
       onHistory: (direction) => callbacksRef.current.onHistory(direction),

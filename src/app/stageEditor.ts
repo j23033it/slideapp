@@ -45,6 +45,7 @@ export interface StageEditorOptions {
   onNotice(code: ReadonlyCode): void
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor, selectionEnd?: Cursor): void
+  onElementBold?(result: EditSuccess, elementId: string): void
   canBold?(): boolean
   onBoldState?(active: boolean): void
   onHistory(direction: 'undo' | 'redo'): void
@@ -133,7 +134,7 @@ export class StageEditor {
     this.imageHandles?.remove()
     this.imageHandles = undefined
     this.selectedElement = null
-    if (notify && hadSelection) this.options.onElementSelect?.(null)
+    if (notify && hadSelection) { this.options.onElementSelect?.(null); this.options.onBoldState?.(false) }
   }
 
   private selectElement(id: string, notify = true): void {
@@ -220,6 +221,7 @@ export class StageEditor {
         this.positionImageHandles(element)
       }
     }
+    this.options.onBoldState?.(this.engine.isElementBold(id))
     if (notify) this.options.onElementSelect?.(source.kind, id)
   }
 
@@ -459,7 +461,7 @@ export class StageEditor {
   private readonly onKeyDown = (raw: Event): void => {
     const event = raw as KeyboardEvent
     if (event.composedPath().some(node => node instanceof Element && node.hasAttribute('data-sm-table-menu'))) return
-    if (this.editing && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'b') {
+    if ((this.editing || this.selectedElement) && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'b') {
       event.preventDefault(); event.stopPropagation()
       if (!event.isComposing && event.keyCode !== 229 && !this.hasPendingComposition()) this.toggleBold()
       return
@@ -611,12 +613,20 @@ export class StageEditor {
     this.cancelAbandonedDraft()
     const selection = selectionFor(this.root)
     const run = runElementOf(selection?.focusNode ?? null)
-    this.options.onBoldState?.(!!run && this.root.contains(run) && this.engine.isBold(run.dataset.smRun ?? ''))
+    this.options.onBoldState?.(this.selectedElement ? this.engine.isElementBold(this.selectedElement) : !!run && this.root.contains(run) && this.engine.isBold(run.dataset.smRun ?? ''))
   }
 
   toggleBold(): void {
     if (this.hasPendingComposition()) return
     if (!this.options.canBold?.()) { this.options.onNotice('element-readonly'); return }
+    if (this.selectedElement) {
+      if (!this.options.onElementBold) return
+      const result = this.engine.applyElementBold(this.analysis.text, this.selectedElement)
+      if (!result.ok) { this.options.onNotice(result.reason.code); return }
+      this.pendingElementSelection = result.elementId
+      this.options.onElementBold(result, result.elementId)
+      return
+    }
     const before = this.currentCursor(false), end = this.currentCursor(true)
     if (!before || !end) { this.options.onNotice('bold-multiple-runs'); return }
     const result = this.engine.applyBold(this.analysis.text, before, end)

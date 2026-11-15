@@ -80,7 +80,7 @@ export const strings = {
   appName: 'SlideApp',
 
   toolbar: {
-    bold: 'B', boldTitle: '太字 (Ctrl+B)',
+    bold: 'B', boldTitle: '太字 (Ctrl+B)', boldUnavailable: 'この要素は太字にできません',
     box: 'テキストボックス', boxTitle: 'テキストボックスを挿入',
     fontSize: '文字サイズ', fontSizeTitle: '文字の大きさを変更', fontSizeDefault: '既定', fontSizeUnavailable: 'テキストボックスで変更できます',
     table: '表', tableTitle: '表を挿入',

@@ -306,6 +306,54 @@ try {
     await key('z', 2)
     check((await evaluate('state().modelText')).includes('**box** text'), 'Undo did not restore box bold')
   })
+  const selectedBold = async (text, expected) => {
+    await click(text, 1); await key('Escape')
+    check(await evaluate(`!!${stageRoot}.querySelector('[data-sm-selected]')`), 'Element was not selected')
+    const original = await evaluate('state().modelText')
+    await clickBold()
+    check((await evaluate('state().modelText')).includes(expected), 'B did not bold the element')
+    check(await evaluate(`!!${stageRoot}.querySelector('[data-sm-selected]')`), 'Element selection was not restored')
+    check(await evaluate(`document.querySelector('button[aria-label="太字 (Ctrl+B)"]').getAttribute('aria-pressed') === 'true'`), 'B was not pressed')
+    await key('b', 2)
+    check(await evaluate('state().modelText') === original, 'Ctrl+B did not remove element bold')
+    check(await evaluate(`!!${stageRoot}.querySelector('[data-sm-selected]')`), 'Element selection was lost after removal')
+    await key('z', 2)
+    check((await evaluate('state().modelText')).includes(expected), 'One Undo did not restore element bold')
+  }
+  await scenario('element-bold-paragraph', async () => {
+    await selectedBold(paragraph, '**' + paragraph + '**')
+  })
+  await scenario('element-bold-box', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'box text'}); await waitFor(`!![...${stageRoot}.querySelectorAll('[data-sm-run]')].find(e => e.textContent === 'box text')`)
+    await selectedBold('box text', '**box text**')
+  })
+  try {
+    await writeFile(fixture, Buffer.from(sample.toString().replaceAll('<br>', '')))
+    await scenario('element-bold-table', async () => {
+      await selectedBold('表見出し', '| **表見出し** | **列見出し** |')
+      check((await evaluate('state().modelText')).includes('**表の前表の後**'), 'Table body was not bold')
+    })
+  } finally { await writeFile(fixture, sample) }
+  try {
+    const source = '# Elements\n\n```\ncode sample\n```\n\n![w:300](probe.png)\n\n---\n\n# Second'
+    await writeFile(fixture, Buffer.from(source))
+    await scenario('element-bold-code-image-disabled', async () => {
+      const button = `document.querySelector('button[aria-label="太字 (Ctrl+B)"]')`
+      await evaluate(`document.querySelector('.slide-list-host').shadowRoot.querySelectorAll('.slot')[0].click()`)
+      await waitFor(`!!${stageRoot}.querySelector('marp-pre[data-sm-element]') && !!${stageRoot}.querySelector('[data-sm-element] img')`)
+      for (const selector of ['marp-pre code', '[data-sm-element] img']) {
+        const p = await boxPoint(selector)
+        await mouse('mouseMoved', p); await mouse('mousePressed', p, {button:'left', buttons:1, clickCount:1})
+        await mouse('mouseReleased', p, {button:'left', buttons:0, clickCount:1}); await delay(250)
+        check(await evaluate(`!!${stageRoot}.querySelector('[data-sm-selected]') && ${button}.disabled`), 'B remained enabled for ' + selector)
+        const original = await evaluate('state().modelText')
+        await key('b', 2)
+        check(await evaluate('state().modelText') === original, 'Ctrl+B changed disabled element')
+      }
+    })
+  } finally { await writeFile(fixture, sample) }
   await scenario('bold-ime-ignored', async () => {
     await click(paragraph, 3)
     await send('Input.imeSetComposition', {text:'てん',selectionStart:2,selectionEnd:2})
