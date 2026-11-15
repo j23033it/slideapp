@@ -96,6 +96,7 @@ export function SlideStage({
       cancelDrag: () => editor.cancelDrag(),
       toggleBold: () => editor.toggleBold(),
       endEditing: () => editor.endEditing(),
+      clearElementSelection: () => editor.clearElementSelection(),
       insertionAnchor: () => editor.insertionAnchor(),
       selectElementOnRender: id => editor.selectElementOnRender(id),
       captureCursor: () => { rememberCursor(); return cursor },
