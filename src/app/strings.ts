@@ -67,6 +67,8 @@ export const strings = {
       'element-structure-changed': '前後の要素の形が変わるため操作できません',
       'element-heading-divider': 'headingDividerが有効なため操作できません',
       'element-readonly': '読み取り専用または競合中のため操作できません',
+      'box-move-failed': 'テキストボックスの位置を変更できません',
+      'box-convert-failed': 'この要素は自由に配置できません',
     },
   },
   tabs: {

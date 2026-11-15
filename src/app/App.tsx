@@ -52,6 +52,7 @@ import type { TableMenuTarget } from './tableMenu'
 import { chooseImage, imageLine, insertImage } from './imageInsert'
 import { resizeImage } from '../editing/images'
 import { setBoxFontSize } from '../editing/boxes'
+import { placeBox } from '../editing/boxPosition'
 
 const MIN_SIDEBAR_WIDTH = 120
 const MAX_SIDEBAR_WIDTH = 480
@@ -839,6 +840,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       const session = sessionRef.current
       if (!session || !activeWorkspaceRef.current || pendingRef.current ||
         updateInstallLockedRef.current || openingRef.current || viewRef.current.busy) return
+      stageApi.current?.cancelDrag?.()
       stageApi.current?.endEditing()
       if (direction === 'undo' ? !session.model.canUndo : !session.model.canRedo) return
       const cursor = direction === 'undo' ? session.model.undo() : session.model.redo()
@@ -866,6 +868,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
     (index: number) => {
       const session = sessionRef.current
       if (!session) return
+      stageApi.current?.cancelDrag?.()
       stageApi.current?.endEditing()
       const total = session.deck.slides.length
       if (total === 0) return
@@ -1020,6 +1023,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
         return
       }
       if (sessionRef.current?.path !== change.path) return
+      stageApi.current?.cancelDrag?.()
       const requestId = ++externalChangeRequest.current
       if (deferIfComposing(() => void handleExternalNow(change, observation, requestId))) return
       void handleExternalNow(change, observation, requestId)
@@ -1152,6 +1156,17 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const stageCallbacks: SlideStageCallbacks = {
     onTableReason: tableReason,
     onTableCommand: (target, command) => { void runTableCommand(target, command) },
+    onBoxPlace: (id, geometry) => {
+      const session = sessionRef.current
+      if (!session) return
+      const result = placeBox(session.model, session.renderer.editing, session.analysis, id, geometry,
+        session.conflict || updateInstallLockedRef.current || !!pendingRef.current || viewRef.current.busy || !!stageApi.current?.isComposing())
+      if (!result.ok) { sync({ detail: strings.elementOperations.reasons[result.reason] }); return }
+      analyzeSession(session, result.analysis)
+      session.focus = undefined
+      stageApi.current?.selectElementOnRender?.(result.elementId)
+      syncDeck({ detail: null })
+    },
     onImageResize: (id, width, slideWidth) => {
       const session = sessionRef.current
       if (!session) return

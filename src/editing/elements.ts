@@ -7,7 +7,7 @@ export type ElementKind = 'paragraph' | 'heading' | 'list' | 'quote' | 'table' |
 export type InsertBlockKind = ElementKind | 'html';
 export type ElementReasonCode = 'element-ambiguous' | 'element-structure-changed' | 'element-heading-divider' | 'element-readonly';
 export interface ElementReason { code: ElementReasonCode; description: string }
-export interface SourceElement { id: string; kind: ElementKind; slide: number; start: number; end: number; signature: string; unsafe: boolean; boxStyle?: { size?: number; numberStart?: number; numberEnd?: number; declarationStart?: number; declarationEnd?: number; insertAt: number }; imageAlt?: { start: number; end: number; text: string; sizes: { name: string; value: string; start: number; end: number }[] } }
+export interface SourceElement { id: string; kind: ElementKind; slide: number; start: number; end: number; signature: string; unsafe: boolean; boxStyle?: { left: number; top: number; width: number; leftStart: number; leftEnd: number; topStart: number; topEnd: number; widthStart: number; widthEnd: number; size?: number; numberStart?: number; numberEnd?: number; declarationStart?: number; declarationEnd?: number; insertAt: number }; imageAlt?: { start: number; end: number; text: string; sizes: { name: string; value: string; start: number; end: number }[] } }
 export interface SourceGroup { slide: number; start: number; end: number; signature: string; kind?: InsertBlockKind }
 export interface ElementSources { elements: SourceElement[]; groups: SourceGroup[]; signature: string[][]; valid: boolean }
 export type ElementOperation = { kind: 'delete'; elementId: string } | {
@@ -101,12 +101,17 @@ export function collectElements(text: string, tokens: Token[], slides: SlideSour
     let boxStyle: SourceElement['boxStyle'];
     if (box) {
       const style = text.slice(box.styleStart, box.styleEnd);
+      const coords = /left[ \t]*:[ \t]*(-?\d+)px[ \t]*;[ \t]*top[ \t]*:[ \t]*(-?\d+)px[ \t]*;[ \t]*width[ \t]*:[ \t]*(\d+)px/.exec(style)!;
+      const leftStart = box.styleStart + coords.index + coords[0].indexOf(coords[1]);
+      const topStart = box.styleStart + coords.index + coords[0].indexOf(coords[2], leftStart - box.styleStart - coords.index + coords[1].length);
+      const widthStart = box.styleStart + coords.index + coords[0].lastIndexOf(coords[3]);
+      const geometry = { left: Number(coords[1]), top: Number(coords[2]), width: Number(coords[3]), leftStart, leftEnd: leftStart + coords[1].length, topStart, topEnd: topStart + coords[2].length, widthStart, widthEnd: widthStart + coords[3].length };
       const font = /(;[ \t]*font-size[ \t]*:[ \t]*)(\d+)pt([ \t]*)$/.exec(style);
       const tail = /[ \t]*$/.exec(style)![0].length;
-      boxStyle = font ? { size: Number(font[2]), numberStart: box.styleStart + font.index + font[1].length,
+      boxStyle = font ? { ...geometry, size: Number(font[2]), numberStart: box.styleStart + font.index + font[1].length,
         numberEnd: box.styleStart + font.index + font[1].length + font[2].length,
         declarationStart: box.styleStart + font.index, declarationEnd: box.styleEnd - font[3].length,
-        insertAt: box.styleStart + font.index } : { insertAt: box.styleEnd - tail };
+        insertAt: box.styleStart + font.index } : { ...geometry, insertAt: box.styleEnd - tail };
     }
     elements.push({ id, kind, slide, start, end, signature: sig, unsafe, imageAlt, boxStyle });
   }

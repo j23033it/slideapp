@@ -15,8 +15,9 @@ const fixtureDirectory = await mkdtemp(join(output, 'fixture-'))
 const fixture = join(fixtureDirectory, 'sample.md')
 const sample = process.env.SAMPLE_MD
   ? await readFile(process.env.SAMPLE_MD)
-  : Buffer.from('---\nmarp: true\ntheme: default\npaginate: true\n---\n\n# SlideApp 動作確認\n\n文字をクリックして直接編集できるか試すためのサンプル。・・\n\n| 表見出し | 列見出し |\n|---|---|\n| 表の前<br>表の後 | 表セル<br> |\n\n---\n\n## 日本語入力のテスト\n\n- この行をクリックして、日本語を入力・変換してみる\n- **太字の部分**と*斜体の部分*も編集してみる\n')
+  : Buffer.from('---\nmarp: true\ntheme: default\npaginate: true\n---\n\n# SlideApp 動作確認\n\n文字をクリックして直接編集できるか試すためのサンプル。・・\n\n| 表見出し | 列見出し |\n|---|---|\n| 表の前<br>表の後 | 表セル<br> |\n\n---\n\n## 日本語入力のテスト\n\n- この行をクリックして、日本語を入力・変換してみる\n- **太字の部分**と*斜体の部分*も編集してみる\n\n![w:80](probe.png)\n')
 await writeFile(fixture, sample)
+await writeFile(join(fixtureDirectory, 'probe.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8X8AAAAASUVORK5CYII=', 'base64'))
 let child, childClosed, ws, launchLog, launchError, testIdentifier
 let profilePaths = []
 const execFileAsync = promisify(execFile)
@@ -49,7 +50,7 @@ async function waitFor(expression, timeout = 10000) {
   throw new Error(`Timed out: ${expression}`)
 }
 async function key(key, modifiers = 0) {
-  const code = { Tab: 9, Enter: 13, Backspace: 8, Delete: 46, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, c: 67, m: 77, y: 89, z: 90 }[key]
+  const code = { Tab: 9, Enter: 13, Backspace: 8, Delete: 46, Escape: 27, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, c: 67, m: 77, y: 89, z: 90 }[key]
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code, modifiers })
   await delay(180)
@@ -259,6 +260,82 @@ try {
   await send('Page.enable'); await send('Runtime.enable')
   await waitFor('!!window.__TAURI_INTERNALS__ && !!document.querySelector(".empty-open-button")')
   await writeFile(join(output,'environment.json'),JSON.stringify({version:await send('Browser.getVersion'),targetUrl:target.url,fixture},null,2))
+  const stageRoot = `document.querySelector('.stage-host').shadowRoot`
+  const boxPoint = async selector => evaluate(`(() => { const e = ${stageRoot}.querySelector(${JSON.stringify(selector)}); if (!e) throw Error('Missing ' + ${JSON.stringify(selector)}); const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2} })()`)
+  const gesture = async (p, dx, dy, cancel = false) => {
+    await mouse('mouseMoved', p); await mouse('mousePressed', p, { button:'left', buttons:1, clickCount:1 })
+    await mouse('mouseMoved', {x:p.x+dx,y:p.y+dy}, {button:'left',buttons:1}); await delay(100)
+    if (cancel) await key('Escape')
+    await mouse('mouseReleased', {x:p.x+dx,y:p.y+dy}, {button:'left',buttons:0,clickCount:1}); await delay(250)
+  }
+  await scenario('box-move-resize-cancel-arrows-undo', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'操作する箱'}); await delay(200); await key('Escape')
+    const original = await evaluate('state().modelText')
+    const p = await boxPoint('[data-box][data-sm-selected]')
+    await gesture(p, 40, 30, true)
+    check(await evaluate('state().modelText') === original, 'Escape committed a box drag')
+    await gesture(p, 40, 30)
+    const moved = await evaluate('state().modelText')
+    check(moved !== original, 'Drag did not move the box')
+    await key('ArrowRight'); const arrow = await evaluate('state().modelText')
+    check(arrow !== moved, 'Arrow key did not move the box')
+    await key('ArrowDown', 8); check(await evaluate('state().modelText') !== arrow, 'Shift arrow did not move the box')
+    await key('z', 2); await key('z', 2)
+    check(await evaluate('state().modelText') === moved, 'Arrow key undo did not restore position')
+    // Undo clears selection; select the box again by its border.
+    const edge = await evaluate(`(() => {const r=${stageRoot}.querySelector('[data-box]').getBoundingClientRect(); return {x:r.left+1,y:r.top+r.height/2}})()`)
+    await gesture(edge, 0, 0)
+    const handle = await boxPoint('[data-sm-box-handle="right"]')
+    await gesture(handle, 30, 0)
+    check(await evaluate('state().modelText') !== moved, 'Resize did not change width')
+    await key('z', 2); check(await evaluate('state().modelText') === moved, 'Resize undo failed')
+    await key('z', 2); check(await evaluate('state().modelText') === original, 'Move undo failed')
+  })
+  await scenario('box-drag-cancel-on-undo', async () => {
+    const original = await evaluate('editor.options.latest().analysis.text')
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'取消対象'}); await delay(200); await key('Escape')
+    const p = await boxPoint('[data-box][data-sm-selected]')
+    await mouse('mouseMoved',p); await mouse('mousePressed',p,{button:'left',buttons:1,clickCount:1})
+    await mouse('mouseMoved',{x:p.x+35,y:p.y+20},{button:'left',buttons:1})
+    await key('z',2)
+    await mouse('mouseReleased',{x:p.x+35,y:p.y+20},{button:'left',buttons:0,clickCount:1}); await delay(250)
+    check(await evaluate('state().modelText') === original, 'Undo during drag committed a stale gesture')
+  })
+  await scenario('box-drag-cancel-on-external-change', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.insertText', {text:'外部変更'}); await delay(200); await key('Escape')
+    const before = await evaluate('state().modelText'), p = await boxPoint('[data-box][data-sm-selected]')
+    try {
+      await mouse('mouseMoved',p); await mouse('mousePressed',p,{button:'left',buttons:1,clickCount:1})
+      await mouse('mouseMoved',{x:p.x+35,y:p.y+20},{button:'left',buttons:1})
+      await writeFile(fixture, Buffer.concat([sample, Buffer.from('\nexternal change\n')]))
+      await waitFor(`!editor.cancelHandleDrag`)
+      await mouse('mouseReleased',{x:p.x+35,y:p.y+20},{button:'left',buttons:0,clickCount:1}); await delay(250)
+      check(await evaluate('state().modelText') === before, 'External change committed a stale gesture')
+    } finally { await writeFile(fixture, sample) }
+  })
+  await scenario('box-convert-paragraph-undo', async () => {
+    const original = await evaluate('editor.options.latest().analysis.text')
+    await click(paragraph, 3); await key('Escape')
+    const p = await boxPoint('[data-sm-selected]')
+    await gesture(p, 35, 25)
+    check((await evaluate('state().modelText')).includes('data-box'), 'Paragraph was not converted')
+    await key('z', 2); check(await evaluate('state().modelText') === original, 'Paragraph conversion undo failed')
+  })
+  await scenario('box-convert-image-undo', async () => {
+    await evaluate(`document.querySelector('.slide-list-host').shadowRoot.querySelectorAll('.slot')[1].click()`); await delay(250)
+    const original = await evaluate('editor.options.latest().analysis.text')
+    const p = await boxPoint('img')
+    await mouse('mouseMoved',p); await mouse('mousePressed',p,{button:'left',buttons:1,clickCount:1}); await mouse('mouseReleased',p,{button:'left',buttons:0,clickCount:1}); await delay(200)
+    await gesture(p, 35, 25)
+    check((await evaluate('state().modelText')).includes('data-box'), 'Image was not converted')
+    await key('z', 2); check(await evaluate('state().modelText') === original, 'Image conversion undo failed')
+  })
   await scenario('box-empty-cancel', async () => {
     const original = await evaluate('editor.options.latest().analysis.text')
     await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
@@ -295,6 +372,18 @@ try {
     check((await evaluate('state().modelText')).includes('日本'), 'Box IME text was not committed')
     await key('z', 2)
     check(await evaluate('state().modelText') === original, 'One undo did not remove box and IME input')
+  })
+  await scenario('box-gesture-during-ime', async () => {
+    await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)
+    await waitFor('!!state().draft && !!state().editing')
+    await send('Input.imeSetComposition', {text:'にほん', selectionStart:3, selectionEnd:3})
+    check(await evaluate('state().pendingComposition'), 'IME composition did not start')
+    const before = await evaluate('state().modelText')
+    await evaluate(`(() => { const box = ${stageRoot}.querySelector('[data-box]'); const r = box.getBoundingClientRect(); box.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true,button:0,pointerId:77,clientX:r.left+1,clientY:r.top+r.height/2})) })()`)
+    check(await evaluate('state().pendingComposition && !editor.cancelHandleDrag && !editor.selectedElement'), 'A box gesture started during IME composition')
+    check(await evaluate('state().modelText') === before, 'IME gesture changed the source')
+    await send('Input.insertText', {text:'日本'}); await delay(250)
+    check((await evaluate('state().modelText')).includes('日本'), 'IME input could not finish after the rejected gesture')
   })
   await scenario('box-empty-after-deletion', async () => {
     await evaluate(`document.querySelector('button[title="テキストボックスを挿入"]').click()`)

@@ -3,6 +3,7 @@ export function beginHandleDrag(event: PointerEvent, frame: HTMLElement, callbac
   move(dx: number, dy: number): void
   finish(): void
   cancel(): void
+  clickThrough?(): boolean
 }): () => void {
   const win = frame.ownerDocument.defaultView!
   const rect = frame.getBoundingClientRect()
@@ -17,7 +18,7 @@ export function beginHandleDrag(event: PointerEvent, frame: HTMLElement, callbac
     win.removeEventListener('pointerup', released, true)
     win.clearTimeout(guardTimer)
   }
-  const guardClick = (e: MouseEvent) => { e.preventDefault(); e.stopImmediatePropagation(); removeClickGuard() }
+  const guardClick = (e: MouseEvent) => { if (!callbacks.clickThrough?.()) { e.preventDefault(); e.stopImmediatePropagation() }; removeClickGuard() }
   const released = (e: PointerEvent) => { if (e.pointerId === pointer) win.setTimeout(removeClickGuard, 0) }
   const guardTimer = win.setTimeout(removeClickGuard, 10000)
   win.addEventListener('click', guardClick, true)

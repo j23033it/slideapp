@@ -8,6 +8,7 @@ import type { ElementKind, ReadonlyCode } from '../editing'
 import { selectionFor } from '../editing/dom/selection'
 import { runElementOf, selectionInRun } from './caret'
 import { attachTableMenu, type TableMenuTarget } from './tableMenu'
+import type { BoxGeometry } from '../editing/boxPosition'
 import type { TableCommand, TableReasonCode } from '../editing/tableOperations'
 
 export interface SlideStageCallbacks {
@@ -22,6 +23,7 @@ export interface SlideStageCallbacks {
   onTableReason?(target: TableMenuTarget, command: TableCommand | 'delete-table'): TableReasonCode | undefined
   onTableCommand?(target: TableMenuTarget, command: TableCommand | 'delete-table'): void
   onImageResize?(id: string, width: number, slideWidth: number): void
+  onBoxPlace?(id: string, geometry: BoxGeometry): void
 }
 
 export interface SlideStageProps {
@@ -66,6 +68,7 @@ export function SlideStage({
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
       onElementDelete: (id) => callbacksRef.current.onElementDelete(id),
       onElementSelect: (kind, id) => callbacksRef.current.onElementSelect(kind, id),
+      onBoxPlace: (id, geometry) => callbacksRef.current.onBoxPlace?.(id, geometry),
       onImageResize: callbacks.onImageResize ? (id, width, slideWidth) => callbacksRef.current.onImageResize?.(id, width, slideWidth) : undefined,
     })
     editorRef.current = editor
@@ -84,6 +87,7 @@ export function SlideStage({
     }
     host.ownerDocument.addEventListener('selectionchange', rememberCursor)
     apiRef.current = {
+      cancelDrag: () => editor.cancelDrag(),
       endEditing: () => editor.endEditing(),
       insertionAnchor: () => editor.insertionAnchor(),
       selectElementOnRender: id => editor.selectElementOnRender(id),
