@@ -39,6 +39,7 @@ export interface StageApi {
   cancelDrag?(): void
   toggleBold?(): void
   endEditing(): void
+  clearElementSelection?(): void
   insertionAnchor?(): string | undefined
   selectElementOnRender?(id: string): void
   /** 最後に編集面内で観測したカーソル。タブを戻したときに使う */

@@ -1,8 +1,12 @@
 import type { ThemePreference } from '../platform'
 import { strings } from './strings'
 import { TablePicker } from './TablePicker'
+import { SlideshowButton } from './SlideshowButton'
+import type { SlideshowStart } from './slideshow'
 
 export interface ToolbarProps {
+  canSlideshow: boolean
+  onSlideshow: (start: SlideshowStart) => void
   theme: ThemePreference
   sidebarCollapsed: boolean
   busy: boolean
@@ -42,6 +46,8 @@ const THEME_ICON: Record<ThemePreference, string> = {
 }
 
 export function Toolbar({
+  canSlideshow,
+  onSlideshow,
   theme,
   sidebarCollapsed,
   busy,
@@ -163,6 +169,8 @@ export function Toolbar({
       >
         {strings.toolbar.exportPptx}
       </button>
+      <div class="toolbar-divider" />
+      <SlideshowButton disabled={!canSlideshow} onStart={onSlideshow} />
       <button
         type="button"
         class="toolbar-button"

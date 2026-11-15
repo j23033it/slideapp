@@ -116,7 +116,7 @@ export class StageEditor {
     }
   }
 
-  private clearElementSelection(notify = true): void {
+  clearElementSelection(notify = true): void {
     this.cancelHandleDrag?.()
     this.cancelHandleDrag = undefined
     const hadSelection = !!this.selectedElement

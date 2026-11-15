@@ -7,6 +7,11 @@ import type { ReadonlyCode } from '../editing'
 import type { SlideOperationCode } from '../editing'
 
 export const strings = {
+  slideshow: {
+    first: '最初から', firstTitle: '最初から開始 (F5)',
+    current: '現在のスライドから', currentTitle: '現在のスライドから開始 (Shift+F5)',
+    end: 'スライドショーの最後です。クリックすると終了します。',
+  },
   tableOperations: {
     size: (cols: number, rows: number) => `${cols} × ${rows} の表`,
     sizeDescription: '挿入する表の列数と行数（最大10列×8行）',
@@ -80,6 +85,7 @@ export const strings = {
   appName: 'SlideApp',
 
   toolbar: {
+    slideshow: 'スライドショー', slideshowTitle: '最初から開始 (F5)',
     bold: 'B', boldTitle: '太字 (Ctrl+B)', boldUnavailable: 'この要素は太字にできません',
     box: 'テキストボックス', boxTitle: 'テキストボックスを挿入',
     fontSize: '文字サイズ', fontSizeTitle: '文字の大きさを変更', fontSizeDefault: '既定', fontSizeUnavailable: 'テキストボックスで変更できます',

@@ -53,6 +53,10 @@ import { chooseImage, imageLine, insertImage } from './imageInsert'
 import { resizeImage } from '../editing/images'
 import { setBoxFontSize } from '../editing/boxes'
 import { placeBox } from '../editing/boxPosition'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { Slideshow } from './SlideshowView'
+import { enterFullscreen, restoreFullscreen, snapshotDeck, type SlideshowStart, type WindowState } from './slideshow'
+import type { RenderedDeck } from '../marp/renderer'
 
 const MIN_SIDEBAR_WIDTH = 120
 const MAX_SIDEBAR_WIDTH = 480
@@ -198,7 +202,7 @@ interface WorkspaceApi {
   prepare(reason: 'close' | 'update'): Promise<boolean>
   release(): void
   external(change: ExternalChange): void
-  state(): { dirty: boolean; busy: boolean; pending: boolean }
+  state(): { dirty: boolean; busy: boolean; pending: boolean; slideshow: boolean }
 }
 
 interface WorkspaceProps {
@@ -241,6 +245,11 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const workspaceAlive = useRef(true)
   const sessionRef = useRef<EditorSession | null>(null)
   const stageApi = useRef<StageApi | null>(null)
+  const [slideshow, setSlideshow] = useState<{ deck: RenderedDeck; current: number; start: SlideshowStart } | null>(null)
+  const slideshowRef = useRef(false)
+  const slideshowIndex = useRef(0)
+  const fullscreenPromise = useRef<Promise<WindowState> | null>(null)
+  const finishPromise = useRef<Promise<void> | null>(null)
   const editingRef = useRef(false)
   const currentRef = useRef(0)
   const pendingRef = useRef<PendingAction | null>(null)
@@ -326,6 +335,47 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       if (!stage.deferWhileComposing(resolve)) resolve()
     })
   }, [])
+
+  const finishSlideshow = useCallback((index = slideshowIndex.current): Promise<void> => {
+    if (finishPromise.current) return finishPromise.current
+    if (!slideshowRef.current) return Promise.resolve()
+    slideshowIndex.current = index
+    const task = (async () => {
+      try {
+        const previous = await fullscreenPromise.current
+        if (previous) await restoreFullscreen(getCurrentWindow(), previous)
+      } catch (error) { sync({ error: errorMessage(error) }) }
+      setSlideshow(null)
+      currentRef.current = index
+      sync({ current: index, detail: null })
+      slideshowRef.current = false
+      fullscreenPromise.current = null
+      const pending = pendingUpdateExternalRef.current
+      pendingUpdateExternalRef.current = null
+      if (pending && canApplyDiskResult(pending.observation, diskObservationRef.current)) externalRef.current(pending.change)
+    })()
+    finishPromise.current = task
+    void task.finally(() => { finishPromise.current = null })
+    return task
+  }, [sync])
+
+  const startSlideshowNow = useCallback(async (start: SlideshowStart) => {
+    if (slideshowRef.current || !sessionRef.current || updateInstallLockedRef.current || pendingRef.current || viewRef.current.busy) return
+    await waitForComposition()
+    const session = sessionRef.current
+    if (!session || slideshowRef.current || !activeWorkspaceRef.current || updateInstallLockedRef.current || pendingRef.current || viewRef.current.busy) return
+    stageApi.current?.cancelDrag?.()
+    stageApi.current?.endEditing()
+    stageApi.current?.clearElementSelection?.()
+    setBoxTarget(null)
+    const current = start === 'first' ? 0 : currentRef.current
+    slideshowIndex.current = current
+    slideshowRef.current = true
+    const deck = snapshotDeck(session.deck)
+    fullscreenPromise.current = enterFullscreen(getCurrentWindow())
+    setSlideshow({ deck, current, start })
+    try { await fullscreenPromise.current } catch (error) { sync({ error: errorMessage(error) }); await finishSlideshow(current) }
+  }, [finishSlideshow, sync, waitForComposition])
 
   /** 更新を始める前にIMEを確定し、未保存確認を既存の終了ダイアログへ渡す */
   const beforeUpdateInstall = useCallback(async (): Promise<boolean> => {
@@ -926,7 +976,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   const handleExternalNow = useCallback(
     async (change: ExternalChange, observation: DiskObservation, requestId: number) => {
       if (requestId !== externalChangeRequest.current) return
-      if (updateInstallLockedRef.current) {
+      if (updateInstallLockedRef.current || slideshowRef.current) {
         bufferUpdateExternal(change, observation)
         return
       }
@@ -964,7 +1014,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
           requestId !== externalChangeRequest.current ||
           !canApplyDiskResult(observation, diskObservationRef.current)
         ) return
-        if (updateInstallLockedRef.current) {
+        if (updateInstallLockedRef.current || slideshowRef.current) {
           bufferUpdateExternal(change, observation)
           return
         }
@@ -1019,7 +1069,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       }
       diskObservationRef.current = observation
       if (opening?.path === change.path) opening.observation = observation
-      if (updateInstallLockedRef.current) {
+      if (updateInstallLockedRef.current || slideshowRef.current) {
         if (sessionRef.current?.path === change.path) externalChangeRequest.current += 1
         bufferUpdateExternal(change, observation)
         return
@@ -1338,7 +1388,13 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!activeWorkspaceRef.current || updateInstallLockedRef.current || event.defaultPrevented) return
+      if (slideshowRef.current) { event.preventDefault(); event.stopImmediatePropagation(); return }
       if (pendingRef.current) return
+      if (event.key === 'F5' && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing && event.keyCode !== 229 && !stageApi.current?.isComposing() && !event.composedPath().some(node => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement)) {
+        event.preventDefault()
+        void startSlideshowNow(event.shiftKey ? 'current' : 'first')
+        return
+      }
       const mod = event.ctrlKey || event.metaKey
       if (mod && !event.altKey && event.key.toLowerCase() === 'e') {
         event.preventDefault()
@@ -1407,7 +1463,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [active, goBy, goTo, onSlideOperation, openDialog, restore, runPptxExport, runSave])
+  }, [active, goBy, goTo, onSlideOperation, openDialog, restore, runPptxExport, runSave, startSlideshowNow])
 
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((previous) => ({ ...previous, ...patch }))
@@ -1455,6 +1511,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
 
   apiRef.current = {
     leave: async () => {
+      await finishSlideshow()
       if (updateInstallLockedRef.current || pendingRef.current || view.busy) return false
       activationGeneration.current += 1
       await waitForComposition()
@@ -1477,6 +1534,7 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
       dirty: sessionRef.current ? hasUnsavedChanges(editorSessionSaveState(sessionRef.current)) : false,
       busy: view.busy || openingRef.current !== null,
       pending: pendingRef.current !== null,
+      slideshow: slideshowRef.current,
     }),
   }
 
@@ -1514,7 +1572,10 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
 
   return (
     <div class="app" inert={updateInstallLocked}>
+      {slideshow ? <Slideshow deck={slideshow.deck} current={slideshow.current} start={slideshow.start} onIndex={index => { slideshowIndex.current = index }} onExit={index => { void finishSlideshow(index) }} /> : null}
       {active && toolbarHost ? createPortal(<div inert={updateInstallLocked}><Toolbar
+        canSlideshow={!!session && !view.busy}
+        onSlideshow={start => { void startSlideshowNow(start) }}
         theme={settings.theme}
         sidebarCollapsed={sidebarCollapsed}
         busy={view.busy}
@@ -2071,6 +2132,7 @@ export function App() {
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (currentApi()?.state().slideshow) return
       if (event.defaultPrevented || !event.ctrlKey || event.altKey || lockedRef.current) return
       if (currentApi()?.state().pending) return
       const key = event.key.toLowerCase()
