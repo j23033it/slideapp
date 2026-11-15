@@ -1,5 +1,6 @@
 import type { SourceEdit } from '../document/model';
 import type { SlideSources } from './slides';
+import type { ElementSources } from './elements';
 
 export type ReadonlyCode = 'table' | 'code' | 'math' | 'image' | 'html' | 'emoji' | 'front-matter' |
   'comment' | 'generated' | 'ambiguous-source' | 'renderer-transform' | 'dom-mismatch' | 'nul' |
@@ -21,6 +22,7 @@ export interface Analysis {
   structure: string; inlineStructure: string[];
   /** Recorded before Marpit consumes the slide delimiter tokens. */
   slideSources?: SlideSources;
+  elementSources?: ElementSources;
   /** Unfilled paragraph/line: remove only this recorded insertion on finish. */
   draft?: { runId: string; edit: SourceEdit; before: { runId: string; offset: number } };
 }

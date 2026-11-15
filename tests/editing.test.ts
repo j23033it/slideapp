@@ -195,7 +195,7 @@ describe('Marp render equivalence', () => {
   ])('preserves original rendering for %j', source => {
     const expected = new Marp({ script: false }).render(source);
     const { analysis } = setup(source);
-    const unmarked = analysis.html.replace(/<span data-sm-run="[^"]+">([\s\S]*?)<\/span>/g, '$1').replace(/ data-sm-block="[^"]+"/g, '');
+    const unmarked = analysis.html.replace(/<span data-sm-run="[^"]+">([\s\S]*?)<\/span>/g, '$1').replace(/ data-sm-(?:block|element)="[^"]+"/g, '');
     expect(unmarked).toBe(expected.html);
     expect(analysis.css).toBe(expected.css);
   });

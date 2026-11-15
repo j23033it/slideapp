@@ -29,6 +29,18 @@ export const strings = {
       'slide-readonly': '読み取り専用のためスライドを操作できません',
     } satisfies Record<SlideOperationCode, string>,
   },
+  elementOperations: {
+    selected: {
+      paragraph: '選択: 段落', heading: '選択: 見出し', list: '選択: リスト', quote: '選択: 引用',
+      table: '選択: 表', code: '選択: コード', image: '選択: 画像',
+    },
+    reasons: {
+      'element-ambiguous': '要素の位置を特定できないため操作できません',
+      'element-structure-changed': '前後の要素の形が変わるため操作できません',
+      'element-heading-divider': 'headingDividerが有効なため操作できません',
+      'element-readonly': '読み取り専用または競合中のため操作できません',
+    },
+  },
   tabs: {
     label: '開いているファイル',
     open: '新しいタブでファイルを開く',

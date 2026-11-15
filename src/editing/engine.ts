@@ -8,6 +8,7 @@ import { getSegments, installTracking } from './tracking';
 import { planNewline, type NewlineKind } from './newline';
 import { emptyItemPositions, tokenSignature, withoutEmptyItemShells } from './empty';
 import { captureLists, planListIndent, type ListSnapshot, type ListIndentDirection } from './listIndent';
+import { collectElements, elementReason, planElementOperation, type ElementOperation, type ElementOperationResult } from './elements';
 import { reason, type Analysis, type Block, type EditResult, type ReadonlyReason, type Run } from './types';
 
 const engines = new WeakMap<object, EditingEngine>();
@@ -77,6 +78,7 @@ export interface EditingEngine {
   cancelDraft(text: string): NewlineResult;
   /** Commit pending text input/IME and finish drafts before calling. Indices are zero-based. */
   applySlideOperation(text: string, operation: SlideOperation, eols: readonly Eol[]): SlideOperationResult;
+  applyElementOperation(text: string, operation: ElementOperation, eols: readonly Eol[]): ElementOperationResult;
 }
 
 export type ListIndentResult = (Extract<EditResult<SourceEdit[]>, { ok: true }> & { cursor: Cursor }) | Extract<EditResult, { ok: false }>;
@@ -92,6 +94,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
   let pending: Analysis | undefined;
   let reuseIds: Analysis | undefined;
   let revision = 0;
+  let elementRevision = 0;
   const analysisTokens = new WeakMap<Analysis, Token[]>();
   const rawTokens = new WeakMap<Analysis, Token[]>();
   const tableEmptyPositions = new WeakMap<Analysis, number[]>();
@@ -102,6 +105,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
   md.core.ruler.before('marpit_slide', 'sm_slide_sources', state => {
     if (pending && !emptyPositions.length) {
       pending.slideSources = collectSlideSources(state.src, state.tokens, md);
+      pending.elementSources = collectElements(state.src, state.tokens, pending.slideSources, ++elementRevision, reuseIds?.elementSources);
       tableEmptyPositions.set(pending, findEmptyTableCells(state.src, state.tokens));
     }
   });
@@ -157,7 +161,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
         const positions = [...emptyItemPositions(text, actual), ...(tableEmptyPositions.get(analysis) ?? [])];
         if (extraEmpty !== undefined) positions.push(extraEmpty);
         if (positions.length) {
-          const editable = renderAnalysis(text, reuse, undefined, [...new Set(positions)].sort((a, b) => a - b));
+          const editable = renderAnalysis(text, analysis, undefined, [...new Set(positions)].sort((a, b) => a - b));
           // Permanent empty items may gain only their editable paragraph shell.
           if (extraEmpty === undefined && tokenSignature(withoutEmptyTableInlines(withoutEmptyItemShells(actual)), shape) !==
               tokenSignature(withoutEmptyTableInlines(withoutEmptyItemShells(analysisTokens.get(editable) ?? [])), shape)) {
@@ -165,6 +169,7 @@ export function createEngine(marp: MarpLike): EditingEngine {
           }
           rawTokens.set(editable, actual);
           editable.slideSources = analysis.slideSources;
+          editable.elementSources = analysis.elementSources;
           return editable;
         }
       }
@@ -360,7 +365,46 @@ export function createEngine(marp: MarpLike): EditingEngine {
     return { ok: true, ...plan, newText, analysis: after };
   }
 
-  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation };
+  function applyElementOperation(text: string, operation: ElementOperation, eols: readonly Eol[]): ElementOperationResult {
+    const before = current;
+    const fail = (code: Parameters<typeof elementReason>[0]): ElementOperationResult => {
+      current = before; return { ok: false, reason: elementReason(code) };
+    };
+    if (!before || before.text !== text || before.draft || !before.slideSources || !before.elementSources) return fail('element-ambiguous');
+    if (text.includes('\0')) return fail('element-readonly');
+    try { joinEols(text, eols); } catch { return fail('element-ambiguous'); }
+    const plan = planElementOperation(text, before.elementSources, before.slideSources, operation, eols);
+    if ('code' in plan) return fail(plan.code);
+    const target = operation.kind === 'delete' ? before.elementSources.elements.find(e => e.id === operation.elementId) : undefined;
+    const slide = operation.kind === 'delete' ? target!.slide : operation.slide;
+    const newText = replaceRange(text, plan);
+    let after: Analysis;
+    try { after = renderAnalysis(newText); } catch { return fail('element-structure-changed'); }
+    const newSources = after.elementSources;
+    const oldSlides = renderedSlideSignatures(before.html), newSlides = renderedSlideSignatures(after.html);
+    if (!newSources?.valid || !after.slideSources || after.slideSources.reason || !oldSlides || !newSlides ||
+        oldSlides.length !== newSlides.length || oldSlides.some((signature, index) => index !== slide && signature !== newSlides[index])) return fail('element-structure-changed');
+    const oldGroups = before.elementSources.signature[slide], newGroups = newSources.signature[slide];
+    if (operation.kind === 'delete') {
+      const expected = [...oldGroups], index = expected.indexOf(target!.signature);
+      if (index < 0) return fail('element-ambiguous');
+      expected.splice(index, 1);
+      if (JSON.stringify(expected) !== JSON.stringify(newGroups)) return fail('element-structure-changed');
+    } else {
+      const inserted = newSources.groups.filter(e => e.slide === slide && e.start >= plan.start && e.end <= plan.start + plan.insert.length);
+      if (JSON.stringify(inserted.map(e => e.kind)) !== JSON.stringify(operation.expectedKinds)) return fail('element-structure-changed');
+      const remaining = [...newGroups];
+      for (const element of inserted) {
+        const index = remaining.indexOf(element.signature);
+        if (index < 0) return fail('element-structure-changed');
+        remaining.splice(index, 1);
+      }
+      if (JSON.stringify(remaining) !== JSON.stringify(oldGroups)) return fail('element-structure-changed');
+    }
+    return { ok: true, edit: plan, newText, analysis: after };
+  }
+
+  const engine = { analyze, applyRunEdit, applyTableBreakDeletion, applyNewline, applyListIndent, cancelDraft, applySlideOperation, applyElementOperation };
   engines.set(marp, engine);
   return engine;
 }
@@ -443,6 +487,15 @@ function collect(source: string, tokens: Token[], analysis: Analysis, revision: 
 }
 
 function wrapRenderers(md: Markdown): void {
+  for (const type of ['fence', 'code_block']) {
+    const render = md.renderer.rules[type];
+    if (!render) continue;
+    md.renderer.rules[type] = (tokens, index, options, env, self) => {
+      const html = render(tokens, index, options, env, self);
+      const id = tokens[index].attrs?.find(([name]) => name === 'data-sm-element')?.[1];
+      return id ? html.replace(/^<pre(?=[\s>])/, `<pre data-sm-element="${id}"`) : html;
+    };
+  }
   const original = md.renderer.rules.text;
   md.renderer.rules.text = (tokens, index, options, env, self) => {
     const token = tokens[index];
