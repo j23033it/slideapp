@@ -389,11 +389,13 @@ export class StageEditor {
     const svgLabel = svgText && this.svgLabels.get(svgText)
     if (svgText && svgLabel) {
       this.endEditing()
+      this.clearElementSelection()
       this.beginSvgLabel(svgLabel.group, svgLabel.label)
       return
     }
     if (element.closest('svg:not([data-marpit-svg])')) {
       this.endEditing()
+      this.clearElementSelection()
       this.options.onNotice('html')
       return
     }
@@ -511,6 +513,7 @@ export class StageEditor {
     if (label && (event.key === 'Enter' || event.key === ' ') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing) {
       event.preventDefault(); event.stopPropagation()
       this.endEditing()
+      this.clearElementSelection()
       this.beginSvgLabel(label.group, label.label)
       return
     }
