@@ -17,7 +17,7 @@ interface TableSnapshot { rows: TableRow[]; columns: number; cells: string[][]; 
 /** Build coordinates from the same delimiter rules used for editable cells. */
 function readSnapshot(analysis: Analysis, elementId: string): TableSnapshot | undefined {
   const element = analysis.elementSources?.elements.find(e => e.id === elementId && e.kind === 'table');
-  if (!element || element.unsafe || !analysis.elementSources?.valid) return;
+  if (!element || !analysis.elementSources?.valid) return;
   const text = analysis.text, lines = text.split('\n');
   const first = text.slice(0, element.start).split('\n').length - 1;
   const raw = text.slice(element.start, element.end);
@@ -35,10 +35,13 @@ function readSnapshot(analysis: Analysis, elementId: string): TableSnapshot | un
     rows.push({ start, end, line, pipes: pipes.positions });
     if (i !== 1) {
       const blocks = analysis.blocks.filter(block => block.tableCell && block.lines?.[0] === line);
-      if (blocks.length !== columns || blocks.some(block => block.reason || !block.editable)) return;
-      cells.push(blocks.map(block => {
+      // A table-cell reason means the source slice did not match markdown-it's cell.
+      // Other read-only reasons concern text editing, not these delimiter coordinates.
+      if (blocks.length !== columns || blocks.some(block => block.reason?.code === 'table-cell')) return;
+      cells.push(blocks.map((block, column) => {
         const index = analysis.blocks.indexOf(block);
-        return JSON.stringify([analysis.inlineStructure[index], block.runs.map(id => analysis.runs.find(run => run.id === id)?.text)]);
+        const source = text.slice(pipes.positions[column] + 1, pipes.positions[column + 1]);
+        return JSON.stringify([source, analysis.inlineStructure[index], block.runs.map(id => analysis.runs.find(run => run.id === id)?.text)]);
       }));
     }
     start = end;
@@ -123,7 +126,7 @@ export function validateTableOperation(before: Analysis, after: Analysis, operat
   const { command, row, column } = operation;
   const expected = oldTable.cells.map(cells => [...cells]);
   let targetRow = row, targetColumn = column;
-  const empty = JSON.stringify([JSON.stringify([['text']]), ['']]);
+  const empty = JSON.stringify(['  ', JSON.stringify([['text']]), ['']]);
   if (command === 'insert-row-above' || command === 'insert-row-below') {
     targetRow = row + (command === 'insert-row-below' ? 1 : 0);
     expected.splice(targetRow, 0, Array(oldTable.columns).fill(empty));

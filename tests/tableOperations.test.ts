@@ -52,6 +52,37 @@ describe('table row and column operations', () => {
     if (result.ok && command.startsWith('insert')) expect(result.cursor).toBeDefined();
     model.undo(); expect(model.serialize()).toBe(raw); expect(model.hasBom).toBe(true); expect(model.canUndo).toBe(false);
   });
+  it.each(['`code`', 'before<br>after', '**bold**'])('preserves cells containing %s through every row and column operation', content => {
+    const raw = `| a |  b |\r\n| :---: | ---: |\n| ${content} | y |\r\n| keep  | z |`;
+    const cases: [TableCommand, string][] = [
+      ['insert-row-above', `| a |  b |\r\n| :---: | ---: |\n|  |  |\r\n| ${content} | y |\r\n| keep  | z |`],
+      ['insert-row-below', `| a |  b |\r\n| :---: | ---: |\n| ${content} | y |\r\n|  |  |\r\n| keep  | z |`],
+      ['delete-row', '| a |  b |\r\n| :---: | ---: |\n| keep  | z |'],
+      ['insert-column-left', `| a |  |  b |\r\n| :---: | --- | ---: |\n| ${content} |  | y |\r\n| keep  |  | z |`],
+      ['insert-column-right', `| a |  b |  |\r\n| :---: | ---: | --- |\n| ${content} | y |  |\r\n| keep  | z |  |`],
+      ['delete-column', `| a |\r\n| :---: |\n| ${content} |\r\n| keep  |`],
+    ];
+    for (const [command, expected] of cases) {
+      const { model, result } = apply(raw, command, 1, 1);
+      expect(result.ok, `${command}: ${result.ok ? '' : result.reason.code}`).toBe(true);
+      expect(model.serialize()).toBe(expected);
+      model.undo(); expect(model.serialize()).toBe(raw); expect(model.hasBom).toBe(true); expect(model.canUndo).toBe(false);
+    }
+  });
+  it('uses markdown-it delimiter rules for pipes inside inline code', () => {
+    const raw = '| a | b | c |\n| --- | --- | --- |\n| `left|right` | y |';
+    const { model, result } = apply(raw, 'delete-column', 1, 2);
+    expect(result.ok, result.ok ? '' : result.reason.code).toBe(true);
+    expect(model.serialize()).toBe('| a | b |\n| --- | --- |\n| `left|right` |');
+    model.undo(); expect(model.serialize()).toBe(raw); expect(model.canUndo).toBe(false);
+    const mismatch = apply('| a | b |\n| --- | --- |\n| `left|right` | y |', 'insert-row-below', 1, 1);
+    expect(mismatch.result).toMatchObject({ ok: false, reason: { code: 'table-unsupported' } });
+  });
+  it('still rejects deleting a table containing HTML', () => {
+    const { model, engine, elementId } = setup('| a | b |\n| --- | --- |\n| before<br>after | y |');
+    const result = applyElementTransaction(model, engine, { kind: 'delete', elementId });
+    expect(result.ok).toBe(false);
+  });
   it('supports a header-only table and one column', () => {
     const s = apply('| a |\n| --- |', 'insert-row-below');
     expect(s.result.ok, s.result.ok ? '' : s.result.reason.code).toBe(true);
