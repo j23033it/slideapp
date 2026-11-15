@@ -175,13 +175,34 @@ async function setup() {
     platform.pickMarkdownFile = async () => ${JSON.stringify(fixture)};
     // Avoid polluting the user's recent-file list; actual Rust open/read/watch remains in use.
     platform.recentFilesAdd = async () => [];
-    document.querySelector('.empty-open-button').click();
+    const openButton = document.querySelector('.empty-open-button');
+    if (openButton) openButton.click();
+    else {
+      // Settings restoration can replace the empty view between the initial
+      // wait and these dynamic imports. Reuse the restored fixture and trigger
+      // a stage render so the instrumentation observes its existing editor.
+      for (let i = 0; i < 100 && !document.querySelector('.slide-list-host')?.shadowRoot?.querySelectorAll('.slot').length; i++)
+        await new Promise(resolve => setTimeout(resolve, 50));
+      const slots = document.querySelector('.slide-list-host')?.shadowRoot?.querySelectorAll('.slot');
+      if (!slots || slots.length < 2) throw new Error('Restored fixture is not ready');
+      slots[1].click();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      slots[0].click();
+    }
   })()`)
   await waitFor(`!!window.editor?.adapter && !!document.querySelector('.stage-host')?.shadowRoot?.querySelector('[data-sm-run]')`)
   await delay(250)
 }
 async function scenario(name, run) {
-  await setup()
+  // The initial empty view can be replaced while asynchronous tab restoration
+  // is settling. Retry a fresh navigation if that happened during setup.
+  for (let attempt = 0; ; attempt++) {
+    try { await setup(); break }
+    catch (error) {
+      if (attempt >= 2 || !(String(error).includes("Cannot read properties of null (reading 'click')") ||
+          String(error).includes('Timed out: window.editingProbeNavigation'))) throw error
+    }
+  }
   let error
   try { await run() } catch (e) { error = e.message }
   const trace = await evaluate('trace')
@@ -348,6 +369,18 @@ try {
     await key('c',2)
     check((await evaluate(`trace.some(e => e.type === 'copy:capture')`)), 'Ctrl+C did not dispatch copy')
     check(await clipboardText() === paragraph.slice(1,8), 'Ctrl+C did not copy the selected text to the Windows clipboard')
+  })
+  await scenario('element-selection-delete-undo', async () => {
+    const original = await evaluate('editor.options.latest().analysis.text')
+    await click(paragraph, 3)
+    await key('Escape')
+    check(await evaluate(`!!document.querySelector('.stage-host').shadowRoot.querySelector('[data-sm-selected]')`), 'Escape did not select the element')
+    await key('Escape')
+    check(!await evaluate(`document.querySelector('.stage-host').shadowRoot.querySelector('[data-sm-selected]')`), 'Second Escape did not clear selection')
+    await click(paragraph, 3); await key('Escape'); await key('Delete')
+    check(!await evaluate(`editor.options.latest().analysis.text.includes(${JSON.stringify(paragraph)})`), 'Delete did not remove the selected element')
+    await key('z', 2)
+    check(await evaluate('editor.options.latest().analysis.text') === original, 'One Undo did not restore the deleted element')
   })
   await scenario('drag-before-editing', async () => {
     await drag(paragraph,1,8)

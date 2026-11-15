@@ -4,7 +4,7 @@
  * 編集終了時のスライド単位の再描画を持つ。
  */
 import type { Cursor, SourceEdit } from '../document'
-import { resolveCursor, type Analysis, type EditingEngine, type EditResult, type ReadonlyCode } from '../editing'
+import { resolveCursor, type Analysis, type EditingEngine, type EditResult, type ElementKind, type ReadonlyCode } from '../editing'
 import { bindEditing } from '../editing/dom'
 import { selectionFor } from '../editing/dom/selection'
 import type { RenderedDeck } from '../marp/renderer'
@@ -20,6 +20,7 @@ import {
 import { planBoundaryDeletion, areRunsDomAdjacent } from './runDeletion'
 import { CompositionGate } from './session'
 import { strings } from './strings'
+import { selectionOutlineWidth, toSlideRect } from './elementGeometry'
 
 export type EditSuccess = Extract<EditResult<SourceEdit | readonly SourceEdit[]>, { ok: true }>
 
@@ -42,6 +43,8 @@ export interface StageEditorOptions {
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
   onHistory(direction: 'undo' | 'redo'): void
+  onElementDelete?(id: string): boolean
+  onElementSelect?(kind: ElementKind | null): void
 }
 
 function labelForBlock(block: HTMLElement | null): string {
@@ -77,6 +80,85 @@ export class StageEditor {
   private suppressEnterUntil = 0
   private recoveringDraftSelection = false
   private pointerSelection: Range | null | undefined
+  private selectedElement: string | null = null
+  private selectedStyle?: { element: HTMLElement; outline: string; outlinePriority: string; offset: string; offsetPriority: string; tabindex: string | null }
+  private imageHandles?: HTMLDivElement
+  private resizeObserver?: ResizeObserver
+  private readonly onResize = (): void => {
+    const element = this.root.querySelector<HTMLElement>('[data-sm-selected]')
+    if (!element) return
+    const width = selectionOutlineWidth(element)
+    element.style.outlineWidth = `${width}px`
+    element.style.outlineOffset = `${width}px`
+    this.positionImageHandles(element)
+  }
+
+  private positionImageHandles(element: HTMLElement): void {
+    const frame = element.closest<HTMLElement>('.frame'), handles = this.imageHandles
+    if (!frame || !handles) return
+    const rect = toSlideRect(element.getBoundingClientRect(), frame.getBoundingClientRect(), frame.offsetWidth, frame.offsetHeight)
+    if (!rect) return
+    Object.assign(handles.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` })
+    for (const handle of handles.children) {
+      const size = 8 / rect.scaleX
+      Object.assign((handle as HTMLElement).style, { width: `${size}px`, height: `${size}px`, borderWidth: `${1 / rect.scaleX}px` })
+    }
+  }
+
+  private clearElementSelection(notify = true): void {
+    const hadSelection = !!this.selectedElement
+    const saved = this.selectedStyle
+    const element = saved?.element
+    if (element && saved) {
+      element.removeAttribute('data-sm-selected')
+      if (saved.outline) element.style.setProperty('outline', saved.outline, saved.outlinePriority)
+      else element.style.removeProperty('outline')
+      if (saved.offset) element.style.setProperty('outline-offset', saved.offset, saved.offsetPriority)
+      else element.style.removeProperty('outline-offset')
+      if (saved.tabindex === null) element.removeAttribute('tabindex')
+      else element.setAttribute('tabindex', saved.tabindex)
+    }
+    this.selectedStyle = undefined
+    this.imageHandles?.remove()
+    this.imageHandles = undefined
+    this.selectedElement = null
+    if (notify && hadSelection) this.options.onElementSelect?.(null)
+  }
+
+  private selectElement(id: string, notify = true): void {
+    this.clearElementSelection(false)
+    const source = this.analysis.elementSources?.elements.find(entry => entry.id === id && entry.slide === this.current)
+    const container = this.root.querySelector<HTMLElement>(`[data-sm-element="${id}"]`)
+    const element = source?.kind === 'image' ? container?.querySelector<HTMLElement>('img') : container
+    if (!element || !source) return
+    this.selectedElement = id
+    this.selectedStyle = { element, outline: element.style.getPropertyValue('outline'), outlinePriority: element.style.getPropertyPriority('outline'),
+      offset: element.style.getPropertyValue('outline-offset'), offsetPriority: element.style.getPropertyPriority('outline-offset'), tabindex: element.getAttribute('tabindex') }
+    element.dataset.smSelected = ''
+    // The frame is scaled to fit. Keep the outline two screen pixels wide.
+    const width = selectionOutlineWidth(element)
+    element.style.outline = `${width}px solid var(--sm-accent, #0f6cbd)`
+    element.style.outlineOffset = `${width}px`
+    element.tabIndex = -1
+    element.focus({ preventScroll: true })
+    if (source.kind === 'image') {
+      const frame = element.closest<HTMLElement>('.frame')
+      if (frame) {
+        const handles = document.createElement('div')
+        handles.setAttribute('aria-hidden', 'true')
+        Object.assign(handles.style, { position: 'absolute', pointerEvents: 'none' })
+        for (const [x, y] of [['0', '0'], ['100%', '0'], ['0', '100%'], ['100%', '100%']]) {
+          const handle = document.createElement('span')
+          Object.assign(handle.style, { position: 'absolute', left: x, top: y, transform: 'translate(-50%, -50%)', boxSizing: 'border-box', background: 'white', borderStyle: 'solid', borderColor: 'var(--sm-accent, #0f6cbd)' })
+          handles.append(handle)
+        }
+        frame.append(handles)
+        this.imageHandles = handles
+        this.positionImageHandles(element)
+      }
+    }
+    if (notify) this.options.onElementSelect?.(source.kind)
+  }
 
   private readonly onPointerDown = (): void => {
     const selection = selectionFor(this.root)
@@ -162,6 +244,15 @@ export class StageEditor {
     this.pointerSelection = undefined
     if (this.clickEndsSelection(element, event, previousSelection)) return
 
+    const candidate = element.closest<HTMLElement>('[data-sm-element]')
+    const sourceElement = this.analysis.elementSources?.elements.find(entry => entry.id === candidate?.dataset.smElement)
+    this.clearElementSelection()
+    if (sourceElement?.kind === 'image' && element.closest('img')) {
+      this.endEditing()
+      this.selectElement(sourceElement.id)
+      return
+    }
+
     let runElement = element.closest<HTMLElement>('[data-sm-run]')
     const clickedId = runElement?.dataset.smRun
     let run = this.analysis.runs.find((entry) => entry.id === clickedId)
@@ -207,6 +298,7 @@ export class StageEditor {
 
     const code = run?.reason?.code ?? block?.reason?.code ?? reasonForElement(element)
     this.endEditing()
+    if (sourceElement && (!element.closest('img') || sourceElement.kind === 'image')) this.selectElement(sourceElement.id)
     this.options.onNotice(code)
   }
 
@@ -253,6 +345,22 @@ export class StageEditor {
     }
     this.settleComposition()
     this.cancelAbandonedDraft()
+    if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (this.editing) {
+        const selected = runElementOf(selectionFor(this.root)?.focusNode ?? null)?.closest<HTMLElement>('[data-sm-element]')?.dataset.smElement
+        event.preventDefault(); event.stopPropagation()
+        this.endEditing()
+        if (selected) this.selectElement(selected)
+      } else if (this.selectedElement) {
+        event.preventDefault(); event.stopPropagation(); this.clearElementSelection()
+      }
+      return
+    }
+    if (!this.editing && this.selectedElement && (event.key === 'Delete' || event.key === 'Backspace') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault(); event.stopPropagation()
+      if (this.options.onElementDelete?.(this.selectedElement)) this.clearElementSelection()
+      return
+    }
     if (!this.editing) return
     // 未入力の空行（段落・softbreak）の先頭での Backspace は、改行の仮編集を取り消す。
     if (event.key === 'Backspace' && !event.ctrlKey && !event.metaKey && !event.altKey && this.cancelDraftAtLineStart()) {
@@ -453,6 +561,11 @@ export class StageEditor {
     root.addEventListener('compositionend', this.onCompositionEnd, true)
     root.addEventListener('blur', this.onBlur, true)
     root.ownerDocument.addEventListener('selectionchange', this.onSelectionChange)
+    root.ownerDocument.defaultView?.addEventListener('resize', this.onResize)
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(this.onResize)
+      this.resizeObserver.observe(root.host)
+    }
   }
 
   get root(): ShadowRoot {
@@ -461,6 +574,8 @@ export class StageEditor {
 
   /** デッキを反映し、編集アダプタを作り直す。`focus` があればその位置へカーソルを戻す */
   render(deck: RenderedDeck, analysis: Analysis, current: number, focus?: StageFocus): void {
+    const selected = current === this.current && analysis === this.analysis ? this.selectedElement : null
+    this.clearElementSelection(false)
     this.endEditingSilently()
     this.analysis = analysis
     this.deck = deck
@@ -468,6 +583,8 @@ export class StageEditor {
     this.surface.update(deck, current)
     this.bindEditingSession(analysis)
     this.decorate(this.analysis)
+    this.selectedElement = null
+    if (selected) this.selectElement(selected, false)
     if (focus && focus.seq !== this.lastFocusSeq) {
       this.lastFocusSeq = focus.seq
       this.focusRun(focus.cursor)
@@ -502,6 +619,8 @@ export class StageEditor {
     root.removeEventListener('compositionend', this.onCompositionEnd, true)
     root.removeEventListener('blur', this.onBlur, true)
     root.ownerDocument.removeEventListener('selectionchange', this.onSelectionChange)
+    root.ownerDocument.defaultView?.removeEventListener('resize', this.onResize)
+    this.resizeObserver?.disconnect()
     this.endEditingSilently()
   }
 

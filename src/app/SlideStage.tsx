@@ -4,7 +4,7 @@ import { SlideSurface } from '../marp/surface'
 import type { EditorSession, StageApi } from './session'
 import { StageEditor, type EditSuccess, type EditingCursors } from './stageEditor'
 import type { Cursor } from '../document'
-import type { ReadonlyCode } from '../editing'
+import type { ElementKind, ReadonlyCode } from '../editing'
 import { selectionFor } from '../editing/dom/selection'
 import { runElementOf, selectionInRun } from './caret'
 
@@ -15,6 +15,8 @@ export interface SlideStageCallbacks {
   onCommit(result: EditSuccess, cursors: EditingCursors): void
   onCrossRun(result: EditSuccess, target: Cursor, before?: Cursor): void
   onHistory(direction: 'undo' | 'redo'): void
+  onElementDelete(id: string): boolean
+  onElementSelect(kind: ElementKind | null): void
 }
 
 export interface SlideStageProps {
@@ -57,6 +59,8 @@ export function SlideStage({
       onCommit: (result, cursors) => callbacksRef.current.onCommit(result, cursors),
       onCrossRun: (result, target, before) => callbacksRef.current.onCrossRun(result, target, before),
       onHistory: (direction) => callbacksRef.current.onHistory(direction),
+      onElementDelete: (id) => callbacksRef.current.onElementDelete(id),
+      onElementSelect: (kind) => callbacksRef.current.onElementSelect(kind),
     })
     editorRef.current = editor
     let cursor: Cursor | undefined

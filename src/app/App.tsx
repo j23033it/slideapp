@@ -1020,6 +1020,34 @@ function TabWorkspace({ path: initialPath, rememberRecent, active, settings, set
   externalRef.current = handleExternal
 
   const stageCallbacks: SlideStageCallbacks = {
+    onElementSelect: (kind) => sync({ detail: kind ? strings.elementOperations.selected[kind] : null }),
+    onElementDelete: (id) => {
+      const session = sessionRef.current
+      if (!session || session.model.state === 'readonly' || session.conflict || updateInstallLockedRef.current) {
+        sync({ detail: strings.elementOperations.reasons['element-readonly'] })
+        return false
+      }
+      const result = session.renderer.editing.applyElementOperation(session.model.text, { kind: 'delete', elementId: id }, session.model.eols)
+      if (!result.ok) {
+        sync({ detail: strings.elementOperations.reasons[result.reason.code] })
+        return false
+      }
+      try {
+        const deck = session.renderer.update(result.analysis, session.baseDir)
+        session.model.editTransaction([result.edit], { before: { runId: '', offset: 0, slideIndex: currentRef.current }, after: { runId: '', offset: 0, slideIndex: currentRef.current } })
+        session.analysis = result.analysis
+        session.deck = deck
+        session.focus = undefined
+        syncDeck({ detail: null })
+        return true
+      } catch {
+        const restored = session.renderer.editing.analyze(session.model.text)
+        session.analysis = restored
+        session.deck = session.renderer.update(restored, session.baseDir)
+        sync({ detail: strings.elementOperations.reasons['element-ambiguous'] })
+        return false
+      }
+    },
     onBegin: (label) => {
       if (updateInstallLockedRef.current) return
       editingRef.current = true
