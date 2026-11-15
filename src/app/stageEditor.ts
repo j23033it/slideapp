@@ -81,6 +81,7 @@ export class StageEditor {
   private editing = false
   private suppressFinish = false
   private pendingBefore: Cursor | undefined
+  private rejectionCount = 0
   private lastFocusSeq = -1
   private readonly composition = new CompositionGate()
   private compositionEndToken: number | null = null
@@ -619,6 +620,11 @@ export class StageEditor {
   toggleBold(): void {
     if (this.hasPendingComposition()) return
     if (!this.options.canBold?.()) { this.options.onNotice('element-readonly'); return }
+    // Commit retained DOM text before using the engine's current analysis. A
+    // rejected commit has already reported its reason and must stop formatting.
+    const rejections = this.rejectionCount
+    this.settleComposition()
+    if (this.rejectionCount !== rejections) return
     if (this.selectedElement) {
       if (!this.options.onElementBold) return
       const result = this.engine.applyElementBold(this.analysis.text, this.selectedElement)
@@ -847,6 +853,7 @@ export class StageEditor {
         this.options.onCommit(result, { before, after: this.currentCursor(true) })
       },
       onReject: (why) => {
+        this.rejectionCount++
         this.pendingBefore = undefined
         this.options.onNotice(why.code)
       },
