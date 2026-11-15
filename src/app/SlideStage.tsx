@@ -7,6 +7,8 @@ import type { Cursor } from '../document'
 import type { ElementKind, ReadonlyCode } from '../editing'
 import { selectionFor } from '../editing/dom/selection'
 import { runElementOf, selectionInRun } from './caret'
+import { attachTableMenu, type TableMenuTarget } from './tableMenu'
+import type { TableCommand, TableReasonCode } from '../editing/tableOperations'
 
 export interface SlideStageCallbacks {
   onBegin(label: string): void
@@ -17,6 +19,8 @@ export interface SlideStageCallbacks {
   onHistory(direction: 'undo' | 'redo'): void
   onElementDelete(id: string): boolean
   onElementSelect(kind: ElementKind | null): void
+  onTableReason?(target: TableMenuTarget, command: TableCommand | 'delete-table'): TableReasonCode | undefined
+  onTableCommand?(target: TableMenuTarget, command: TableCommand | 'delete-table'): void
 }
 
 export interface SlideStageProps {
@@ -63,6 +67,11 @@ export function SlideStage({
       onElementSelect: (kind) => callbacksRef.current.onElementSelect(kind),
     })
     editorRef.current = editor
+    const disposeTableMenu = attachTableMenu(surface.root, {
+      accepts: target => !!callbacksRef.current.onTableCommand && editor.isTableActive(target.elementId),
+      reason: (target, command) => callbacksRef.current.onTableReason?.(target, command),
+      run: (target, command) => callbacksRef.current.onTableCommand?.(target, command),
+    })
     let cursor: Cursor | undefined
     const rememberCursor = () => {
       const root = host.shadowRoot
@@ -74,12 +83,15 @@ export function SlideStage({
     host.ownerDocument.addEventListener('selectionchange', rememberCursor)
     apiRef.current = {
       endEditing: () => editor.endEditing(),
+      insertionAnchor: () => editor.insertionAnchor(),
+      selectElementOnRender: id => editor.selectElementOnRender(id),
       captureCursor: () => { rememberCursor(); return cursor },
       isComposing: () => editor.isComposing(),
       deferWhileComposing: (action) => editor.deferWhileComposing(action),
     }
 
     return () => {
+      disposeTableMenu()
       host.ownerDocument.removeEventListener('selectionchange', rememberCursor)
       apiRef.current = null
       editorRef.current = null

@@ -2,10 +2,31 @@
  * 画面に出す文言はすべてここに集約する。
  * 文言の調整はこのファイルだけで完結させる（コンポーネントに直書きしない）。
  */
+import type { TableCommand, TableReasonCode } from '../editing/tableOperations'
 import type { ReadonlyCode } from '../editing'
 import type { SlideOperationCode } from '../editing'
 
 export const strings = {
+  tableOperations: {
+    size: (cols: number, rows: number) => `${cols} × ${rows} の表`,
+    sizeDescription: '挿入する表の列数と行数（最大10列×8行）',
+    labels: {
+      'insert-row-above': '上に行を挿入', 'insert-row-below': '下に行を挿入',
+      'insert-column-left': '左に列を挿入', 'insert-column-right': '右に列を挿入',
+      'delete-row': '行を削除', 'delete-column': '列を削除', 'delete-table': '表を削除',
+    } satisfies Record<TableCommand | 'delete-table', string>,
+    descriptions: {
+      'insert-row-above': '選択した行の上に新しい行を追加', 'insert-row-below': '選択した行の下に新しい行を追加',
+      'insert-column-left': '選択した列の左に新しい列を追加', 'insert-column-right': '選択した列の右に新しい列を追加',
+      'delete-row': '選択した行を削除', 'delete-column': '選択した列を削除', 'delete-table': '表全体を削除',
+    } satisfies Record<TableCommand | 'delete-table', string>,
+    reasons: {
+      'table-unsupported': 'この形式の表は行・列を編集できません', 'table-header-row': '見出し行は挿入・削除できません',
+      'table-last-column': '最後の1列は削除できません', 'element-ambiguous': '要素の位置を特定できないため操作できません',
+      'element-structure-changed': '前後の要素の形が変わるため操作できません', 'element-heading-divider': 'headingDividerが有効なため操作できません',
+      'element-readonly': '読み取り専用または競合中のため操作できません',
+    } satisfies Record<TableReasonCode, string>,
+  },
   slideOperations: {
     labels: {
       add: '新しいスライド',
@@ -50,6 +71,9 @@ export const strings = {
   appName: 'SlideApp',
 
   toolbar: {
+    table: '表', tableTitle: '表を挿入',
+    noFile: 'ファイルが開かれていません', readonly: '読み取り専用のため操作できません',
+    conflict: 'ファイルが競合しているため操作できません', headingDivider: 'headingDividerが有効なため操作できません',
     sidebarToggleShow: 'スライド一覧を表示',
     sidebarToggleHide: 'スライド一覧を折りたたむ',
     open: '開く',
